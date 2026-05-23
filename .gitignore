@@ -1,0 +1,13 @@
+build/
+.vs/
+out/
+*.user
+*.suo
+*.VC.db
+*.VC.VC.opendb
+*.log
+*.tmp
+*.db
+*.db-shm
+*.db-wal
+*.dib
