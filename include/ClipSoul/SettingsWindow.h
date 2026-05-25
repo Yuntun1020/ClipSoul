@@ -4,6 +4,8 @@
 
 #include <Windows.h>
 
+#include <string>
+
 namespace ClipSoul {
 
 class App;
@@ -18,15 +20,35 @@ public:
 
 private:
     void LoadToControls();
-    void SaveFromControls();
+    bool SaveFromControls();
     void ApplyBackdrop();
+    void Paint();
+    void TogglePause();
+    void ToggleStartup();
+    void BrowseStorageDirectory();
+    void SetThemeMode(int mode);
+    void ResetHotkeyToDefault();
+    void StartHotkeyCapture();
+    void SetCapturedHotkey(WPARAM vk);
     static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam);
 
     HINSTANCE instance_;
     HWND hwnd_ = nullptr;
-    HWND limit_edit_ = nullptr;
-    HWND paused_check_ = nullptr;
-    HWND startup_check_ = nullptr;
+    std::wstring limit_text_;
+    std::wstring storage_path_;
+    bool storage_save_failed_ = false;
+    bool paused_ = false;
+    bool startup_ = false;
+    bool capturing_hotkey_ = false;
+    bool editing_limit_ = false;
+    bool replace_limit_on_next_digit_ = false;
+    unsigned hotkey_modifiers_ = 0;
+    unsigned hotkey_vk_ = 0;
+    bool hotkey_conflict_ = false;
+    int theme_mode_ = 0;
+    bool tracking_mouse_ = false;
+    int hover_target_ = 0;
+    float hover_progress_ = 0.0f;
     HistoryStore& store_;
     App& app_;
 };

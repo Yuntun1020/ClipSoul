@@ -42,6 +42,7 @@ struct HistoryItem {
     std::wstring content_hash;
     bool is_pinned = false;
     bool is_favorite = false;
+    bool is_phrase = false;
 };
 
 struct HistoryQuery {
@@ -59,7 +60,14 @@ struct AppSettings {
     bool start_with_windows = false;
     unsigned hotkey_modifiers = 0;
     unsigned hotkey_vk = 0;
+    int theme_mode = 0; // 0 system, 1 light, 2 dark
 };
+
+constexpr unsigned kDefaultHotkeyModifiers = 0x0001; // MOD_ALT
+constexpr unsigned kDefaultHotkeyVk = 'C';
+
+void ApplyAppSettingsDefaults(AppSettings& settings);
+std::wstring FormatHotkey(unsigned modifiers, unsigned vk);
 
 class HistoryStore {
 public:
@@ -74,6 +82,7 @@ public:
     AppSettings LoadSettings() const;
     void SaveSettings(const AppSettings& settings);
     bool Add(const CapturedContent& content);
+    bool AddFavoritePhrase(std::wstring_view text);
     std::vector<HistoryItem> Recent(int limit, std::wstring_view query) const;
     std::vector<HistoryItem> Query(const HistoryQuery& query) const;
     std::optional<HistoryItem> Get(int64_t id) const;

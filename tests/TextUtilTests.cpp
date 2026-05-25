@@ -26,8 +26,12 @@ TEST_CASE(StableHashChangesWhenInputChanges) {
 
 TEST_CASE(DetectsHttpLinks) {
     REQUIRE(ClipSoul::LooksLikeUrl(L"https://example.com/path"));
+    REQUIRE(ClipSoul::LooksLikeUrl(L"https://blog.csdn.net/libra1_long_article/details/123456789?spm=1001.2014.3001.5501#comments"));
+    REQUIRE(ClipSoul::LooksLikeUrl(L" https://example.com/a/b/c?x=1&y=two#frag "));
+    REQUIRE(ClipSoul::LooksLikeUrl(L"https://example.com/path."));
     REQUIRE(ClipSoul::LooksLikeUrl(L"http://localhost:3000"));
     REQUIRE(!ClipSoul::LooksLikeUrl(L"not a url"));
+    REQUIRE(!ClipSoul::LooksLikeUrl(L"https://example.com/path extra words"));
 }
 
 TEST_CASE(FileNameFromPathPreservesExtension) {

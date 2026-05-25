@@ -120,6 +120,41 @@ void BindText(sqlite3_stmt* stmt, int index, const std::string& value) {
 
 } // namespace
 
+void ApplyAppSettingsDefaults(AppSettings& settings) {
+    constexpr unsigned legacy_modifiers = 0x0002 | 0x0004; // MOD_CONTROL | MOD_SHIFT
+    constexpr unsigned legacy_vk = 'V';
+    const bool missing_hotkey = settings.hotkey_modifiers == 0 || settings.hotkey_vk == 0;
+    const bool legacy_hotkey = settings.hotkey_modifiers == legacy_modifiers && settings.hotkey_vk == legacy_vk;
+    if (missing_hotkey || legacy_hotkey) {
+        settings.hotkey_modifiers = kDefaultHotkeyModifiers;
+        settings.hotkey_vk = kDefaultHotkeyVk;
+    }
+}
+
+std::wstring FormatHotkey(unsigned modifiers, unsigned vk) {
+    std::wstring label;
+    auto append = [&](std::wstring_view part) {
+        if (!label.empty()) {
+            label += L"+";
+        }
+        label += part;
+    };
+    if ((modifiers & 0x0002) != 0) append(L"Ctrl");
+    if ((modifiers & 0x0001) != 0) append(L"Alt");
+    if ((modifiers & 0x0004) != 0) append(L"Shift");
+    if ((modifiers & 0x0008) != 0) append(L"Win");
+    if (vk >= L'A' && vk <= L'Z') {
+        append(std::wstring(1, static_cast<wchar_t>(vk)));
+    } else if (vk >= L'0' && vk <= L'9') {
+        append(std::wstring(1, static_cast<wchar_t>(vk)));
+    } else {
+        wchar_t value[16]{};
+        swprintf_s(value, L"VK_%u", vk);
+        append(value);
+    }
+    return label.empty() ? L"未设置" : label;
+}
+
 struct HistoryStore::Impl {
     sqlite3* db = nullptr;
     std::filesystem::path path;
@@ -165,10 +200,12 @@ void HistoryStore::Open(const std::filesystem::path& database_path) {
          "search_text TEXT NOT NULL DEFAULT '',"
          "content_hash TEXT NOT NULL,"
          "is_pinned INTEGER NOT NULL DEFAULT 0,"
-         "is_favorite INTEGER NOT NULL DEFAULT 0"
+         "is_favorite INTEGER NOT NULL DEFAULT 0,"
+         "is_phrase INTEGER NOT NULL DEFAULT 0"
          ");");
     TryExec(impl_->db, "ALTER TABLE history_items ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0;");
     TryExec(impl_->db, "ALTER TABLE history_items ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0;");
+    TryExec(impl_->db, "ALTER TABLE history_items ADD COLUMN is_phrase INTEGER NOT NULL DEFAULT 0;");
     Exec(impl_->db,
          "CREATE INDEX IF NOT EXISTS idx_history_sort ON history_items(is_pinned DESC, created_at DESC, id DESC);");
     Exec(impl_->db,
@@ -202,6 +239,8 @@ AppSettings HistoryStore::LoadSettings() const {
             settings.hotkey_modifiers = static_cast<unsigned>(std::stoul(value));
         } else if (key == "hotkey_vk") {
             settings.hotkey_vk = static_cast<unsigned>(std::stoul(value));
+        } else if (key == "theme_mode") {
+            settings.theme_mode = std::clamp(std::stoi(value), 0, 2);
         }
     }
     return settings;
@@ -229,6 +268,7 @@ void HistoryStore::SaveSettings(const AppSettings& settings) {
     save("start_with_windows", settings.start_with_windows ? "1" : "0");
     save("hotkey_modifiers", std::to_string(settings.hotkey_modifiers));
     save("hotkey_vk", std::to_string(settings.hotkey_vk));
+    save("theme_mode", std::to_string(std::clamp(settings.theme_mode, 0, 2)));
 
     EnforceLimit();
 }
@@ -269,6 +309,51 @@ bool HistoryStore::Add(const CapturedContent& content) {
     return true;
 }
 
+bool HistoryStore::AddFavoritePhrase(std::wstring_view text) {
+    if (!impl_->db) {
+        throw std::runtime_error("database is not open");
+    }
+
+    const auto normalized = NormalizeWhitespace(text);
+    if (normalized.empty()) {
+        return false;
+    }
+
+    const auto hash = StableHash(normalized);
+    {
+        Statement update(impl_->db,
+                         "UPDATE history_items SET is_favorite = 1, is_phrase = 1, text = ?, preview = ?, search_text = ? "
+                         "WHERE content_hash = ?;");
+        BindText(update.get(), 1, normalized);
+        BindText(update.get(), 2, normalized);
+        BindText(update.get(), 3, normalized);
+        BindText(update.get(), 4, hash);
+        if (sqlite3_step(update.get()) != SQLITE_DONE) {
+            ThrowSqlite(impl_->db, "sqlite convert favorite phrase failed");
+        }
+        if (sqlite3_changes(impl_->db) > 0) {
+            return true;
+        }
+    }
+
+    Statement stmt(impl_->db,
+                   "INSERT INTO history_items(kind, created_at, text, preview, search_text, content_hash, is_favorite, is_phrase) "
+                   "VALUES(?, ?, ?, ?, ?, ?, 1, 1);");
+    sqlite3_bind_int(stmt.get(), 1, static_cast<int>(ClipboardKind::Text));
+    sqlite3_bind_int64(stmt.get(), 2, NowUnixSeconds());
+    BindText(stmt.get(), 3, normalized);
+    BindText(stmt.get(), 4, normalized);
+    BindText(stmt.get(), 5, normalized);
+    BindText(stmt.get(), 6, hash);
+
+    if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
+        ThrowSqlite(impl_->db, "sqlite insert favorite phrase failed");
+    }
+
+    EnforceLimit();
+    return true;
+}
+
 std::vector<HistoryItem> HistoryStore::Recent(int limit, std::wstring_view query) const {
     HistoryQuery history_query;
     history_query.limit = limit;
@@ -283,7 +368,7 @@ std::vector<HistoryItem> HistoryStore::Query(const HistoryQuery& query) const {
 
     std::ostringstream sql;
     sql << "SELECT id, kind, created_at, text, html, files, payload_path, preview, search_text, content_hash, "
-           "is_pinned, is_favorite FROM history_items WHERE 1=1";
+           "is_pinned, is_favorite, is_phrase FROM history_items WHERE 1=1";
 
     const bool has_query = !NormalizeWhitespace(query.text).empty();
     if (has_query) {
@@ -305,6 +390,8 @@ std::vector<HistoryItem> HistoryStore::Query(const HistoryQuery& query) const {
     }
     if (query.favorites_only) {
         sql << " AND is_favorite = 1";
+    } else {
+        sql << " AND is_phrase = 0";
     }
     sql << " ORDER BY is_pinned DESC, created_at DESC, id DESC LIMIT ?;";
 
@@ -339,6 +426,7 @@ std::vector<HistoryItem> HistoryStore::Query(const HistoryQuery& query) const {
         item.content_hash = DbText(stmt.get(), 9);
         item.is_pinned = sqlite3_column_int(stmt.get(), 10) != 0;
         item.is_favorite = sqlite3_column_int(stmt.get(), 11) != 0;
+        item.is_phrase = sqlite3_column_int(stmt.get(), 12) != 0;
         items.push_back(std::move(item));
     }
     return items;
@@ -351,7 +439,7 @@ std::optional<HistoryItem> HistoryStore::Get(int64_t id) const {
 
     Statement stmt(impl_->db,
                    "SELECT id, kind, created_at, text, html, files, payload_path, preview, search_text, content_hash, "
-                   "is_pinned, is_favorite "
+                   "is_pinned, is_favorite, is_phrase "
                    "FROM history_items WHERE id = ?;");
     sqlite3_bind_int64(stmt.get(), 1, id);
     if (sqlite3_step(stmt.get()) != SQLITE_ROW) {
@@ -371,6 +459,7 @@ std::optional<HistoryItem> HistoryStore::Get(int64_t id) const {
     item.content_hash = DbText(stmt.get(), 9);
     item.is_pinned = sqlite3_column_int(stmt.get(), 10) != 0;
     item.is_favorite = sqlite3_column_int(stmt.get(), 11) != 0;
+    item.is_phrase = sqlite3_column_int(stmt.get(), 12) != 0;
     return item;
 }
 

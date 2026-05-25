@@ -155,6 +155,10 @@ std::optional<CapturedContent> ClipboardCapture::CaptureHtml(UINT html_format) c
     content.text = ReadGlobalWideText(CF_UNICODETEXT);
     const auto html_text = HtmlClipboardToPlainText(content.html);
     content.search_text = NormalizeWhitespace(content.text.empty() ? html_text : content.text + L" " + html_text);
+    const auto visible_text = NormalizeWhitespace(content.text.empty() ? html_text : content.text);
+    if (LooksLikeUrl(visible_text)) {
+        content.kind = ClipboardKind::Link;
+    }
     content.preview = content.search_text.empty() ? L"HTML content" : content.search_text;
     if (content.preview.size() > 180) {
         content.preview.resize(180);

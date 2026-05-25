@@ -115,6 +115,43 @@ TEST_CASE(HistoryStoreFiltersByKindAndFavorite) {
     REQUIRE(favorites.front().is_favorite);
 }
 
+TEST_CASE(HistoryStoreAddsFavoritePhraseAsFavoriteText) {
+    ClipSoul::HistoryStore store;
+    store.Open(TempDbPath(L"favorite-phrase.db"));
+
+    REQUIRE(store.AddFavoritePhrase(L"support@example.com"));
+
+    const auto history = store.Query(ClipSoul::HistoryQuery{});
+    REQUIRE_EQ(history.size(), static_cast<size_t>(0));
+
+    ClipSoul::HistoryQuery query;
+    query.favorites_only = true;
+    const auto favorites = store.Query(query);
+    REQUIRE_EQ(favorites.size(), static_cast<size_t>(1));
+    REQUIRE_EQ(favorites.front().kind, ClipSoul::ClipboardKind::Text);
+    REQUIRE_EQ(favorites.front().text, std::wstring(L"support@example.com"));
+    REQUIRE_EQ(favorites.front().preview, std::wstring(L"support@example.com"));
+    REQUIRE(favorites.front().is_favorite);
+}
+
+TEST_CASE(HistoryStoreConvertsExistingHistoryItemWhenAddingFavoritePhrase) {
+    ClipSoul::HistoryStore store;
+    store.Open(TempDbPath(L"favorite-phrase-existing.db"));
+
+    REQUIRE(store.Add(TextContent(L"meeting shortcut")));
+    REQUIRE_EQ(store.Query(ClipSoul::HistoryQuery{}).size(), static_cast<size_t>(1));
+
+    REQUIRE(store.AddFavoritePhrase(L"meeting shortcut"));
+    REQUIRE_EQ(store.Query(ClipSoul::HistoryQuery{}).size(), static_cast<size_t>(0));
+
+    ClipSoul::HistoryQuery query;
+    query.favorites_only = true;
+    const auto favorites = store.Query(query);
+    REQUIRE_EQ(favorites.size(), static_cast<size_t>(1));
+    REQUIRE_EQ(favorites.front().text, std::wstring(L"meeting shortcut"));
+    REQUIRE(favorites.front().is_phrase);
+}
+
 TEST_CASE(HistoryStorePinnedItemsSortBeforeRecentItems) {
     ClipSoul::HistoryStore store;
     store.Open(TempDbPath(L"pinned.db"));

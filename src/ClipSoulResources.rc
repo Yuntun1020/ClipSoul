@@ -1,0 +1,50 @@
+#include "../include/ClipSoul/ResourceIds.h"
+#include <winver.h>
+
+#define CLIPSOUL_VERSION_MAJOR 1
+#define CLIPSOUL_VERSION_MINOR 0
+#define CLIPSOUL_VERSION_PATCH 1
+#define CLIPSOUL_VERSION_BUILD 0
+
+IDR_CLIPSOUL_ICON_PIN RCDATA "../assets/icons/pin.png"
+IDR_CLIPSOUL_ICON_PIN_ACTIVE RCDATA "../assets/icons/pin-active.png"
+IDR_CLIPSOUL_ICON_CLOSE RCDATA "../assets/icons/close.png"
+IDR_CLIPSOUL_ICON_FILTER RCDATA "../assets/icons/filter.png"
+IDR_CLIPSOUL_ICON_FILTER_ACTIVE RCDATA "../assets/icons/filter-active.png"
+IDR_CLIPSOUL_ICON_MULTI_SELECT RCDATA "../assets/icons/multi-select.png"
+IDR_CLIPSOUL_ICON_MULTI_SELECT_ACTIVE RCDATA "../assets/icons/multi-select-active.png"
+IDR_CLIPSOUL_ICON_TRASH RCDATA "../assets/icons/trash.png"
+IDR_CLIPSOUL_ICON_TEXT_KIND RCDATA "../assets/icons/text-kind.png"
+IDR_CLIPSOUL_ICON_LINK_KIND RCDATA "../assets/icons/link-kind.png"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION CLIPSOUL_VERSION_MAJOR,CLIPSOUL_VERSION_MINOR,CLIPSOUL_VERSION_PATCH,CLIPSOUL_VERSION_BUILD
+ PRODUCTVERSION CLIPSOUL_VERSION_MAJOR,CLIPSOUL_VERSION_MINOR,CLIPSOUL_VERSION_PATCH,CLIPSOUL_VERSION_BUILD
+ FILEFLAGSMASK 0x3fL
+#ifdef _DEBUG
+ FILEFLAGS 0x1L
+#else
+ FILEFLAGS 0x0L
+#endif
+ FILEOS 0x40004L
+ FILETYPE 0x1L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "Yuntun1020"
+            VALUE "FileDescription", "ClipSoul clipboard history"
+            VALUE "FileVersion", "1.0.1.0"
+            VALUE "InternalName", "ClipSoul"
+            VALUE "OriginalFilename", "ClipSoul.exe"
+            VALUE "ProductName", "ClipSoul"
+            VALUE "ProductVersion", "1.0.1"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END

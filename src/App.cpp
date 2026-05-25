@@ -4,9 +4,16 @@
 
 #include <commctrl.h>
 
+#include <exception>
+#include <string_view>
+
 namespace ClipSoul {
 namespace {
 constexpr wchar_t kAppWindowClass[] = L"ClipSoul.HiddenAppWindow";
+
+std::wstring WidenAscii(std::string_view value) {
+    return std::wstring(value.begin(), value.end());
+}
 }
 
 App::App(HINSTANCE instance)
@@ -15,7 +22,12 @@ App::App(HINSTANCE instance)
 
 int App::Run(int) {
     if (!Initialize()) {
-        MessageBoxW(nullptr, L"ClipSoul 初始化失败", L"ClipSoul", MB_ICONERROR);
+        std::wstring message = L"ClipSoul 初始化失败";
+        if (!initialization_error_.empty()) {
+            message += L"\n\n";
+            message += initialization_error_;
+        }
+        MessageBoxW(nullptr, message.c_str(), L"ClipSoul", MB_ICONERROR);
         return 1;
     }
 
@@ -28,42 +40,68 @@ int App::Run(int) {
 }
 
 bool App::Initialize() {
-    INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_STANDARD_CLASSES | ICC_DATE_CLASSES};
-    InitCommonControlsEx(&icc);
-    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    initialization_error_.clear();
+    auto fail = [this](std::wstring step) {
+        const DWORD error = GetLastError();
+        initialization_error_ = std::move(step);
+        if (error != ERROR_SUCCESS) {
+            initialization_error_ += L": ";
+            initialization_error_ += FormatWin32Error(error);
+        }
+        return false;
+    };
 
-    WNDCLASSW wc{};
-    wc.lpfnWndProc = App::WindowProc;
-    wc.hInstance = instance_;
-    wc.lpszClassName = kAppWindowClass;
-    RegisterClassW(&wc);
+    try {
+        INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_STANDARD_CLASSES | ICC_DATE_CLASSES};
+        InitCommonControlsEx(&icc);
+        CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
-    hwnd_ = CreateWindowExW(0, kAppWindowClass, L"ClipSoul", 0, 0, 0, 0, 0, HWND_MESSAGE,
-                            nullptr, instance_, this);
-    if (!hwnd_) {
+        WNDCLASSW wc{};
+        wc.lpfnWndProc = App::WindowProc;
+        wc.hInstance = instance_;
+        wc.lpszClassName = kAppWindowClass;
+        if (!RegisterClassW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+            return fail(L"注册后台窗口类失败");
+        }
+
+        hwnd_ = CreateWindowExW(0, kAppWindowClass, L"ClipSoul", 0, 0, 0, 0, 0, HWND_MESSAGE,
+                                nullptr, instance_, this);
+        if (!hwnd_) {
+            return fail(L"创建后台消息窗口失败");
+        }
+
+        storage_dir_ = LoadStorageDir();
+        store_.Open(storage_dir_ / L"clipsoul.db");
+        settings_ = store_.LoadSettings();
+        settings_.start_with_windows = GetStartWithWindows();
+        ApplyAppSettingsDefaults(settings_);
+        store_.SaveSettings(settings_);
+
+        capture_ = std::make_unique<ClipboardCapture>(storage_dir_ / L"cache");
+        popup_ = std::make_unique<PopupWindow>(instance_, store_, paste_controller_);
+        if (!popup_->Create(nullptr)) {
+            return fail(L"创建历史弹窗失败");
+        }
+
+        if (!monitor_.Start(hwnd_)) {
+            return fail(L"注册剪贴板监听失败");
+        }
+        RegisterHotkey();
+        tray_.Add(hwnd_, WM_CLIPSOUL_TRAY);
+        return true;
+    } catch (const std::exception& ex) {
+        initialization_error_ = L"初始化异常: ";
+        initialization_error_ += WidenAscii(ex.what());
+        return false;
+    } catch (...) {
+        initialization_error_ = L"初始化异常: unknown exception";
         return false;
     }
-
-    const auto data_dir = AppDataDir();
-    store_.Open(data_dir / L"clipsoul.db");
-    settings_ = store_.LoadSettings();
-    settings_.start_with_windows = GetStartWithWindows();
-    if (settings_.hotkey_modifiers == 0) settings_.hotkey_modifiers = MOD_CONTROL | MOD_SHIFT;
-    if (settings_.hotkey_vk == 0) settings_.hotkey_vk = 'V';
-
-    capture_ = std::make_unique<ClipboardCapture>(data_dir / L"cache");
-    popup_ = std::make_unique<PopupWindow>(instance_, store_, paste_controller_);
-    popup_->Create(hwnd_);
-
-    monitor_.Start(hwnd_);
-    RegisterHotkey();
-    tray_.Add(hwnd_, WM_CLIPSOUL_TRAY);
-    return true;
 }
 
-void App::RegisterHotkey() {
+bool App::RegisterHotkey() {
     UnregisterHotKey(hwnd_, HOTKEY_ID_POPUP);
-    RegisterHotKey(hwnd_, HOTKEY_ID_POPUP, settings_.hotkey_modifiers, settings_.hotkey_vk);
+    return RegisterHotKey(hwnd_, HOTKEY_ID_POPUP, settings_.hotkey_modifiers, settings_.hotkey_vk) == TRUE;
 }
 
 void App::TogglePaused() {
@@ -76,6 +114,7 @@ void App::SaveSettings(const AppSettings& settings) {
     store_.SaveSettings(settings_);
     SetStartWithWindows(settings_.start_with_windows);
     RegisterHotkey();
+    RefreshPopupTheme();
 }
 
 void App::ClearHistory() {
@@ -94,6 +133,39 @@ AppSettings App::Settings() const {
     return settings_;
 }
 
+std::filesystem::path App::StorageDirectory() const {
+    return storage_dir_.empty() ? DefaultStorageDir() : storage_dir_;
+}
+
+bool App::SaveStorageDirectory(const std::filesystem::path& storage_dir) {
+    if (!SaveStorageDir(storage_dir)) {
+        return false;
+    }
+    storage_dir_ = storage_dir;
+    return true;
+}
+
+bool App::HotkeyAvailable(unsigned modifiers, unsigned vk) const {
+    if (settings_.hotkey_modifiers == modifiers && settings_.hotkey_vk == vk) {
+        return true;
+    }
+    constexpr int probe_id = 9171;
+    if (RegisterHotKey(hwnd_, probe_id, modifiers, vk) != TRUE) {
+        return false;
+    }
+    UnregisterHotKey(hwnd_, probe_id);
+    return true;
+}
+
+void App::RefreshPopupTheme() {
+    if (popup_) {
+        popup_->Refresh();
+    }
+    if (settings_window_) {
+        InvalidateRect(settings_window_->hwnd(), nullptr, FALSE);
+    }
+}
+
 void App::OnClipboardUpdate() {
     if (monitor_.IsSelfWrite()) {
         monitor_.ClearSelfWrite();
@@ -103,13 +175,19 @@ void App::OnClipboardUpdate() {
         return;
     }
     if (auto content = capture_->Capture(hwnd_)) {
-        store_.Add(*content);
+        if (store_.Add(*content) && popup_) {
+            popup_->Refresh();
+        }
     }
 }
 
 void App::OnHotkey() {
     if (popup_) {
-        popup_->Show(GetForegroundWindow());
+        if (popup_->IsVisible()) {
+            popup_->Hide();
+        } else {
+            popup_->Show(GetForegroundWindow());
+        }
     }
 }
 
@@ -173,6 +251,7 @@ LRESULT CALLBACK App::WindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM 
     if (message == WM_NCCREATE) {
         const auto* create = reinterpret_cast<CREATESTRUCTW*>(lparam);
         app = static_cast<App*>(create->lpCreateParams);
+        app->hwnd_ = hwnd;
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(app));
     }
     return app ? app->HandleMessage(message, wparam, lparam)

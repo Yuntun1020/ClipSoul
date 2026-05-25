@@ -223,10 +223,34 @@ std::wstring FileNameFromPath(std::wstring_view path) {
 
 bool LooksLikeUrl(std::wstring_view input) {
     const auto value = NormalizeWhitespace(input);
-    if (value.rfind(L"https://", 0) == 0 || value.rfind(L"http://", 0) == 0) {
-        return value.find(L'.') != std::wstring::npos || value.find(L"localhost") != std::wstring::npos;
+    if (value.empty() || value.find_first_of(L" \t\r\n") != std::wstring::npos) {
+        return false;
     }
-    return false;
+    const bool has_scheme = value.rfind(L"https://", 0) == 0 || value.rfind(L"http://", 0) == 0;
+    if (!has_scheme) {
+        return false;
+    }
+    std::wstring_view candidate(value);
+    while (!candidate.empty()) {
+        const wchar_t ch = candidate.back();
+        if (ch == L'.' || ch == L',' || ch == L';' || ch == L':' || ch == L')' || ch == L']' || ch == L'}') {
+            candidate.remove_suffix(1);
+            continue;
+        }
+        break;
+    }
+    if (candidate.size() <= 8) {
+        return false;
+    }
+    const auto host_start = candidate.find(L"://");
+    if (host_start == std::wstring_view::npos) {
+        return false;
+    }
+    const size_t host_begin = host_start + 3;
+    const size_t host_end = candidate.find_first_of(L"/?#", host_begin);
+    const auto host = candidate.substr(host_begin, host_end == std::wstring_view::npos ? std::wstring_view::npos
+                                                                                       : host_end - host_begin);
+    return host.find(L'.') != std::wstring_view::npos || host.rfind(L"localhost", 0) == 0;
 }
 
 } // namespace ClipSoul

@@ -10,7 +10,9 @@
 
 #include <Windows.h>
 
+#include <filesystem>
 #include <memory>
+#include <string>
 
 namespace ClipSoul {
 
@@ -31,10 +33,14 @@ public:
     void ClearHistory();
     void ShowSettings();
     AppSettings Settings() const;
+    std::filesystem::path StorageDirectory() const;
+    bool SaveStorageDirectory(const std::filesystem::path& storage_dir);
+    bool HotkeyAvailable(unsigned modifiers, unsigned vk) const;
+    void RefreshPopupTheme();
 
 private:
     bool Initialize();
-    void RegisterHotkey();
+    bool RegisterHotkey();
     void OnClipboardUpdate();
     void OnHotkey();
     void OnTray(LPARAM lparam);
@@ -52,6 +58,8 @@ private:
     std::unique_ptr<SettingsWindow> settings_window_;
     TrayIcon tray_;
     AppSettings settings_;
+    std::filesystem::path storage_dir_;
+    std::wstring initialization_error_;
 };
 
 } // namespace ClipSoul

@@ -1,13 +1,17 @@
 build/
+dist/
 .vs/
 out/
+cache/
 *.user
 *.suo
 *.VC.db
 *.VC.VC.opendb
 *.log
 *.tmp
+*.exe
 *.db
 *.db-shm
 *.db-wal
 *.dib
+*.storage

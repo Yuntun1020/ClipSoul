@@ -1,6 +1,7 @@
 #include "ClipSoul/PasteController.h"
 
 #include "ClipSoul/ClipboardMonitor.h"
+#include "ClipSoul/PasteModel.h"
 #include "ClipSoul/TextUtil.h"
 
 #include <fstream>
@@ -73,6 +74,34 @@ bool PasteController::RestoreToClipboard(const HistoryItem& item, HWND owner) {
     return ok;
 }
 
+bool PasteController::RestoreMultipleToClipboard(const std::vector<HistoryItem>& items, HWND owner) {
+    if (items.empty()) {
+        return false;
+    }
+
+    monitor_.MarkSelfWrite();
+    if (!OpenClipboard(owner)) {
+        monitor_.ClearSelfWrite();
+        return false;
+    }
+
+    EmptyClipboard();
+    const auto payload = BuildMultiPastePayload(items);
+    bool ok = false;
+    if (!payload.text.empty()) {
+        ok = SetText(payload.text) || ok;
+    }
+    if (!payload.files.empty()) {
+        ok = SetFiles(payload.files) || ok;
+    }
+    if (!ok && payload.first_image) {
+        ok = SetImage(*payload.first_image);
+    }
+
+    CloseClipboard();
+    return ok;
+}
+
 void PasteController::SendPaste(HWND target) const {
     if (target) {
         SetForegroundWindow(target);
@@ -93,12 +122,7 @@ void PasteController::SendPaste(HWND target) const {
 
 bool PasteController::SetText(const HistoryItem& item) const {
     const std::wstring text = !item.text.empty() ? item.text : item.search_text;
-    HGLOBAL text_handle = AllocWideText(text);
-    if (!text_handle) {
-        return false;
-    }
-    if (!SetClipboardData(CF_UNICODETEXT, text_handle)) {
-        GlobalFree(text_handle);
+    if (!SetText(text)) {
         return false;
     }
 
@@ -112,9 +136,25 @@ bool PasteController::SetText(const HistoryItem& item) const {
     return true;
 }
 
+bool PasteController::SetText(std::wstring_view text) const {
+    HGLOBAL text_handle = AllocWideText(text);
+    if (!text_handle) {
+        return false;
+    }
+    if (!SetClipboardData(CF_UNICODETEXT, text_handle)) {
+        GlobalFree(text_handle);
+        return false;
+    }
+    return true;
+}
+
 bool PasteController::SetFiles(const HistoryItem& item) const {
+    return SetFiles(item.files);
+}
+
+bool PasteController::SetFiles(const std::vector<std::wstring>& files) const {
     size_t path_chars = 1;
-    for (const auto& file : item.files) {
+    for (const auto& file : files) {
         path_chars += file.size() + 1;
     }
     const size_t bytes = sizeof(DROPFILES) + path_chars * sizeof(wchar_t);
@@ -131,7 +171,7 @@ bool PasteController::SetFiles(const HistoryItem& item) const {
     drop->pFiles = sizeof(DROPFILES);
     drop->fWide = TRUE;
     auto* cursor = reinterpret_cast<wchar_t*>(reinterpret_cast<BYTE*>(drop) + sizeof(DROPFILES));
-    for (const auto& file : item.files) {
+    for (const auto& file : files) {
         memcpy(cursor, file.c_str(), file.size() * sizeof(wchar_t));
         cursor += file.size() + 1;
     }
