@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(ClipSoul VERSION 1.0.1 LANGUAGES CXX)
+project(ClipSoul VERSION 1.0.2 LANGUAGES CXX)
 
 if(MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
@@ -42,6 +42,7 @@ add_executable(clipsoul WIN32
     src/ClipboardCapture.cpp
     src/ClipboardMonitor.cpp
     src/ClipSoulResources.rc
+    src/ClipSoul.manifest
     src/PasteController.cpp
     src/PopupWindow.cpp
     src/SettingsWindow.cpp
@@ -67,6 +68,7 @@ target_link_libraries(clipsoul PRIVATE
 
 if(MSVC)
     target_compile_options(clipsoul PRIVATE /utf-8)
+    target_link_options(clipsoul PRIVATE "/MANIFESTINPUT:${CMAKE_CURRENT_SOURCE_DIR}/src/ClipSoul.manifest")
 endif()
 
 enable_testing()

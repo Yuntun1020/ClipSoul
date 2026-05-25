@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.0.2
+
+- 添加 Windows manifest，声明普通用户权限、DPI 感知、长路径和 Windows 10/11 兼容信息。
+- Release 增加 `SHA256SUMS.txt`，便于校验下载的单 exe。
+- README 增加安全与校验说明，解释未签名剪贴板工具可能触发 Defender/SmartScreen 误报。
+- 版本号更新为 `v1.0.2`。
+
 ## v1.0.1
 
 - 添加自定义存储位置，可在设置窗口选择目录。

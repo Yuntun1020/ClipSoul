@@ -52,6 +52,27 @@ clipsoul.storage
 
 修改存储位置后需要重启程序生效。
 
+## 安全与校验
+
+ClipSoul 是开源的本地剪贴板工具，不联网。它会常驻后台、监听剪贴板变化、注册全局热键，并在用户选择历史项时写入剪贴板和触发粘贴。这些行为和部分自动化/监控类软件相似，未签名版本可能被 Windows Defender 或 SmartScreen 误报。
+
+发布页会同时提供：
+
+```text
+ClipSoul.exe
+SHA256SUMS.txt
+```
+
+下载后建议先校验哈希：
+
+```powershell
+Get-FileHash -Algorithm SHA256 .\ClipSoul.exe
+```
+
+确认输出值与 `SHA256SUMS.txt` 中的值一致后再运行。如果哈希不一致，请删除文件并重新从 GitHub Release 下载。
+
+当前发布版暂未代码签名。如果 Windows 拦截但哈希一致，通常是未签名新程序的信誉/误报问题；仍建议只从官方 Release 下载，不要从聊天软件缓存目录或第三方网盘直接运行。
+
 ## 测试
 
 ```powershell
