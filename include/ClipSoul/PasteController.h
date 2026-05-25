@@ -8,6 +8,21 @@ namespace ClipSoul {
 
 class ClipboardMonitor;
 
+inline bool ShouldActivatePasteTarget(HWND target, HWND foreground) {
+    return target && target != foreground;
+}
+
+inline bool ShouldReleaseModifierForPaste(int virtual_key, bool down) {
+    return down && (virtual_key == VK_MENU || virtual_key == VK_SHIFT ||
+                    virtual_key == VK_LWIN || virtual_key == VK_RWIN);
+}
+
+inline bool ShouldRestoreModifierAfterPaste(int virtual_key, bool was_down) {
+    return was_down && (virtual_key == VK_CONTROL || virtual_key == VK_MENU ||
+                        virtual_key == VK_SHIFT || virtual_key == VK_LWIN ||
+                        virtual_key == VK_RWIN);
+}
+
 class PasteController {
 public:
     explicit PasteController(ClipboardMonitor& monitor);

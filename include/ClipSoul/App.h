@@ -2,6 +2,7 @@
 
 #include "ClipSoul/ClipboardCapture.h"
 #include "ClipSoul/ClipboardMonitor.h"
+#include "ClipSoul/ContinuousPaste.h"
 #include "ClipSoul/HistoryStore.h"
 #include "ClipSoul/PasteController.h"
 #include "ClipSoul/PopupWindow.h"
@@ -18,6 +19,7 @@ namespace ClipSoul {
 
 constexpr UINT WM_CLIPSOUL_TRAY = WM_APP + 1;
 constexpr UINT HOTKEY_ID_POPUP = 1;
+constexpr UINT HOTKEY_ID_CONTINUOUS_PASTE = 2;
 constexpr UINT ID_TRAY_SHOW = 1001;
 constexpr UINT ID_TRAY_PAUSE = 1002;
 constexpr UINT ID_TRAY_SETTINGS = 1003;
@@ -43,6 +45,8 @@ private:
     bool RegisterHotkey();
     void OnClipboardUpdate();
     void OnHotkey();
+    void OnContinuousPasteHotkey();
+    std::optional<int64_t> SelectedPopupItemId() const;
     void OnTray(LPARAM lparam);
     void OnCommand(WPARAM wparam);
     LRESULT HandleMessage(UINT message, WPARAM wparam, LPARAM lparam);
@@ -60,6 +64,7 @@ private:
     AppSettings settings_;
     std::filesystem::path storage_dir_;
     std::wstring initialization_error_;
+    ContinuousPasteCursor continuous_paste_;
 };
 
 } // namespace ClipSoul

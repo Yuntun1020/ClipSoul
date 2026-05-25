@@ -115,6 +115,83 @@ TEST_CASE(HistoryStoreFiltersByKindAndFavorite) {
     REQUIRE(favorites.front().is_favorite);
 }
 
+TEST_CASE(HistoryStoreAssignsFavoritesToNamedGroupsWithNotes) {
+    ClipSoul::HistoryStore store;
+    store.Open(TempDbPath(L"favorite-groups.db"));
+
+    const auto work_group = store.EnsureFavoriteGroup(L"工作");
+    const auto personal_group = store.EnsureFavoriteGroup(L"个人");
+
+    REQUIRE(store.Add(TextContent(L"alpha")));
+    REQUIRE(store.Add(TextContent(L"beta")));
+
+    const auto history = store.Query(ClipSoul::HistoryQuery{});
+    REQUIRE_EQ(history.size(), static_cast<size_t>(2));
+    const auto beta_id = history[0].id;
+    const auto alpha_id = history[1].id;
+
+    REQUIRE(store.SetFavoriteGroup(alpha_id, work_group));
+    REQUIRE(store.SetNote(alpha_id, L"报价模板"));
+    REQUIRE(store.SetFavoriteGroup(beta_id, personal_group));
+
+    ClipSoul::HistoryQuery query;
+    query.favorites_only = true;
+    query.favorite_group_id = work_group;
+    const auto favorites = store.Query(query);
+
+    REQUIRE_EQ(favorites.size(), static_cast<size_t>(1));
+    REQUIRE_EQ(favorites.front().text, std::wstring(L"alpha"));
+    REQUIRE_EQ(favorites.front().favorite_group_id.value(), work_group);
+    REQUIRE_EQ(favorites.front().note, std::wstring(L"报价模板"));
+}
+
+TEST_CASE(HistoryStoreDeletesFavoriteGroupAndItsFavorites) {
+    ClipSoul::HistoryStore store;
+    store.Open(TempDbPath(L"favorite-group-delete.db"));
+
+    const auto work_group = store.EnsureFavoriteGroup(L"工作");
+    REQUIRE(store.Add(TextContent(L"alpha")));
+
+    const auto history = store.Query(ClipSoul::HistoryQuery{});
+    REQUIRE_EQ(history.size(), static_cast<size_t>(1));
+    REQUIRE(store.SetFavoriteGroup(history.front().id, work_group));
+    REQUIRE(store.DeleteFavoriteGroup(work_group));
+
+    const auto groups = store.FavoriteGroups();
+    REQUIRE(std::none_of(groups.begin(), groups.end(), [work_group](const ClipSoul::FavoriteGroup& group) {
+        return group.id == work_group;
+    }));
+
+    ClipSoul::HistoryQuery all_favorites;
+    all_favorites.favorites_only = true;
+    REQUIRE(store.Query(all_favorites).empty());
+    REQUIRE(store.Query(ClipSoul::HistoryQuery{}).empty());
+
+    ClipSoul::HistoryQuery deleted_group_query;
+    deleted_group_query.favorites_only = true;
+    deleted_group_query.favorite_group_id = work_group;
+    REQUIRE(store.Query(deleted_group_query).empty());
+}
+
+TEST_CASE(HistoryStoreAddsFavoritePhraseWithNoteAndGroup) {
+    ClipSoul::HistoryStore store;
+    store.Open(TempDbPath(L"favorite-phrase-note-group.db"));
+
+    const auto support_group = store.EnsureFavoriteGroup(L"客服");
+    REQUIRE(store.AddFavoritePhrase(L"support@example.com", L"客服邮箱", support_group));
+
+    ClipSoul::HistoryQuery query;
+    query.favorites_only = true;
+    query.favorite_group_id = support_group;
+    const auto favorites = store.Query(query);
+
+    REQUIRE_EQ(favorites.size(), static_cast<size_t>(1));
+    REQUIRE_EQ(favorites.front().text, std::wstring(L"support@example.com"));
+    REQUIRE_EQ(favorites.front().note, std::wstring(L"客服邮箱"));
+    REQUIRE_EQ(favorites.front().favorite_group_id.value(), support_group);
+    REQUIRE(favorites.front().is_phrase);
+}
+
 TEST_CASE(HistoryStoreAddsFavoritePhraseAsFavoriteText) {
     ClipSoul::HistoryStore store;
     store.Open(TempDbPath(L"favorite-phrase.db"));

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(ClipSoul VERSION 1.0.2 LANGUAGES CXX)
+project(ClipSoul VERSION 1.1.0 LANGUAGES CXX)
 
 if(MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
@@ -11,9 +11,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(clipsoul_core
+    src/ContinuousPaste.cpp
     src/HistoryStore.cpp
+    src/Hotkey.cpp
     src/PasteModel.cpp
     src/PopupLayout.cpp
+    src/SingleInstance.cpp
     src/StorageConfig.cpp
     src/TextUtil.cpp
 )
@@ -75,9 +78,12 @@ enable_testing()
 
 add_executable(clipsoul_tests
     tests/AppSettingsTests.cpp
+    tests/ContinuousPasteTests.cpp
     tests/HistoryStoreTests.cpp
+    tests/HotkeyTests.cpp
     tests/PasteModelTests.cpp
     tests/PopupLayoutTests.cpp
+    tests/SingleInstanceTests.cpp
     tests/TextUtilTests.cpp
     tests/test_main.cpp
 )

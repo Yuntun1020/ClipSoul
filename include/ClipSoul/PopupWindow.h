@@ -19,6 +19,13 @@ namespace ClipSoul {
 
 class PasteController;
 
+enum class PopupFavoriteGroupDeleteConfirmTarget {
+    None,
+    Panel,
+    Delete,
+    Cancel,
+};
+
 class PopupWindow {
 public:
     PopupWindow(HINSTANCE instance, HistoryStore& store, PasteController& paste_controller);
@@ -30,6 +37,9 @@ public:
     void Refresh();
     HWND hwnd() const { return hwnd_; }
     bool IsVisible() const;
+    std::optional<int64_t> SelectedItemId() const;
+    HWND PasteTarget() const { return paste_target_; }
+    bool PasteSelectedForContinuousPaste();
     LRESULT HandleMessage(UINT message, WPARAM wparam, LPARAM lparam);
 
 private:
@@ -45,7 +55,10 @@ private:
         PasteSelected,
         HistoryTab,
         FavoritesTab,
+        FavoriteGroupMenu,
         AddFavoritePhrase,
+        ExpandItem,
+        Scrollbar,
         Pin,
         Close,
     };
@@ -60,6 +73,13 @@ private:
         Trash,
         TextKind,
         LinkKind,
+        AddFavoriteFolderOutline,
+        AddFavoriteFolderFilled,
+    };
+    struct PendingFavoriteGroupDelete {
+        int64_t id = 0;
+        size_t group_index = 0;
+        std::wstring name;
     };
     static constexpr int kSearchEditId = 5101;
 
@@ -73,6 +93,16 @@ private:
     void SelectAllVisible();
     void PasteSelected();
     void PromptAddFavoritePhrase();
+    void PromptCreateFavoriteGroup();
+    void PromptEditNote(int64_t id);
+    void ToggleFavoriteGroupMenu();
+    void ToggleExpanded(int64_t id);
+    void SetSelectedItemId(std::optional<int64_t> id);
+    void AdvanceSelectionAfterContinuousPaste();
+    void BeginItemPress(int item_index, POINT point);
+    void CancelItemPress();
+    void CompleteItemPress(POINT point);
+    void HandleLongPressTimer();
     void Paint();
     void EnsureDeviceResources();
     void DiscardDeviceResources();
@@ -94,12 +124,18 @@ private:
     POINT SearchImeAnchorClient() const;
     void UpdateSearchImePosition();
     int HitTestItem(POINT point) const;
+    int HitTestExpandItem(POINT point) const;
     UiAction HitTestAction(POINT point) const;
     void ShowContextMenu(POINT point, int item_index);
     HistoryQuery BuildQuery() const;
+    std::wstring ActiveFavoriteGroupLabel() const;
+    std::wstring FavoriteGroupName(std::optional<int64_t> group_id) const;
     bool HandleFilterClick(POINT point);
+    bool HandleFavoriteGroupMenuClick(POINT point);
+    bool HandleFavoriteGroupDeleteConfirmClick(POINT point);
     POINT ResolvePopupPosition(HWND target, SIZE size, RECT work, UINT dpi) const;
     void HideIfInactive(HWND next_active);
+    void UpdateScrollDrag(POINT point);
 
     static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam);
 
@@ -117,6 +153,7 @@ private:
     bool multi_select_ = false;
     bool pinned_open_ = false;
     bool filter_open_ = false;
+    bool favorite_group_menu_open_ = false;
     bool custom_position_ = false;
     bool prompt_open_ = false;
     bool tracking_mouse_ = false;
@@ -124,12 +161,22 @@ private:
     bool search_caret_on_ = true;
     bool updating_search_ime_ = false;
     int scroll_offset_ = 0;
+    bool dragging_scrollbar_ = false;
+    int pressed_item_index_ = -1;
+    bool long_press_selected_ = false;
+    POINT press_point_{-1, -1};
     POINT hover_point_{-1, -1};
     UiAction hover_action_ = UiAction::None;
     PopupFilterTarget hover_filter_target_ = PopupFilterTarget::None;
+    PopupFavoriteGroupDeleteConfirmTarget hover_delete_confirm_target_ = PopupFavoriteGroupDeleteConfirmTarget::None;
     std::optional<PopupCalendarDate> hover_filter_date_;
+    PopupFavoriteGroupMenuHit hover_favorite_group_menu_hit_;
     int hover_item_index_ = -1;
     std::set<ClipboardKind> filter_kinds_;
+    std::vector<FavoriteGroup> favorite_groups_;
+    std::optional<int64_t> active_favorite_group_id_;
+    std::optional<PendingFavoriteGroupDelete> pending_favorite_group_delete_;
+    std::optional<int64_t> expanded_item_id_;
     PopupDateRangeState date_filter_;
     int calendar_year_ = 0;
     int calendar_month_ = 0;
@@ -153,12 +200,15 @@ private:
     ID2D1Bitmap* trash_icon_ = nullptr;
     ID2D1Bitmap* text_kind_icon_ = nullptr;
     ID2D1Bitmap* link_kind_icon_ = nullptr;
+    ID2D1Bitmap* add_favorite_folder_outline_icon_ = nullptr;
+    ID2D1Bitmap* add_favorite_folder_filled_icon_ = nullptr;
     ID2D1Bitmap* pin_active_icon_ = nullptr;
     std::map<std::wstring, ID2D1Bitmap*> image_preview_cache_;
     std::map<std::wstring, ID2D1Bitmap*> file_icon_cache_;
     IDWriteTextFormat* title_format_ = nullptr;
     IDWriteTextFormat* body_format_ = nullptr;
     IDWriteTextFormat* small_format_ = nullptr;
+    IDWriteTextFormat* detail_format_ = nullptr;
     IDWriteTextFormat* centered_small_format_ = nullptr;
     IDWriteInlineObject* ellipsis_trimming_sign_ = nullptr;
     HBRUSH search_edit_brush_ = nullptr;

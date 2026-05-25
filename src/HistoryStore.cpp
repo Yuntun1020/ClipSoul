@@ -118,6 +118,14 @@ void BindText(sqlite3_stmt* stmt, int index, const std::string& value) {
     sqlite3_bind_text(stmt, index, value.c_str(), static_cast<int>(value.size()), SQLITE_TRANSIENT);
 }
 
+void BindOptionalInt64(sqlite3_stmt* stmt, int index, std::optional<int64_t> value) {
+    if (value) {
+        sqlite3_bind_int64(stmt, index, *value);
+    } else {
+        sqlite3_bind_null(stmt, index);
+    }
+}
+
 } // namespace
 
 void ApplyAppSettingsDefaults(AppSettings& settings) {
@@ -128,6 +136,10 @@ void ApplyAppSettingsDefaults(AppSettings& settings) {
     if (missing_hotkey || legacy_hotkey) {
         settings.hotkey_modifiers = kDefaultHotkeyModifiers;
         settings.hotkey_vk = kDefaultHotkeyVk;
+    }
+    if (settings.continuous_paste_hotkey_modifiers == 0 || settings.continuous_paste_hotkey_vk == 0) {
+        settings.continuous_paste_hotkey_modifiers = kDefaultContinuousPasteHotkeyModifiers;
+        settings.continuous_paste_hotkey_vk = kDefaultContinuousPasteHotkeyVk;
     }
 }
 
@@ -201,13 +213,25 @@ void HistoryStore::Open(const std::filesystem::path& database_path) {
          "content_hash TEXT NOT NULL,"
          "is_pinned INTEGER NOT NULL DEFAULT 0,"
          "is_favorite INTEGER NOT NULL DEFAULT 0,"
-         "is_phrase INTEGER NOT NULL DEFAULT 0"
+         "is_phrase INTEGER NOT NULL DEFAULT 0,"
+         "favorite_group_id INTEGER,"
+         "note TEXT NOT NULL DEFAULT ''"
          ");");
     TryExec(impl_->db, "ALTER TABLE history_items ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0;");
     TryExec(impl_->db, "ALTER TABLE history_items ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0;");
     TryExec(impl_->db, "ALTER TABLE history_items ADD COLUMN is_phrase INTEGER NOT NULL DEFAULT 0;");
+    TryExec(impl_->db, "ALTER TABLE history_items ADD COLUMN favorite_group_id INTEGER;");
+    TryExec(impl_->db, "ALTER TABLE history_items ADD COLUMN note TEXT NOT NULL DEFAULT '';");
     Exec(impl_->db,
          "CREATE INDEX IF NOT EXISTS idx_history_sort ON history_items(is_pinned DESC, created_at DESC, id DESC);");
+    Exec(impl_->db,
+         "CREATE TABLE IF NOT EXISTS favorite_groups ("
+         "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+         "name TEXT NOT NULL UNIQUE,"
+         "created_at INTEGER NOT NULL"
+         ");");
+    Exec(impl_->db,
+         "INSERT OR IGNORE INTO favorite_groups(name, created_at) VALUES('默认', 0);");
     Exec(impl_->db,
          "CREATE TABLE IF NOT EXISTS settings ("
          "key TEXT PRIMARY KEY,"
@@ -239,10 +263,15 @@ AppSettings HistoryStore::LoadSettings() const {
             settings.hotkey_modifiers = static_cast<unsigned>(std::stoul(value));
         } else if (key == "hotkey_vk") {
             settings.hotkey_vk = static_cast<unsigned>(std::stoul(value));
+        } else if (key == "continuous_paste_hotkey_modifiers") {
+            settings.continuous_paste_hotkey_modifiers = static_cast<unsigned>(std::stoul(value));
+        } else if (key == "continuous_paste_hotkey_vk") {
+            settings.continuous_paste_hotkey_vk = static_cast<unsigned>(std::stoul(value));
         } else if (key == "theme_mode") {
             settings.theme_mode = std::clamp(std::stoi(value), 0, 2);
         }
     }
+    ApplyAppSettingsDefaults(settings);
     return settings;
 }
 
@@ -268,6 +297,8 @@ void HistoryStore::SaveSettings(const AppSettings& settings) {
     save("start_with_windows", settings.start_with_windows ? "1" : "0");
     save("hotkey_modifiers", std::to_string(settings.hotkey_modifiers));
     save("hotkey_vk", std::to_string(settings.hotkey_vk));
+    save("continuous_paste_hotkey_modifiers", std::to_string(settings.continuous_paste_hotkey_modifiers));
+    save("continuous_paste_hotkey_vk", std::to_string(settings.continuous_paste_hotkey_vk));
     save("theme_mode", std::to_string(std::clamp(settings.theme_mode, 0, 2)));
 
     EnforceLimit();
@@ -310,6 +341,10 @@ bool HistoryStore::Add(const CapturedContent& content) {
 }
 
 bool HistoryStore::AddFavoritePhrase(std::wstring_view text) {
+    return AddFavoritePhrase(text, L"", std::nullopt);
+}
+
+bool HistoryStore::AddFavoritePhrase(std::wstring_view text, std::wstring_view note, std::optional<int64_t> group_id) {
     if (!impl_->db) {
         throw std::runtime_error("database is not open");
     }
@@ -320,14 +355,18 @@ bool HistoryStore::AddFavoritePhrase(std::wstring_view text) {
     }
 
     const auto hash = StableHash(normalized);
+    const auto normalized_note = NormalizeWhitespace(note);
     {
         Statement update(impl_->db,
-                         "UPDATE history_items SET is_favorite = 1, is_phrase = 1, text = ?, preview = ?, search_text = ? "
+                         "UPDATE history_items SET is_favorite = 1, is_phrase = 1, text = ?, preview = ?, "
+                         "search_text = ?, note = ?, favorite_group_id = ? "
                          "WHERE content_hash = ?;");
         BindText(update.get(), 1, normalized);
         BindText(update.get(), 2, normalized);
         BindText(update.get(), 3, normalized);
-        BindText(update.get(), 4, hash);
+        BindText(update.get(), 4, normalized_note);
+        BindOptionalInt64(update.get(), 5, group_id);
+        BindText(update.get(), 6, hash);
         if (sqlite3_step(update.get()) != SQLITE_DONE) {
             ThrowSqlite(impl_->db, "sqlite convert favorite phrase failed");
         }
@@ -337,14 +376,17 @@ bool HistoryStore::AddFavoritePhrase(std::wstring_view text) {
     }
 
     Statement stmt(impl_->db,
-                   "INSERT INTO history_items(kind, created_at, text, preview, search_text, content_hash, is_favorite, is_phrase) "
-                   "VALUES(?, ?, ?, ?, ?, ?, 1, 1);");
+                   "INSERT INTO history_items(kind, created_at, text, preview, search_text, content_hash, "
+                   "is_favorite, is_phrase, favorite_group_id, note) "
+                   "VALUES(?, ?, ?, ?, ?, ?, 1, 1, ?, ?);");
     sqlite3_bind_int(stmt.get(), 1, static_cast<int>(ClipboardKind::Text));
     sqlite3_bind_int64(stmt.get(), 2, NowUnixSeconds());
     BindText(stmt.get(), 3, normalized);
     BindText(stmt.get(), 4, normalized);
     BindText(stmt.get(), 5, normalized);
     BindText(stmt.get(), 6, hash);
+    BindOptionalInt64(stmt.get(), 7, group_id);
+    BindText(stmt.get(), 8, normalized_note);
 
     if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
         ThrowSqlite(impl_->db, "sqlite insert favorite phrase failed");
@@ -352,6 +394,47 @@ bool HistoryStore::AddFavoritePhrase(std::wstring_view text) {
 
     EnforceLimit();
     return true;
+}
+
+int64_t HistoryStore::EnsureFavoriteGroup(std::wstring_view name) {
+    if (!impl_->db) {
+        throw std::runtime_error("database is not open");
+    }
+    auto normalized = NormalizeWhitespace(name);
+    if (normalized.empty()) {
+        normalized = L"默认";
+    }
+
+    {
+        Statement select(impl_->db, "SELECT id FROM favorite_groups WHERE name = ?;");
+        BindText(select.get(), 1, normalized);
+        if (sqlite3_step(select.get()) == SQLITE_ROW) {
+            return sqlite3_column_int64(select.get(), 0);
+        }
+    }
+
+    Statement insert(impl_->db, "INSERT INTO favorite_groups(name, created_at) VALUES(?, ?);");
+    BindText(insert.get(), 1, normalized);
+    sqlite3_bind_int64(insert.get(), 2, NowUnixSeconds());
+    if (sqlite3_step(insert.get()) != SQLITE_DONE) {
+        ThrowSqlite(impl_->db, "sqlite insert favorite group failed");
+    }
+    return sqlite3_last_insert_rowid(impl_->db);
+}
+
+std::vector<FavoriteGroup> HistoryStore::FavoriteGroups() const {
+    if (!impl_->db) {
+        throw std::runtime_error("database is not open");
+    }
+    Statement stmt(impl_->db, "SELECT id, name FROM favorite_groups ORDER BY id ASC;");
+    std::vector<FavoriteGroup> groups;
+    while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+        FavoriteGroup group;
+        group.id = sqlite3_column_int64(stmt.get(), 0);
+        group.name = DbText(stmt.get(), 1);
+        groups.push_back(std::move(group));
+    }
+    return groups;
 }
 
 std::vector<HistoryItem> HistoryStore::Recent(int limit, std::wstring_view query) const {
@@ -368,7 +451,7 @@ std::vector<HistoryItem> HistoryStore::Query(const HistoryQuery& query) const {
 
     std::ostringstream sql;
     sql << "SELECT id, kind, created_at, text, html, files, payload_path, preview, search_text, content_hash, "
-           "is_pinned, is_favorite, is_phrase FROM history_items WHERE 1=1";
+           "is_pinned, is_favorite, is_phrase, favorite_group_id, note FROM history_items WHERE 1=1";
 
     const bool has_query = !NormalizeWhitespace(query.text).empty();
     if (has_query) {
@@ -390,6 +473,9 @@ std::vector<HistoryItem> HistoryStore::Query(const HistoryQuery& query) const {
     }
     if (query.favorites_only) {
         sql << " AND is_favorite = 1";
+        if (query.favorite_group_id) {
+            sql << " AND favorite_group_id = ?";
+        }
     } else {
         sql << " AND is_phrase = 0";
     }
@@ -409,6 +495,9 @@ std::vector<HistoryItem> HistoryStore::Query(const HistoryQuery& query) const {
     if (query.end_unix) {
         sqlite3_bind_int64(stmt.get(), bind_index++, *query.end_unix);
     }
+    if (query.favorites_only && query.favorite_group_id) {
+        sqlite3_bind_int64(stmt.get(), bind_index++, *query.favorite_group_id);
+    }
     sqlite3_bind_int(stmt.get(), bind_index, std::max(1, query.limit));
 
     std::vector<HistoryItem> items;
@@ -427,6 +516,10 @@ std::vector<HistoryItem> HistoryStore::Query(const HistoryQuery& query) const {
         item.is_pinned = sqlite3_column_int(stmt.get(), 10) != 0;
         item.is_favorite = sqlite3_column_int(stmt.get(), 11) != 0;
         item.is_phrase = sqlite3_column_int(stmt.get(), 12) != 0;
+        if (sqlite3_column_type(stmt.get(), 13) != SQLITE_NULL) {
+            item.favorite_group_id = sqlite3_column_int64(stmt.get(), 13);
+        }
+        item.note = DbText(stmt.get(), 14);
         items.push_back(std::move(item));
     }
     return items;
@@ -439,7 +532,7 @@ std::optional<HistoryItem> HistoryStore::Get(int64_t id) const {
 
     Statement stmt(impl_->db,
                    "SELECT id, kind, created_at, text, html, files, payload_path, preview, search_text, content_hash, "
-                   "is_pinned, is_favorite, is_phrase "
+                   "is_pinned, is_favorite, is_phrase, favorite_group_id, note "
                    "FROM history_items WHERE id = ?;");
     sqlite3_bind_int64(stmt.get(), 1, id);
     if (sqlite3_step(stmt.get()) != SQLITE_ROW) {
@@ -460,6 +553,10 @@ std::optional<HistoryItem> HistoryStore::Get(int64_t id) const {
     item.is_pinned = sqlite3_column_int(stmt.get(), 10) != 0;
     item.is_favorite = sqlite3_column_int(stmt.get(), 11) != 0;
     item.is_phrase = sqlite3_column_int(stmt.get(), 12) != 0;
+    if (sqlite3_column_type(stmt.get(), 13) != SQLITE_NULL) {
+        item.favorite_group_id = sqlite3_column_int64(stmt.get(), 13);
+    }
+    item.note = DbText(stmt.get(), 14);
     return item;
 }
 
@@ -479,6 +576,55 @@ bool HistoryStore::SetFavorite(int64_t id, bool favorite) {
     sqlite3_bind_int64(stmt.get(), 2, id);
     if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
         ThrowSqlite(impl_->db, "sqlite set favorite failed");
+    }
+    return sqlite3_changes(impl_->db) > 0;
+}
+
+bool HistoryStore::SetFavoriteGroup(int64_t id, std::optional<int64_t> group_id) {
+    Statement stmt(impl_->db, "UPDATE history_items SET is_favorite = 1, favorite_group_id = ? WHERE id = ?;");
+    BindOptionalInt64(stmt.get(), 1, group_id);
+    sqlite3_bind_int64(stmt.get(), 2, id);
+    if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
+        ThrowSqlite(impl_->db, "sqlite set favorite group failed");
+    }
+    return sqlite3_changes(impl_->db) > 0;
+}
+
+bool HistoryStore::DeleteFavoriteGroup(int64_t group_id) {
+    if (!impl_->db) {
+        throw std::runtime_error("database is not open");
+    }
+
+    Exec(impl_->db, "BEGIN IMMEDIATE;");
+    try {
+        {
+            Statement delete_items(impl_->db, "DELETE FROM history_items WHERE favorite_group_id = ?;");
+            sqlite3_bind_int64(delete_items.get(), 1, group_id);
+            if (sqlite3_step(delete_items.get()) != SQLITE_DONE) {
+                ThrowSqlite(impl_->db, "sqlite delete favorite group items failed");
+            }
+        }
+
+        Statement delete_group(impl_->db, "DELETE FROM favorite_groups WHERE id = ?;");
+        sqlite3_bind_int64(delete_group.get(), 1, group_id);
+        if (sqlite3_step(delete_group.get()) != SQLITE_DONE) {
+            ThrowSqlite(impl_->db, "sqlite delete favorite group failed");
+        }
+        const bool deleted = sqlite3_changes(impl_->db) > 0;
+        Exec(impl_->db, "COMMIT;");
+        return deleted;
+    } catch (...) {
+        TryExec(impl_->db, "ROLLBACK;");
+        throw;
+    }
+}
+
+bool HistoryStore::SetNote(int64_t id, std::wstring_view note) {
+    Statement stmt(impl_->db, "UPDATE history_items SET note = ? WHERE id = ?;");
+    BindText(stmt.get(), 1, NormalizeWhitespace(note));
+    sqlite3_bind_int64(stmt.get(), 2, id);
+    if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
+        ThrowSqlite(impl_->db, "sqlite set note failed");
     }
     return sqlite3_changes(impl_->db) > 0;
 }

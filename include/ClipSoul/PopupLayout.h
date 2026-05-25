@@ -2,8 +2,10 @@
 
 #include <Windows.h>
 
+#include <cstddef>
 #include <optional>
 #include <cstdint>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -32,7 +34,7 @@ struct PopupMetricsData {
     int corner_radius = 18;
     int header_button_size = 22;
     int toolbar_icon_size = 14;
-    float glass_tint_opacity = 0.18f;
+    float glass_tint_opacity = 0.14f;
 };
 
 struct PopupToolbarLayout {
@@ -61,11 +63,13 @@ struct PopupCardLayout {
     UiRect meta;
     UiRect time;
     UiRect menu;
+    UiRect expand;
 };
 
 struct PopupTabsLayout {
     UiRect history;
     UiRect favorites;
+    UiRect favorite_group;
     UiRect add_favorite_phrase;
     UiRect active_indicator;
     UiRect divider;
@@ -88,6 +92,15 @@ struct PopupFilterLayout {
     UiRect calendar_title;
     UiRect reset;
     UiRect done;
+};
+
+struct PopupFavoriteGroupMenuLayout {
+    UiRect panel;
+    UiRect all_favorites;
+    UiRect group_rows;
+    UiRect new_group;
+    UiRect first_divider;
+    UiRect second_divider;
 };
 
 struct PopupSearchLayout {
@@ -136,6 +149,11 @@ enum class PopupIconAssetSlot {
     Trash,
 };
 
+enum class PopupFavoriteFolderIconSlot {
+    Outline,
+    Filled,
+};
+
 struct PopupDateRangeState {
     std::optional<PopupCalendarDate> start;
     std::optional<PopupCalendarDate> end;
@@ -175,15 +193,50 @@ enum class PopupFilterTarget {
     Done,
 };
 
+enum class PopupFavoriteGroupMenuTarget {
+    None,
+    Panel,
+    AllFavorites,
+    Group,
+    DeleteGroup,
+    NewGroup,
+};
+
+struct PopupFavoriteGroupMenuHit {
+    PopupFavoriteGroupMenuTarget target = PopupFavoriteGroupMenuTarget::None;
+    size_t group_index = 0;
+};
+
+enum class PopupItemPressReleaseAction {
+    None,
+    Paste,
+    SelectOnly,
+};
+
+enum class PopupItemPressMoveAction {
+    KeepPress,
+    CancelPress,
+    SelectHitItem,
+};
+
 const PopupMetricsData& PopupMetrics();
+int PopupItemLongPressMilliseconds();
 int ScalePopupMetricForDpi(int value, unsigned dpi);
 int PopupHeightForVisibleItems(int visible_items);
 int PopupVisibleCardCapacity();
 int ClampPopupScrollOffset(int item_count, int requested_offset);
 int PopupScrollOffsetAfterWheel(int item_count, int current_offset, short wheel_delta);
+int ClampPopupSelectedIndex(int item_count, int selected_index);
+int PopupNextSelectedIndex(int item_count, int selected_index);
+int PopupScrollOffsetToRevealSelection(int item_count, int current_offset, int selected_index);
+UiRect PopupScrollbarTrackRect();
+UiRect PopupScrollbarHitRect();
+UiRect PopupScrollbarThumbRect(int item_count, int scroll_offset);
+int PopupScrollOffsetForThumbCenterY(int item_count, float thumb_center_y);
 PopupThemePalette ResolvePopupThemePalette(int theme_mode, bool system_dark);
 std::wstring_view PopupSearchPlaceholderText();
 std::wstring_view PopupSearchDisplayText(std::wstring_view query);
+std::wstring PopupEmptyMessage(bool favorites_view, std::wstring_view active_favorite_group);
 bool PopupSearchCaretVisible(bool focused, bool blink_on);
 bool PopupSearchAcceptsTextInput(bool focused);
 bool PopupSearchShouldUpdateImePosition(bool focused, bool updating_ime);
@@ -204,11 +257,24 @@ UiRect BuildPopupHeaderCloseIconRect(const PopupHeaderLayout& header);
 PopupToolbarLayout BuildPopupToolbarLayout(bool multi_select);
 UiRect PopupToolbarLabelRect(const UiRect& button, bool has_chevron);
 PopupTabsLayout BuildPopupTabsLayout(bool favorites_active);
+UiRect PopupFavoriteGroupIconRect(const PopupTabsLayout& tabs);
 PopupFilterLayout BuildPopupFilterLayout();
+size_t PopupFavoriteGroupMenuVisibleGroupCount(size_t group_count);
+PopupFavoriteGroupMenuLayout BuildPopupFavoriteGroupMenuLayout(size_t group_count);
+UiRect PopupFavoriteGroupMenuGroupRect(const PopupFavoriteGroupMenuLayout& layout, size_t index);
+UiRect PopupFavoriteGroupMenuDeleteRect(const UiRect& group_row);
+PopupFavoriteGroupMenuHit HitTestPopupFavoriteGroupMenu(const PopupFavoriteGroupMenuLayout& layout,
+                                                        size_t group_count, float x, float y);
 UiRect PopupFilterResetVisualRect(const PopupFilterLayout& layout);
 UiRect PopupFilterArrowGlyphRect(const UiRect& arrow_button);
 std::vector<PopupCalendarWeekdayLabel> BuildPopupCalendarWeekdayLabels(const PopupFilterLayout& layout);
 PopupCardLayout BuildPopupCardLayout(bool multi_select, float top);
+UiRect PopupCardKindIconRect(const PopupCardLayout& card);
+float PopupExpandedCardExtraHeight(bool expanded);
+int HitTestPopupCardIndex(int item_count, int scroll_offset, std::optional<int64_t> expanded_item_id,
+                          const std::vector<int64_t>& visible_item_ids, float x, float y);
+int HitTestPopupCardExpandIndex(int item_count, int scroll_offset, std::optional<int64_t> expanded_item_id,
+                                const std::vector<int64_t>& visible_item_ids, float x, float y);
 UiRect FitImageRectToBounds(float source_width, float source_height, const UiRect& bounds);
 std::vector<PopupCalendarCell> BuildPopupCalendarCells(const PopupFilterLayout& layout, int year, int month);
 std::optional<PopupCalendarDate> HitTestPopupCalendarDate(const PopupFilterLayout& layout, int year, int month,
@@ -223,6 +289,12 @@ POINT PopupBottomRightFallback(SIZE size, RECT work, unsigned dpi);
 POINT CenterWindowInWorkArea(SIZE size, RECT work);
 int PopupHoverItemIndex(bool filter_open, int hit_item_index);
 bool ShouldHidePopupAfterPaste(bool pinned_open);
+bool ShouldHidePopupAfterContinuousPaste(bool pinned_open);
+bool ShouldHidePopupAfterOutsideClick(bool pinned_open, bool prompt_open, bool visible, bool click_inside_popup);
+PopupItemPressReleaseAction PopupItemPressReleaseActionFor(bool same_item, bool long_press_selected);
+PopupItemPressMoveAction PopupItemPressMoveActionFor(bool long_press_selected, bool moved_past_cancel_distance,
+                                                     int hit_item_index);
+std::optional<int> PopupSelectionIndexWhileLongPressing(bool long_press_selected, int hit_item_index);
 std::wstring_view PopupFavoriteMenuLabel(bool is_favorite);
 std::wstring_view PopupPinMenuLabel(bool is_pinned);
 bool IsPopupHeaderDragArea(float x, float y);
@@ -230,5 +302,6 @@ PopupIconAssetSlot PopupPinIconSlot(bool pinned_open);
 PopupIconAssetSlot PopupFilterIconSlot(bool filter_open);
 PopupIconAssetSlot PopupMultiSelectIconSlot(bool active);
 PopupIconAssetSlot PopupPasteSelectedIconSlot();
+PopupFavoriteFolderIconSlot PopupFavoriteFolderIconSlotForGroup(bool active);
 
 } // namespace ClipSoul

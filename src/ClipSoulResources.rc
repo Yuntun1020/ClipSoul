@@ -2,8 +2,8 @@
 #include <winver.h>
 
 #define CLIPSOUL_VERSION_MAJOR 1
-#define CLIPSOUL_VERSION_MINOR 0
-#define CLIPSOUL_VERSION_PATCH 2
+#define CLIPSOUL_VERSION_MINOR 1
+#define CLIPSOUL_VERSION_PATCH 0
 #define CLIPSOUL_VERSION_BUILD 0
 
 IDR_CLIPSOUL_ICON_PIN RCDATA "../assets/icons/pin.png"
@@ -16,6 +16,8 @@ IDR_CLIPSOUL_ICON_MULTI_SELECT_ACTIVE RCDATA "../assets/icons/multi-select-activ
 IDR_CLIPSOUL_ICON_TRASH RCDATA "../assets/icons/trash.png"
 IDR_CLIPSOUL_ICON_TEXT_KIND RCDATA "../assets/icons/text-kind.png"
 IDR_CLIPSOUL_ICON_LINK_KIND RCDATA "../assets/icons/link-kind.png"
+IDR_CLIPSOUL_ICON_ADD_FAVORITE_FOLDER_OUTLINE RCDATA "../assets/icons/add-favorite-folder-outline.png"
+IDR_CLIPSOUL_ICON_ADD_FAVORITE_FOLDER_FILLED RCDATA "../assets/icons/add-favorite-folder-filled.png"
 
 VS_VERSION_INFO VERSIONINFO
  FILEVERSION CLIPSOUL_VERSION_MAJOR,CLIPSOUL_VERSION_MINOR,CLIPSOUL_VERSION_PATCH,CLIPSOUL_VERSION_BUILD
@@ -36,11 +38,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "Yuntun1020"
             VALUE "FileDescription", "ClipSoul clipboard history"
-            VALUE "FileVersion", "1.0.2.0"
+            VALUE "FileVersion", "1.1.0.0"
             VALUE "InternalName", "ClipSoul"
             VALUE "OriginalFilename", "ClipSoul.exe"
             VALUE "ProductName", "ClipSoul"
-            VALUE "ProductVersion", "1.0.2"
+            VALUE "ProductVersion", "1.1.0"
         END
     END
     BLOCK "VarFileInfo"

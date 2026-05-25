@@ -1,6 +1,7 @@
 #include "TestHarness.h"
 
 #include "ClipSoul/PasteModel.h"
+#include "ClipSoul/PasteController.h"
 
 namespace {
 ClipSoul::HistoryItem TextItem(int64_t id, std::wstring text) {
@@ -46,6 +47,31 @@ TEST_CASE(MultiPastePayloadCombinesTextAndLinksInListOrder) {
     REQUIRE_EQ(payload.text, std::wstring(L"第一条\r\nhttps://example.com/long/path?query=1\r\n第三条"));
     REQUIRE(payload.files.empty());
     REQUIRE(!payload.first_image);
+}
+
+TEST_CASE(PasteTargetActivationSkipsAlreadyForegroundWindow) {
+    HWND foreground = reinterpret_cast<HWND>(0x1234);
+    HWND target = foreground;
+
+    REQUIRE(!ClipSoul::ShouldActivatePasteTarget(target, foreground));
+    REQUIRE(!ClipSoul::ShouldActivatePasteTarget(nullptr, foreground));
+    REQUIRE(ClipSoul::ShouldActivatePasteTarget(reinterpret_cast<HWND>(0x5678), foreground));
+}
+
+TEST_CASE(PasteShortcutReleasesAltLikeModifiersBeforeCtrlV) {
+    REQUIRE(ClipSoul::ShouldReleaseModifierForPaste(VK_MENU, true));
+    REQUIRE(ClipSoul::ShouldReleaseModifierForPaste(VK_SHIFT, true));
+    REQUIRE(ClipSoul::ShouldReleaseModifierForPaste(VK_LWIN, true));
+    REQUIRE(!ClipSoul::ShouldReleaseModifierForPaste(VK_CONTROL, true));
+    REQUIRE(!ClipSoul::ShouldReleaseModifierForPaste(VK_MENU, false));
+}
+
+TEST_CASE(PasteShortcutRestoresHeldModifiersAfterCtrlV) {
+    REQUIRE(ClipSoul::ShouldRestoreModifierAfterPaste(VK_CONTROL, true));
+    REQUIRE(ClipSoul::ShouldRestoreModifierAfterPaste(VK_MENU, true));
+    REQUIRE(ClipSoul::ShouldRestoreModifierAfterPaste(VK_SHIFT, true));
+    REQUIRE(!ClipSoul::ShouldRestoreModifierAfterPaste('V', true));
+    REQUIRE(!ClipSoul::ShouldRestoreModifierAfterPaste(VK_MENU, false));
 }
 
 TEST_CASE(MultiPastePayloadKeepsFilesAlongsideCombinedText) {

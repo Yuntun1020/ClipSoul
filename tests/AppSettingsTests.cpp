@@ -15,10 +15,12 @@ TEST_CASE(AppSettingsDefaultsUseAltC) {
 
     REQUIRE_EQ(settings.hotkey_modifiers, static_cast<unsigned>(MOD_ALT));
     REQUIRE_EQ(settings.hotkey_vk, static_cast<unsigned>('C'));
+    REQUIRE_EQ(settings.continuous_paste_hotkey_modifiers, static_cast<unsigned>(MOD_CONTROL | MOD_ALT));
+    REQUIRE_EQ(settings.continuous_paste_hotkey_vk, static_cast<unsigned>('V'));
 }
 
 TEST_CASE(AppVersionLabelIsCurrentRelease) {
-    REQUIRE_EQ(std::wstring(ClipSoul::kClipSoulVersion), std::wstring(L"v1.0.2"));
+    REQUIRE_EQ(std::wstring(ClipSoul::kClipSoulVersion), std::wstring(L"v1.1.0"));
 }
 
 TEST_CASE(AppSettingsDefaultsMigrateLegacyCtrlShiftV) {
@@ -35,6 +37,7 @@ TEST_CASE(AppSettingsDefaultsMigrateLegacyCtrlShiftV) {
 TEST_CASE(AppSettingsFormatHotkeyLabel) {
     REQUIRE_EQ(ClipSoul::FormatHotkey(MOD_ALT, 'C'), std::wstring(L"Alt+C"));
     REQUIRE_EQ(ClipSoul::FormatHotkey(MOD_CONTROL | MOD_SHIFT, 'V'), std::wstring(L"Ctrl+Shift+V"));
+    REQUIRE_EQ(ClipSoul::FormatHotkey(MOD_CONTROL | MOD_ALT, 'V'), std::wstring(L"Ctrl+Alt+V"));
 }
 
 TEST_CASE(AppSettingsDefaultsThemeToSystem) {
@@ -70,12 +73,16 @@ TEST_CASE(AppSettingsPersistsHistoryLimitAndDefaultHotkey) {
     settings.history_limit = 120;
     settings.hotkey_modifiers = MOD_ALT;
     settings.hotkey_vk = 'C';
+    settings.continuous_paste_hotkey_modifiers = MOD_CONTROL | MOD_ALT;
+    settings.continuous_paste_hotkey_vk = 'V';
     store.SaveSettings(settings);
 
     const auto saved = store.LoadSettings();
     REQUIRE_EQ(saved.history_limit, 120);
     REQUIRE_EQ(saved.hotkey_modifiers, static_cast<unsigned>(MOD_ALT));
     REQUIRE_EQ(saved.hotkey_vk, static_cast<unsigned>('C'));
+    REQUIRE_EQ(saved.continuous_paste_hotkey_modifiers, static_cast<unsigned>(MOD_CONTROL | MOD_ALT));
+    REQUIRE_EQ(saved.continuous_paste_hotkey_vk, static_cast<unsigned>('V'));
 }
 
 TEST_CASE(StorageConfigUsesDefaultWhenCustomPathIsEmpty) {

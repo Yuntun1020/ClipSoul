@@ -101,7 +101,13 @@ bool App::Initialize() {
 
 bool App::RegisterHotkey() {
     UnregisterHotKey(hwnd_, HOTKEY_ID_POPUP);
-    return RegisterHotKey(hwnd_, HOTKEY_ID_POPUP, settings_.hotkey_modifiers, settings_.hotkey_vk) == TRUE;
+    UnregisterHotKey(hwnd_, HOTKEY_ID_CONTINUOUS_PASTE);
+    const bool popup_registered =
+        RegisterHotKey(hwnd_, HOTKEY_ID_POPUP, settings_.hotkey_modifiers, settings_.hotkey_vk) == TRUE;
+    RegisterHotKey(hwnd_, HOTKEY_ID_CONTINUOUS_PASTE,
+                   settings_.continuous_paste_hotkey_modifiers,
+                   settings_.continuous_paste_hotkey_vk);
+    return popup_registered;
 }
 
 void App::TogglePaused() {
@@ -123,7 +129,7 @@ void App::ClearHistory() {
 
 void App::ShowSettings() {
     if (!settings_window_) {
-        settings_window_ = std::make_unique<SettingsWindow>(instance_, store_, *this);
+        settings_window_ = std::make_unique<SettingsWindow>(instance_, *this);
         settings_window_->Create(nullptr);
     }
     settings_window_->Show();
@@ -147,6 +153,10 @@ bool App::SaveStorageDirectory(const std::filesystem::path& storage_dir) {
 
 bool App::HotkeyAvailable(unsigned modifiers, unsigned vk) const {
     if (settings_.hotkey_modifiers == modifiers && settings_.hotkey_vk == vk) {
+        return true;
+    }
+    if (settings_.continuous_paste_hotkey_modifiers == modifiers &&
+        settings_.continuous_paste_hotkey_vk == vk) {
         return true;
     }
     constexpr int probe_id = 9171;
@@ -186,7 +196,32 @@ void App::OnHotkey() {
         if (popup_->IsVisible()) {
             popup_->Hide();
         } else {
+            continuous_paste_.Reset();
             popup_->Show(GetForegroundWindow());
+        }
+    }
+}
+
+std::optional<int64_t> App::SelectedPopupItemId() const {
+    if (popup_ && popup_->IsVisible()) {
+        return popup_->SelectedItemId();
+    }
+    return std::nullopt;
+}
+
+void App::OnContinuousPasteHotkey() {
+    if (popup_ && popup_->IsVisible()) {
+        popup_->PasteSelectedForContinuousPaste();
+        return;
+    }
+
+    HistoryQuery query;
+    query.limit = settings_.history_limit;
+    const auto items = store_.Query(query);
+    HWND target = GetForegroundWindow();
+    if (const auto item = continuous_paste_.NextFromSelection(items, std::nullopt)) {
+        if (paste_controller_.RestoreToClipboard(*item, hwnd_)) {
+            paste_controller_.SendPaste(target);
         }
     }
 }
@@ -230,6 +265,10 @@ LRESULT App::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
     case WM_HOTKEY:
         if (wparam == HOTKEY_ID_POPUP) {
             OnHotkey();
+            return 0;
+        }
+        if (wparam == HOTKEY_ID_CONTINUOUS_PASTE) {
+            OnContinuousPasteHotkey();
             return 0;
         }
         break;

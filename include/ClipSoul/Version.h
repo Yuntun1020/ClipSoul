@@ -4,6 +4,6 @@
 
 namespace ClipSoul {
 
-constexpr std::wstring_view kClipSoulVersion = L"v1.0.2";
+constexpr std::wstring_view kClipSoulVersion = L"v1.1.0";
 
 } // namespace ClipSoul

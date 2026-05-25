@@ -103,21 +103,41 @@ bool PasteController::RestoreMultipleToClipboard(const std::vector<HistoryItem>&
 }
 
 void PasteController::SendPaste(HWND target) const {
-    if (target) {
+    if (ShouldActivatePasteTarget(target, GetForegroundWindow())) {
         SetForegroundWindow(target);
     }
-    INPUT inputs[4]{};
-    inputs[0].type = INPUT_KEYBOARD;
-    inputs[0].ki.wVk = VK_CONTROL;
-    inputs[1].type = INPUT_KEYBOARD;
-    inputs[1].ki.wVk = 'V';
-    inputs[2].type = INPUT_KEYBOARD;
-    inputs[2].ki.wVk = 'V';
-    inputs[2].ki.dwFlags = KEYEVENTF_KEYUP;
-    inputs[3].type = INPUT_KEYBOARD;
-    inputs[3].ki.wVk = VK_CONTROL;
-    inputs[3].ki.dwFlags = KEYEVENTF_KEYUP;
-    SendInput(4, inputs, sizeof(INPUT));
+    std::vector<INPUT> inputs;
+    inputs.reserve(16);
+    const auto add_key = [&inputs](WORD vk, DWORD flags = 0) {
+        INPUT input{};
+        input.type = INPUT_KEYBOARD;
+        input.ki.wVk = vk;
+        input.ki.dwFlags = flags;
+        inputs.push_back(input);
+    };
+
+    constexpr WORD kModifiers[] = {VK_CONTROL, VK_MENU, VK_SHIFT, VK_LWIN, VK_RWIN};
+    std::vector<WORD> physically_down;
+    physically_down.reserve(std::size(kModifiers));
+    for (const WORD vk : kModifiers) {
+        const bool down = (GetAsyncKeyState(vk) & 0x8000) != 0;
+        if (down) {
+            physically_down.push_back(vk);
+        }
+        if (ShouldReleaseModifierForPaste(vk, down)) {
+            add_key(vk, KEYEVENTF_KEYUP);
+        }
+    }
+    add_key(VK_CONTROL);
+    add_key('V');
+    add_key('V', KEYEVENTF_KEYUP);
+    add_key(VK_CONTROL, KEYEVENTF_KEYUP);
+    for (const WORD vk : physically_down) {
+        if (ShouldRestoreModifierAfterPaste(vk, true)) {
+            add_key(vk);
+        }
+    }
+    SendInput(static_cast<UINT>(inputs.size()), inputs.data(), sizeof(INPUT));
 }
 
 bool PasteController::SetText(const HistoryItem& item) const {

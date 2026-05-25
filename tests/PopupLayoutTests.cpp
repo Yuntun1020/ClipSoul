@@ -95,11 +95,60 @@ TEST_CASE(PopupIconSlotsUseOutlinedIdleAndFilledActiveStates) {
     REQUIRE_EQ(ClipSoul::PopupMultiSelectIconSlot(false), ClipSoul::PopupIconAssetSlot::MultiSelect);
     REQUIRE_EQ(ClipSoul::PopupMultiSelectIconSlot(true), ClipSoul::PopupIconAssetSlot::MultiSelectActive);
     REQUIRE_EQ(ClipSoul::PopupPasteSelectedIconSlot(), ClipSoul::PopupIconAssetSlot::MultiSelectActive);
+    REQUIRE_EQ(ClipSoul::PopupFavoriteFolderIconSlotForGroup(false), ClipSoul::PopupFavoriteFolderIconSlot::Outline);
+    REQUIRE_EQ(ClipSoul::PopupFavoriteFolderIconSlotForGroup(true), ClipSoul::PopupFavoriteFolderIconSlot::Filled);
+}
+
+TEST_CASE(PopupEmptyMessageShowsSelectedFavoriteGroupName) {
+    REQUIRE_EQ(ClipSoul::PopupEmptyMessage(false, L""), std::wstring(L"\u6682\u65e0\u5386\u53f2\u8bb0\u5f55"));
+    REQUIRE_EQ(ClipSoul::PopupEmptyMessage(true, L""), std::wstring(L"\u6536\u85cf\u5939\u6682\u65e0\u5185\u5bb9"));
+    REQUIRE_EQ(ClipSoul::PopupEmptyMessage(true, L"\u5de5\u4f5c"),
+               std::wstring(L"\u5de5\u4f5c\u6682\u65e0\u5185\u5bb9"));
 }
 
 TEST_CASE(PopupPinnedWindowStaysVisibleAfterPaste) {
     REQUIRE(ClipSoul::ShouldHidePopupAfterPaste(false));
     REQUIRE(!ClipSoul::ShouldHidePopupAfterPaste(true));
+    REQUIRE(!ClipSoul::ShouldHidePopupAfterContinuousPaste(false));
+    REQUIRE(!ClipSoul::ShouldHidePopupAfterContinuousPaste(true));
+}
+
+TEST_CASE(PopupItemLongPressThresholdIsShorterThanSystemDoubleClick) {
+    REQUIRE_EQ(ClipSoul::PopupItemLongPressMilliseconds(), 100);
+}
+
+TEST_CASE(PopupItemPressReleaseDistinguishesShortClickAndLongPress) {
+    REQUIRE_EQ(ClipSoul::PopupItemPressReleaseActionFor(true, false),
+               ClipSoul::PopupItemPressReleaseAction::Paste);
+    REQUIRE_EQ(ClipSoul::PopupItemPressReleaseActionFor(true, true),
+               ClipSoul::PopupItemPressReleaseAction::SelectOnly);
+    REQUIRE_EQ(ClipSoul::PopupItemPressReleaseActionFor(false, false),
+               ClipSoul::PopupItemPressReleaseAction::None);
+}
+
+TEST_CASE(PopupLongPressDragCanSelectItemBeforeMouseUp) {
+    REQUIRE_EQ(ClipSoul::PopupItemPressMoveActionFor(false, true, 4),
+               ClipSoul::PopupItemPressMoveAction::CancelPress);
+    REQUIRE_EQ(ClipSoul::PopupItemPressMoveActionFor(false, false, 4),
+               ClipSoul::PopupItemPressMoveAction::KeepPress);
+    REQUIRE_EQ(ClipSoul::PopupItemPressMoveActionFor(true, true, 4),
+               ClipSoul::PopupItemPressMoveAction::SelectHitItem);
+    REQUIRE_EQ(ClipSoul::PopupItemPressMoveActionFor(true, true, -1),
+               ClipSoul::PopupItemPressMoveAction::KeepPress);
+
+    const auto selected = ClipSoul::PopupSelectionIndexWhileLongPressing(true, 4);
+    REQUIRE(selected.has_value());
+    REQUIRE_EQ(*selected, 4);
+    REQUIRE(!ClipSoul::PopupSelectionIndexWhileLongPressing(false, 4).has_value());
+    REQUIRE(!ClipSoul::PopupSelectionIndexWhileLongPressing(true, -1).has_value());
+}
+
+TEST_CASE(PopupOutsideClickHidesOnlyWhenUnpinned) {
+    REQUIRE(ClipSoul::ShouldHidePopupAfterOutsideClick(false, false, true, false));
+    REQUIRE(!ClipSoul::ShouldHidePopupAfterOutsideClick(true, false, true, false));
+    REQUIRE(!ClipSoul::ShouldHidePopupAfterOutsideClick(false, true, true, false));
+    REQUIRE(!ClipSoul::ShouldHidePopupAfterOutsideClick(false, false, true, true));
+    REQUIRE(!ClipSoul::ShouldHidePopupAfterOutsideClick(false, false, false, false));
 }
 
 TEST_CASE(PopupContextMenuLabelsReflectCurrentItemState) {
@@ -217,6 +266,38 @@ TEST_CASE(PopupCardMediaRectsSupportImagePreviewAndFileIcon) {
     REQUIRE(multi.title.left > normal.title.left);
 }
 
+TEST_CASE(PopupCardKindIconRectIsVisuallyCenteredInsideBadge) {
+    const auto card = ClipSoul::BuildPopupCardLayout(false, 168.0f);
+    const auto icon = ClipSoul::PopupCardKindIconRect(card);
+    const auto center_x = [](const ClipSoul::UiRect& rect) { return (rect.left + rect.right) * 0.5f; };
+    const auto center_y = [](const ClipSoul::UiRect& rect) { return (rect.top + rect.bottom) * 0.5f; };
+
+    REQUIRE(icon.left > card.stripe.left);
+    REQUIRE(icon.top > card.stripe.top);
+    REQUIRE(icon.right <= card.stripe.right);
+    REQUIRE(icon.bottom <= card.stripe.bottom);
+    REQUIRE_EQ(icon.Width(), 16.0f);
+    REQUIRE_EQ(icon.Height(), 16.0f);
+    REQUIRE(std::abs(center_x(icon) - center_x(card.stripe)) <= 0.01f);
+    REQUIRE(std::abs(center_y(icon) - center_y(card.stripe)) <= 0.01f);
+}
+
+TEST_CASE(PopupFavoriteGroupIconRectIsCenteredInButton) {
+    const auto tabs = ClipSoul::BuildPopupTabsLayout(true);
+    const auto icon = ClipSoul::PopupFavoriteGroupIconRect(tabs);
+    const auto center_x = [](const ClipSoul::UiRect& rect) { return (rect.left + rect.right) * 0.5f; };
+    const auto center_y = [](const ClipSoul::UiRect& rect) { return (rect.top + rect.bottom) * 0.5f; };
+
+    REQUIRE(icon.left > tabs.favorite_group.left);
+    REQUIRE(icon.top > tabs.favorite_group.top);
+    REQUIRE(icon.right < tabs.favorite_group.right);
+    REQUIRE(icon.bottom < tabs.favorite_group.bottom);
+    REQUIRE_EQ(icon.Width(), 16.0f);
+    REQUIRE_EQ(icon.Height(), 16.0f);
+    REQUIRE(std::abs(center_x(icon) - center_x(tabs.favorite_group)) <= 0.01f);
+    REQUIRE(std::abs(center_y(icon) - center_y(tabs.favorite_group)) <= 0.01f);
+}
+
 TEST_CASE(PopupImagePreviewFitPreservesAspectRatioInsideBounds) {
     const ClipSoul::UiRect bounds{10.0f, 20.0f, 68.0f, 78.0f};
 
@@ -265,6 +346,65 @@ TEST_CASE(PopupMouseWheelMovesVisibleHistoryWindow) {
     REQUIRE_EQ(ClipSoul::PopupScrollOffsetAfterWheel(9, 4, -120), 4);
 }
 
+TEST_CASE(PopupSelectionStaysBoundToItemWhenListScrolls) {
+    REQUIRE_EQ(ClipSoul::ClampPopupSelectedIndex(9, 7), 7);
+    REQUIRE_EQ(ClipSoul::PopupScrollOffsetAfterWheel(9, 0, -120), 1);
+    REQUIRE_EQ(ClipSoul::ClampPopupSelectedIndex(9, 7), 7);
+}
+
+TEST_CASE(PopupContinuousPasteMovesHighlightToNextItemAndRevealsIt) {
+    REQUIRE_EQ(ClipSoul::PopupNextSelectedIndex(4, 1), 2);
+    REQUIRE_EQ(ClipSoul::PopupNextSelectedIndex(4, 3), 0);
+    REQUIRE_EQ(ClipSoul::PopupScrollOffsetToRevealSelection(9, 0, 7), 3);
+    REQUIRE_EQ(ClipSoul::PopupScrollOffsetToRevealSelection(9, 3, 2), 2);
+}
+
+TEST_CASE(PopupScrollbarThumbMapsDragPositionToScrollOffset) {
+    const auto track = ClipSoul::PopupScrollbarTrackRect();
+    const auto hit = ClipSoul::PopupScrollbarHitRect();
+    const auto top_thumb = ClipSoul::PopupScrollbarThumbRect(10, 0);
+    const auto bottom_thumb = ClipSoul::PopupScrollbarThumbRect(10, 5);
+
+    REQUIRE(track.left >= ClipSoul::PopupMetrics().width - 14.0f);
+    REQUIRE(hit.left < track.left);
+    REQUIRE(hit.right >= track.right);
+    REQUIRE(hit.Width() >= 14.0f);
+    REQUIRE(top_thumb.top >= track.top);
+    REQUIRE(bottom_thumb.bottom <= track.bottom);
+    REQUIRE(bottom_thumb.top > top_thumb.top);
+    REQUIRE_EQ(ClipSoul::PopupScrollOffsetForThumbCenterY(10, (track.top + track.bottom) * 0.5f), 3);
+    REQUIRE_EQ(ClipSoul::PopupScrollOffsetForThumbCenterY(10, track.bottom + 200.0f), 5);
+}
+
+TEST_CASE(PopupCardExpandButtonUsesRightSideChevronSlot) {
+    const auto card = ClipSoul::BuildPopupCardLayout(false, 168.0f);
+
+    REQUIRE(card.expand.Width() >= 22.0f);
+    REQUIRE(card.expand.Height() >= 22.0f);
+    REQUIRE(card.expand.right <= card.card.right - 8.0f);
+    REQUIRE(card.expand.left > card.menu.left);
+    REQUIRE(!ClipSoul::RectsOverlap(card.expand, card.time));
+}
+
+TEST_CASE(PopupHitTestingUsesExpandedCardHeight) {
+    const auto first = ClipSoul::BuildPopupCardLayout(false, ClipSoul::PopupListTop());
+    const std::vector<int64_t> ids{10, 20, 30};
+    const float second_y = first.card.bottom + ClipSoul::PopupExpandedCardExtraHeight(true) +
+                           ClipSoul::PopupMetrics().card_gap + 8.0f;
+
+    REQUIRE_EQ(ClipSoul::HitTestPopupCardIndex(3, 0, static_cast<int64_t>(10), ids, 120.0f, second_y), 1);
+    REQUIRE_EQ(ClipSoul::HitTestPopupCardExpandIndex(3, 0, static_cast<int64_t>(10), ids,
+                                                     first.expand.left + 4.0f, first.expand.top + 4.0f),
+               0);
+}
+
+TEST_CASE(PopupWindowTintIsSlightlyMoreTransparent) {
+    const auto palette = ClipSoul::ResolvePopupThemePalette(1, false);
+
+    REQUIRE(palette.window_opacity < 0.18f);
+    REQUIRE(palette.window_opacity >= 0.12f);
+}
+
 TEST_CASE(PopupTabsUseSegmentedTextLayoutNotButtons) {
     const auto metrics = ClipSoul::PopupMetrics();
     const auto history = ClipSoul::BuildPopupTabsLayout(false);
@@ -284,9 +424,66 @@ TEST_CASE(PopupTabsUseSegmentedTextLayoutNotButtons) {
     REQUIRE(history.divider.left == static_cast<float>(metrics.margin));
     REQUIRE(history.divider.right == static_cast<float>(metrics.width - metrics.margin));
     REQUIRE(favorites.active_indicator.left > history.active_indicator.left);
+    RequireInsidePanel(favorites.favorite_group);
+    REQUIRE(!ClipSoul::RectsOverlap(favorites.favorite_group, favorites.favorites));
+    REQUIRE(!ClipSoul::RectsOverlap(favorites.favorite_group, favorites.add_favorite_phrase));
     REQUIRE(favorites.add_favorite_phrase.Width() >= 24.0f);
     REQUIRE(favorites.add_favorite_phrase.right <= static_cast<float>(metrics.width - metrics.margin));
     REQUIRE(!ClipSoul::RectsOverlap(favorites.add_favorite_phrase, favorites.favorites));
+}
+
+TEST_CASE(PopupFavoriteGroupMenuUsesInWindowPopoverLayout) {
+    const auto metrics = ClipSoul::PopupMetrics();
+    const auto layout = ClipSoul::BuildPopupFavoriteGroupMenuLayout(3);
+
+    RequireInsidePanel(layout.panel);
+    REQUIRE(layout.panel.Width() >= 170.0f);
+    REQUIRE(layout.panel.right == static_cast<float>(metrics.width - metrics.margin));
+    REQUIRE(layout.panel.top > ClipSoul::PopupTabsTop());
+    REQUIRE(layout.panel.bottom < ClipSoul::PopupListTop() + 220.0f);
+    REQUIRE(layout.all_favorites.top > layout.panel.top);
+    REQUIRE(layout.first_divider.top > layout.all_favorites.bottom);
+    REQUIRE(layout.group_rows.top > layout.first_divider.bottom);
+    REQUIRE(layout.second_divider.top > layout.group_rows.bottom);
+    REQUIRE(layout.new_group.top > layout.second_divider.bottom);
+    REQUIRE(layout.new_group.bottom < layout.panel.bottom);
+
+    const auto first_group = ClipSoul::PopupFavoriteGroupMenuGroupRect(layout, 0);
+    const auto third_group = ClipSoul::PopupFavoriteGroupMenuGroupRect(layout, 2);
+    REQUIRE(first_group.top == layout.group_rows.top);
+    REQUIRE(third_group.top > first_group.top);
+    REQUIRE(third_group.bottom <= layout.group_rows.bottom);
+}
+
+TEST_CASE(PopupFavoriteGroupMenuHitTestFindsRowsAndCreateAction) {
+    const auto layout = ClipSoul::BuildPopupFavoriteGroupMenuLayout(2);
+
+    const auto all = ClipSoul::HitTestPopupFavoriteGroupMenu(
+        layout, 2, (layout.all_favorites.left + layout.all_favorites.right) * 0.5f,
+        (layout.all_favorites.top + layout.all_favorites.bottom) * 0.5f);
+    REQUIRE_EQ(all.target, ClipSoul::PopupFavoriteGroupMenuTarget::AllFavorites);
+
+    const auto second_group_rect = ClipSoul::PopupFavoriteGroupMenuGroupRect(layout, 1);
+    const auto second_group = ClipSoul::HitTestPopupFavoriteGroupMenu(
+        layout, 2, (second_group_rect.left + second_group_rect.right) * 0.5f,
+        (second_group_rect.top + second_group_rect.bottom) * 0.5f);
+    REQUIRE_EQ(second_group.target, ClipSoul::PopupFavoriteGroupMenuTarget::Group);
+    REQUIRE_EQ(second_group.group_index, static_cast<size_t>(1));
+
+    const auto delete_rect = ClipSoul::PopupFavoriteGroupMenuDeleteRect(second_group_rect);
+    const auto delete_group = ClipSoul::HitTestPopupFavoriteGroupMenu(
+        layout, 2, (delete_rect.left + delete_rect.right) * 0.5f, (delete_rect.top + delete_rect.bottom) * 0.5f);
+    REQUIRE_EQ(delete_group.target, ClipSoul::PopupFavoriteGroupMenuTarget::DeleteGroup);
+    REQUIRE_EQ(delete_group.group_index, static_cast<size_t>(1));
+
+    const auto create = ClipSoul::HitTestPopupFavoriteGroupMenu(
+        layout, 2, (layout.new_group.left + layout.new_group.right) * 0.5f,
+        (layout.new_group.top + layout.new_group.bottom) * 0.5f);
+    REQUIRE_EQ(create.target, ClipSoul::PopupFavoriteGroupMenuTarget::NewGroup);
+
+    const auto outside = ClipSoul::HitTestPopupFavoriteGroupMenu(layout, 2, layout.panel.left - 4.0f,
+                                                                 layout.panel.top - 4.0f);
+    REQUIRE_EQ(outside.target, ClipSoul::PopupFavoriteGroupMenuTarget::None);
 }
 
 TEST_CASE(PopupFilterPopoverContainsDateCalendarAndReset) {
