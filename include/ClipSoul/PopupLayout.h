@@ -258,6 +258,7 @@ PopupThemePalette ResolvePopupThemePalette(int theme_mode, bool system_dark);
 std::wstring_view PopupSearchPlaceholderText();
 std::wstring_view PopupSearchDisplayText(std::wstring_view query);
 std::wstring PopupEmptyMessage(bool favorites_view, std::wstring_view active_favorite_group);
+std::wstring PopupNotePreviewText(std::wstring_view note);
 bool PopupSearchCaretVisible(bool focused, bool blink_on);
 bool PopupSearchAcceptsTextInput(bool focused);
 bool PopupSearchShouldUpdateImePosition(bool focused, bool updating_ime);

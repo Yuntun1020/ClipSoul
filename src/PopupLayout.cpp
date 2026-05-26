@@ -383,6 +383,35 @@ std::wstring PopupEmptyMessage(bool favorites_view, std::wstring_view active_fav
     return message;
 }
 
+std::wstring PopupNotePreviewText(std::wstring_view note) {
+    constexpr size_t kMaxNotePreviewLength = 13;
+    std::wstring preview;
+    preview.reserve(std::min(note.size(), kMaxNotePreviewLength));
+    bool pending_space = false;
+    bool truncated = false;
+    for (const wchar_t ch : note) {
+        const bool line_break = ch == L'\r' || ch == L'\n' || ch == L'\u2028' || ch == L'\u2029';
+        const bool whitespace = line_break || ch == L'\t' || ch == L' ';
+        if (whitespace) {
+            pending_space = !preview.empty();
+            continue;
+        }
+        if (pending_space && !preview.empty() && preview.size() < kMaxNotePreviewLength) {
+            preview.push_back(L' ');
+        }
+        pending_space = false;
+        if (preview.size() >= kMaxNotePreviewLength) {
+            truncated = true;
+            break;
+        }
+        preview.push_back(ch);
+    }
+    if (truncated) {
+        preview += L"...";
+    }
+    return preview;
+}
+
 bool PopupSearchCaretVisible(bool focused, bool blink_on) {
     return focused && blink_on;
 }

@@ -651,7 +651,7 @@ std::wstring ItemMeta(const HistoryItem& item) {
     std::wstring meta = KindLabel(static_cast<int>(item.kind));
     if (item.is_pinned) meta += L" · 置顶";
     if (item.is_favorite) meta += L" · 收藏";
-    if (!item.note.empty()) meta += L" · 有备注";
+    if (!item.note.empty()) meta += L" · " + PopupNotePreviewText(item.note);
     return meta;
 }
 

@@ -106,6 +106,15 @@ TEST_CASE(PopupEmptyMessageShowsSelectedFavoriteGroupName) {
                std::wstring(L"\u5de5\u4f5c\u6682\u65e0\u5185\u5bb9"));
 }
 
+TEST_CASE(PopupNotePreviewShowsNoteSnippetInsteadOfGenericLabel) {
+    REQUIRE_EQ(ClipSoul::PopupNotePreviewText(L""), std::wstring());
+    REQUIRE_EQ(ClipSoul::PopupNotePreviewText(L"\u62a5\u4ef7\u6a21\u677f"), std::wstring(L"\u62a5\u4ef7\u6a21\u677f"));
+    REQUIRE_EQ(ClipSoul::PopupNotePreviewText(L"\u7b2c\u4e00\u884c\n\u7b2c\u4e8c\u884c"),
+               std::wstring(L"\u7b2c\u4e00\u884c \u7b2c\u4e8c\u884c"));
+    REQUIRE_EQ(ClipSoul::PopupNotePreviewText(L"\u8fd9\u662f\u4e00\u6bb5\u5f88\u957f\u7684\u5907\u6ce8\u5185\u5bb9\u7528\u6765\u9a8c\u8bc1\u7f29\u7565\u663e\u793a"),
+               std::wstring(L"\u8fd9\u662f\u4e00\u6bb5\u5f88\u957f\u7684\u5907\u6ce8\u5185\u5bb9\u7528\u6765..."));
+}
+
 TEST_CASE(PopupPinnedWindowStaysVisibleAfterPaste) {
     REQUIRE(ClipSoul::ShouldHidePopupAfterPaste(false));
     REQUIRE(!ClipSoul::ShouldHidePopupAfterPaste(true));
