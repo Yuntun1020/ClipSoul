@@ -169,10 +169,18 @@ bool App::HotkeyAvailable(unsigned modifiers, unsigned vk) const {
 
 void App::RefreshPopupTheme() {
     if (popup_) {
+        popup_->UpdateBehaviorFromSettings();
         popup_->Refresh();
     }
     if (settings_window_) {
         InvalidateRect(settings_window_->hwnd(), nullptr, FALSE);
+    }
+}
+
+void App::ResetPopupSize() {
+    if (popup_) {
+        popup_->ResetManualSize();
+        popup_->Refresh();
     }
 }
 

@@ -192,6 +192,47 @@ TEST_CASE(HistoryStoreAddsFavoritePhraseWithNoteAndGroup) {
     REQUIRE(favorites.front().is_phrase);
 }
 
+TEST_CASE(HistoryStorePreservesNoteLineBreaks) {
+    ClipSoul::HistoryStore store;
+    store.Open(TempDbPath(L"multiline-note.db"));
+
+    REQUIRE(store.Add(TextContent(L"alpha")));
+    const auto history = store.Query(ClipSoul::HistoryQuery{});
+    REQUIRE_EQ(history.size(), static_cast<size_t>(1));
+
+    const std::wstring note = L"第一行\n第二行\n第三行";
+    REQUIRE(store.SetNote(history.front().id, note));
+    const auto saved = store.Get(history.front().id);
+    REQUIRE(saved.has_value());
+    REQUIRE_EQ(saved->note, note);
+
+    REQUIRE(store.AddFavoritePhrase(L"phrase", L"备注一\n备注二", std::nullopt));
+    ClipSoul::HistoryQuery query;
+    query.favorites_only = true;
+    const auto favorites = store.Query(query);
+    REQUIRE_EQ(favorites.front().note, std::wstring(L"备注一\n备注二"));
+}
+
+TEST_CASE(HistoryStoreNormalizesWindowsEditNoteLineBreaks) {
+    ClipSoul::HistoryStore store;
+    store.Open(TempDbPath(L"windows-edit-note.db"));
+
+    REQUIRE(store.Add(TextContent(L"alpha")));
+    const auto history = store.Query(ClipSoul::HistoryQuery{});
+    REQUIRE_EQ(history.size(), static_cast<size_t>(1));
+
+    REQUIRE(store.SetNote(history.front().id, L"first line\r\nsecond line\r\nthird line"));
+    const auto saved = store.Get(history.front().id);
+    REQUIRE(saved.has_value());
+    REQUIRE_EQ(saved->note, std::wstring(L"first line\nsecond line\nthird line"));
+
+    REQUIRE(store.AddFavoritePhrase(L"phrase", L"note one\r\nnote two", std::nullopt));
+    ClipSoul::HistoryQuery query;
+    query.favorites_only = true;
+    const auto favorites = store.Query(query);
+    REQUIRE_EQ(favorites.front().note, std::wstring(L"note one\nnote two"));
+}
+
 TEST_CASE(HistoryStoreAddsFavoritePhraseAsFavoriteText) {
     ClipSoul::HistoryStore store;
     store.Open(TempDbPath(L"favorite-phrase.db"));

@@ -1,6 +1,7 @@
 #include "ClipSoul/TrayIcon.h"
 
 #include "ClipSoul/App.h"
+#include "ClipSoul/ResourceIds.h"
 
 namespace ClipSoul {
 
@@ -15,7 +16,12 @@ bool TrayIcon::Add(HWND hwnd, UINT callback_message) {
     data_.uID = 1;
     data_.uFlags = NIF_MESSAGE | NIF_TIP | NIF_ICON;
     data_.uCallbackMessage = callback_message;
-    data_.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    const int icon_size = GetSystemMetrics(SM_CXSMICON);
+    data_.hIcon = static_cast<HICON>(LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDI_CLIPSOUL_APP),
+                                                IMAGE_ICON, icon_size, icon_size, LR_DEFAULTCOLOR));
+    if (!data_.hIcon) {
+        data_.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    }
     wcscpy_s(data_.szTip, L"ClipSoul");
     added_ = Shell_NotifyIconW(NIM_ADD, &data_) == TRUE;
     if (added_) {
@@ -29,6 +35,10 @@ void TrayIcon::Remove() {
     if (added_) {
         Shell_NotifyIconW(NIM_DELETE, &data_);
         added_ = false;
+    }
+    if (data_.hIcon) {
+        DestroyIcon(data_.hIcon);
+        data_.hIcon = nullptr;
     }
 }
 

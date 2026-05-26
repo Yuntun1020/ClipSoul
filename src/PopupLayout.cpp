@@ -83,19 +83,49 @@ int PopupHeightForVisibleItems(int) {
 }
 
 int PopupVisibleCardCapacity() {
-    const float available = static_cast<float>(kMetrics.height) - PopupListTop();
+    return PopupVisibleCardCapacityForHeight(kMetrics.height);
+}
+
+int PopupVisibleCardCapacityForHeight(int logical_height) {
+    const float available = static_cast<float>(logical_height) - PopupListTop();
     return std::max(0, static_cast<int>((available + static_cast<float>(kMetrics.card_gap)) /
                                         static_cast<float>(kMetrics.card_height + kMetrics.card_gap)));
 }
 
 int ClampPopupScrollOffset(int item_count, int requested_offset) {
-    const int max_offset = std::max(0, item_count - PopupVisibleCardCapacity());
+    return ClampPopupScrollOffsetForHeight(item_count, requested_offset, kMetrics.height);
+}
+
+int ClampPopupScrollOffsetForHeight(int item_count, int requested_offset, int logical_height) {
+    const int max_offset = std::max(0, item_count - PopupVisibleCardCapacityForHeight(logical_height));
     return std::clamp(requested_offset, 0, max_offset);
 }
 
+float ClampPopupScrollOffsetForHeight(int item_count, float requested_offset, int logical_height) {
+    const auto& metrics = PopupMetrics();
+    const float content_height =
+        item_count <= 0 ? 0.0f : static_cast<float>(item_count * metrics.card_height +
+                                                    std::max(0, item_count - 1) * metrics.card_gap);
+    const float viewport_height =
+        std::max(0.0f, static_cast<float>(logical_height) - PopupListTop() - 4.0f);
+    const float max_offset = std::max(0.0f, content_height - viewport_height);
+    return std::clamp(requested_offset, 0.0f, max_offset);
+}
+
 int PopupScrollOffsetAfterWheel(int item_count, int current_offset, short wheel_delta) {
+    return PopupScrollOffsetAfterWheelForHeight(item_count, current_offset, wheel_delta, kMetrics.height);
+}
+
+int PopupScrollOffsetAfterWheelForHeight(int item_count, int current_offset, short wheel_delta, int logical_height) {
     const int delta = wheel_delta < 0 ? 1 : -1;
-    return ClampPopupScrollOffset(item_count, current_offset + delta);
+    return ClampPopupScrollOffsetForHeight(item_count, current_offset + delta, logical_height);
+}
+
+float PopupScrollOffsetAfterWheelForHeight(int item_count, float current_offset, short wheel_delta,
+                                           int logical_height) {
+    constexpr float kWheelStep = 42.0f;
+    const float direction = wheel_delta < 0 ? 1.0f : -1.0f;
+    return ClampPopupScrollOffsetForHeight(item_count, current_offset + direction * kWheelStep, logical_height);
 }
 
 int ClampPopupSelectedIndex(int item_count, int selected_index) {
@@ -113,32 +143,75 @@ int PopupNextSelectedIndex(int item_count, int selected_index) {
 }
 
 int PopupScrollOffsetToRevealSelection(int item_count, int current_offset, int selected_index) {
+    return PopupScrollOffsetToRevealSelectionForHeight(item_count, current_offset, selected_index, kMetrics.height);
+}
+
+int PopupScrollOffsetToRevealSelectionForHeight(int item_count, int current_offset, int selected_index,
+                                                int logical_height) {
     if (item_count <= 0) {
         return 0;
     }
     const int clamped_selection = ClampPopupSelectedIndex(item_count, selected_index);
-    int offset = ClampPopupScrollOffset(item_count, current_offset);
+    const int visible_capacity = PopupVisibleCardCapacityForHeight(logical_height);
+    int offset = ClampPopupScrollOffsetForHeight(item_count, current_offset, logical_height);
     if (clamped_selection < offset) {
         offset = clamped_selection;
-    } else if (clamped_selection >= offset + PopupVisibleCardCapacity()) {
-        offset = clamped_selection - PopupVisibleCardCapacity() + 1;
+    } else if (clamped_selection >= offset + visible_capacity) {
+        offset = clamped_selection - visible_capacity + 1;
     }
-    return ClampPopupScrollOffset(item_count, offset);
+    return ClampPopupScrollOffsetForHeight(item_count, offset, logical_height);
+}
+
+float PopupScrollOffsetToRevealSelectionForHeight(int item_count, float current_offset, int selected_index,
+                                                  int logical_height) {
+    if (item_count <= 0) {
+        return 0.0f;
+    }
+    const auto& metrics = PopupMetrics();
+    const float row_pitch = static_cast<float>(metrics.card_height + metrics.card_gap);
+    const int clamped_selection = ClampPopupSelectedIndex(item_count, selected_index);
+    const float selected_top = static_cast<float>(clamped_selection) * row_pitch;
+    const float selected_bottom = selected_top + static_cast<float>(metrics.card_height);
+    const float viewport_height =
+        std::max(0.0f, static_cast<float>(logical_height) - PopupListTop() - 4.0f);
+    float offset = ClampPopupScrollOffsetForHeight(item_count, current_offset, logical_height);
+    if (selected_top < offset) {
+        offset = selected_top;
+    } else if (selected_bottom > offset + viewport_height) {
+        offset = selected_bottom - viewport_height;
+    }
+    return ClampPopupScrollOffsetForHeight(item_count, offset, logical_height);
+}
+
+float PopupScrollOffsetAfterViewportClampForHeight(int item_count, float current_offset, int logical_height) {
+    return ClampPopupScrollOffsetForHeight(item_count, current_offset, logical_height);
 }
 
 UiRect PopupScrollbarTrackRect() {
+    return PopupScrollbarTrackRectForHeight(kMetrics.height);
+}
+
+UiRect PopupScrollbarTrackRectForHeight(int logical_height) {
     return Rect(static_cast<float>(kMetrics.width - 12), PopupListTop(),
-                static_cast<float>(kMetrics.width - 6), static_cast<float>(kMetrics.height - 10));
+                static_cast<float>(kMetrics.width - 6), static_cast<float>(logical_height - 10));
 }
 
 UiRect PopupScrollbarHitRect() {
-    const auto track = PopupScrollbarTrackRect();
+    return PopupScrollbarHitRectForHeight(kMetrics.height);
+}
+
+UiRect PopupScrollbarHitRectForHeight(int logical_height) {
+    const auto track = PopupScrollbarTrackRectForHeight(logical_height);
     return Rect(track.left - 8.0f, track.top, static_cast<float>(kMetrics.width), track.bottom);
 }
 
 UiRect PopupScrollbarThumbRect(int item_count, int scroll_offset) {
-    const auto track = PopupScrollbarTrackRect();
-    const int visible_capacity = PopupVisibleCardCapacity();
+    return PopupScrollbarThumbRectForHeight(item_count, scroll_offset, kMetrics.height);
+}
+
+UiRect PopupScrollbarThumbRectForHeight(int item_count, int scroll_offset, int logical_height) {
+    const auto track = PopupScrollbarTrackRectForHeight(logical_height);
+    const int visible_capacity = PopupVisibleCardCapacityForHeight(logical_height);
     if (item_count <= visible_capacity) {
         return Rect(track.left, track.top, track.right, track.top);
     }
@@ -146,24 +219,112 @@ UiRect PopupScrollbarThumbRect(int item_count, int scroll_offset) {
     const float thumb_height =
         std::max(32.0f, track_height * static_cast<float>(visible_capacity) / static_cast<float>(item_count));
     const int max_offset = std::max(1, item_count - visible_capacity);
-    const int clamped_offset = ClampPopupScrollOffset(item_count, scroll_offset);
+    const int clamped_offset = ClampPopupScrollOffsetForHeight(item_count, scroll_offset, logical_height);
     const float thumb_top =
         track.top + (track_height - thumb_height) * static_cast<float>(clamped_offset) / static_cast<float>(max_offset);
     return Rect(track.left, thumb_top, track.right, thumb_top + thumb_height);
 }
 
+UiRect PopupScrollbarThumbRectForHeight(int item_count, float scroll_offset, int logical_height) {
+    const auto track = PopupScrollbarTrackRectForHeight(logical_height);
+    const auto& metrics = PopupMetrics();
+    const float viewport_height =
+        std::max(0.0f, static_cast<float>(logical_height) - PopupListTop() - 4.0f);
+    const float content_height =
+        item_count <= 0 ? 0.0f : static_cast<float>(item_count * metrics.card_height +
+                                                    std::max(0, item_count - 1) * metrics.card_gap);
+    if (content_height <= viewport_height) {
+        return Rect(track.left, track.top, track.right, track.top);
+    }
+    const float track_height = track.Height();
+    const float thumb_height = std::max(32.0f, track_height * viewport_height / content_height);
+    const float max_offset = std::max(1.0f, content_height - viewport_height);
+    const float clamped_offset = ClampPopupScrollOffsetForHeight(item_count, scroll_offset, logical_height);
+    const float thumb_top = track.top + (track_height - thumb_height) * clamped_offset / max_offset;
+    return Rect(track.left, thumb_top, track.right, thumb_top + thumb_height);
+}
+
 int PopupScrollOffsetForThumbCenterY(int item_count, float thumb_center_y) {
-    const int visible_capacity = PopupVisibleCardCapacity();
+    return PopupScrollOffsetForThumbCenterYForHeight(item_count, thumb_center_y, kMetrics.height);
+}
+
+int PopupScrollOffsetForThumbCenterYForHeight(int item_count, float thumb_center_y, int logical_height) {
+    const int visible_capacity = PopupVisibleCardCapacityForHeight(logical_height);
     if (item_count <= visible_capacity) {
         return 0;
     }
-    const auto track = PopupScrollbarTrackRect();
-    const auto thumb = PopupScrollbarThumbRect(item_count, 0);
+    const auto track = PopupScrollbarTrackRectForHeight(logical_height);
+    const auto thumb = PopupScrollbarThumbRectForHeight(item_count, 0, logical_height);
     const float travel = std::max(1.0f, track.Height() - thumb.Height());
     const int max_offset = std::max(1, item_count - visible_capacity);
     const float top = std::clamp(thumb_center_y - thumb.Height() * 0.5f, track.top, track.bottom - thumb.Height());
     const int requested = static_cast<int>(std::lround((top - track.top) * static_cast<float>(max_offset) / travel));
-    return ClampPopupScrollOffset(item_count, requested);
+    return ClampPopupScrollOffsetForHeight(item_count, requested, logical_height);
+}
+
+float PopupScrollbarThumbOpacity(bool hovered, bool dragging, float hover_progress) {
+    if (dragging) {
+        return 0.90f;
+    }
+    if (hovered) {
+        return 0.56f + 0.30f * std::clamp(hover_progress, 0.0f, 1.0f);
+    }
+    return 0.56f;
+}
+
+UiRect PopupListClipRectForHeight(int logical_width, int logical_height) {
+    return Rect(0.0f, PopupListTop(), static_cast<float>(logical_width),
+                std::max(PopupListTop(), static_cast<float>(logical_height) - 4.0f));
+}
+
+float PopupExpandedCardExtraHeightForMeasuredDetail(float measured_detail_height) {
+    constexpr float kBaseHeight = 102.0f;
+    constexpr float kDetailVerticalPadding = 18.0f;
+    return std::max(kBaseHeight, std::ceil(std::max(0.0f, measured_detail_height) + kDetailVerticalPadding));
+}
+
+float PopupExpandedImageCardExtraHeightForMeasuredDetail(float measured_detail_height) {
+    constexpr float kBaseHeight = 102.0f;
+    constexpr float kImagePreviewHeight = 116.0f;
+    constexpr float kImageTextGap = 8.0f;
+    constexpr float kDetailVerticalPadding = 18.0f;
+    return std::max(kBaseHeight, std::ceil(kImagePreviewHeight + kImageTextGap +
+                                           std::max(0.0f, measured_detail_height) + kDetailVerticalPadding));
+}
+
+float PopupExpandedCardExtraHeightForText(std::wstring_view text, float detail_width) {
+    int line_count = 1;
+    const int columns_per_line = std::max(1, static_cast<int>(std::floor(detail_width / 7.0f)));
+    int column_count = 0;
+    for (const wchar_t ch : text) {
+        if (ch == L'\n') {
+            ++line_count;
+            column_count = 0;
+            continue;
+        }
+        if (ch == L'\r') {
+            continue;
+        }
+        const int column_width = ch <= 0x007Fu ? 1 : 2;
+        column_count += column_width;
+        if (column_count > columns_per_line) {
+            ++line_count;
+            column_count = column_width;
+        }
+    }
+
+    constexpr float kBaseHeight = 102.0f;
+    constexpr float kLineHeight = 20.0f;
+    const int extra_lines = std::max(0, line_count - 3);
+    const float estimated_extra = kBaseHeight + static_cast<float>(extra_lines) * kLineHeight;
+    const float measured_extra =
+        PopupExpandedCardExtraHeightForMeasuredDetail(static_cast<float>(line_count) * kLineHeight);
+    return std::max(estimated_extra, measured_extra);
+}
+
+float PopupExpandedCardExtraHeightForText(std::wstring_view text) {
+    const float default_detail_width = static_cast<float>(kMetrics.width - kMetrics.margin * 2 - 96);
+    return PopupExpandedCardExtraHeightForText(text, default_detail_width);
 }
 
 PopupThemePalette ResolvePopupThemePalette(int theme_mode, bool system_dark) {
@@ -520,7 +681,7 @@ UiRect PopupCardKindIconRect(const PopupCardLayout& card) {
 }
 
 float PopupExpandedCardExtraHeight(bool expanded) {
-    return expanded ? 82.0f : 0.0f;
+    return expanded ? 102.0f : 0.0f;
 }
 
 int HitTestPopupCardIndex(int item_count, int scroll_offset, std::optional<int64_t> expanded_item_id,
@@ -539,6 +700,9 @@ int HitTestPopupCardIndex(int item_count, int scroll_offset, std::optional<int64
         const float bottom = card.card.bottom + PopupExpandedCardExtraHeight(expanded);
         if (x >= card.card.left && x <= card.card.right && y >= card.card.top && y <= bottom) {
             return item_index;
+        }
+        if (expanded) {
+            break;
         }
         top = bottom + static_cast<float>(kMetrics.card_gap);
         if (top > static_cast<float>(kMetrics.height)) {
@@ -563,6 +727,9 @@ int HitTestPopupCardExpandIndex(int item_count, int scroll_offset, std::optional
         const auto card = BuildPopupCardLayout(false, top);
         if (Contains(card.expand, x, y)) {
             return item_index;
+        }
+        if (expanded) {
+            break;
         }
         top = card.card.bottom + PopupExpandedCardExtraHeight(expanded) + static_cast<float>(kMetrics.card_gap);
         if (top > static_cast<float>(kMetrics.height)) {
@@ -631,8 +798,23 @@ bool ShouldHidePopupAfterContinuousPaste(bool) {
     return false;
 }
 
-bool ShouldHidePopupAfterOutsideClick(bool pinned_open, bool prompt_open, bool visible, bool click_inside_popup) {
-    return visible && !pinned_open && !prompt_open && !click_inside_popup;
+bool ShouldHidePopupAfterOutsideClick(bool pinned_open, bool prompt_open, bool moving_window,
+                                      bool mouse_down_started_inside_popup, bool transient_hide_suppressed,
+                                      bool visible, bool new_mouse_press, bool click_inside_popup) {
+    return visible && !pinned_open && !prompt_open && !moving_window && !mouse_down_started_inside_popup &&
+           !transient_hide_suppressed && new_mouse_press && !click_inside_popup;
+}
+
+bool ShouldHidePopupAfterInactive(bool pinned_open, bool prompt_open, bool moving_window,
+                                  bool transient_hide_suppressed, bool visible, bool next_active_inside_popup) {
+    return visible && !pinned_open && !prompt_open && !moving_window && !transient_hide_suppressed &&
+           !next_active_inside_popup;
+}
+
+bool PopupPointerInteractionSuppressesInactiveHide(bool moving_window, bool resizing_window,
+                                                   bool mouse_down_started_inside_popup,
+                                                   bool left_button_was_down) {
+    return moving_window || resizing_window || mouse_down_started_inside_popup || left_button_was_down;
 }
 
 PopupItemPressReleaseAction PopupItemPressReleaseActionFor(bool same_item, bool long_press_selected) {

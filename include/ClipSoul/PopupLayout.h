@@ -224,15 +224,36 @@ int PopupItemLongPressMilliseconds();
 int ScalePopupMetricForDpi(int value, unsigned dpi);
 int PopupHeightForVisibleItems(int visible_items);
 int PopupVisibleCardCapacity();
+int PopupVisibleCardCapacityForHeight(int logical_height);
 int ClampPopupScrollOffset(int item_count, int requested_offset);
+int ClampPopupScrollOffsetForHeight(int item_count, int requested_offset, int logical_height);
+float ClampPopupScrollOffsetForHeight(int item_count, float requested_offset, int logical_height);
 int PopupScrollOffsetAfterWheel(int item_count, int current_offset, short wheel_delta);
+int PopupScrollOffsetAfterWheelForHeight(int item_count, int current_offset, short wheel_delta, int logical_height);
+float PopupScrollOffsetAfterWheelForHeight(int item_count, float current_offset, short wheel_delta, int logical_height);
 int ClampPopupSelectedIndex(int item_count, int selected_index);
 int PopupNextSelectedIndex(int item_count, int selected_index);
 int PopupScrollOffsetToRevealSelection(int item_count, int current_offset, int selected_index);
+int PopupScrollOffsetToRevealSelectionForHeight(int item_count, int current_offset, int selected_index,
+                                                int logical_height);
+float PopupScrollOffsetToRevealSelectionForHeight(int item_count, float current_offset, int selected_index,
+                                                  int logical_height);
+float PopupScrollOffsetAfterViewportClampForHeight(int item_count, float current_offset, int logical_height);
 UiRect PopupScrollbarTrackRect();
+UiRect PopupScrollbarTrackRectForHeight(int logical_height);
 UiRect PopupScrollbarHitRect();
+UiRect PopupScrollbarHitRectForHeight(int logical_height);
 UiRect PopupScrollbarThumbRect(int item_count, int scroll_offset);
+UiRect PopupScrollbarThumbRectForHeight(int item_count, int scroll_offset, int logical_height);
+UiRect PopupScrollbarThumbRectForHeight(int item_count, float scroll_offset, int logical_height);
 int PopupScrollOffsetForThumbCenterY(int item_count, float thumb_center_y);
+int PopupScrollOffsetForThumbCenterYForHeight(int item_count, float thumb_center_y, int logical_height);
+float PopupScrollbarThumbOpacity(bool hovered, bool dragging, float hover_progress);
+UiRect PopupListClipRectForHeight(int logical_width, int logical_height);
+float PopupExpandedCardExtraHeightForMeasuredDetail(float measured_detail_height);
+float PopupExpandedImageCardExtraHeightForMeasuredDetail(float measured_detail_height);
+float PopupExpandedCardExtraHeightForText(std::wstring_view text);
+float PopupExpandedCardExtraHeightForText(std::wstring_view text, float detail_width);
 PopupThemePalette ResolvePopupThemePalette(int theme_mode, bool system_dark);
 std::wstring_view PopupSearchPlaceholderText();
 std::wstring_view PopupSearchDisplayText(std::wstring_view query);
@@ -290,7 +311,14 @@ POINT CenterWindowInWorkArea(SIZE size, RECT work);
 int PopupHoverItemIndex(bool filter_open, int hit_item_index);
 bool ShouldHidePopupAfterPaste(bool pinned_open);
 bool ShouldHidePopupAfterContinuousPaste(bool pinned_open);
-bool ShouldHidePopupAfterOutsideClick(bool pinned_open, bool prompt_open, bool visible, bool click_inside_popup);
+bool ShouldHidePopupAfterOutsideClick(bool pinned_open, bool prompt_open, bool moving_window,
+                                      bool mouse_down_started_inside_popup, bool transient_hide_suppressed,
+                                      bool visible, bool new_mouse_press, bool click_inside_popup);
+bool ShouldHidePopupAfterInactive(bool pinned_open, bool prompt_open, bool moving_window,
+                                  bool transient_hide_suppressed, bool visible, bool next_active_inside_popup);
+bool PopupPointerInteractionSuppressesInactiveHide(bool moving_window, bool resizing_window,
+                                                   bool mouse_down_started_inside_popup,
+                                                   bool left_button_was_down);
 PopupItemPressReleaseAction PopupItemPressReleaseActionFor(bool same_item, bool long_press_selected);
 PopupItemPressMoveAction PopupItemPressMoveActionFor(bool long_press_selected, bool moved_past_cancel_distance,
                                                      int hit_item_index);

@@ -7,6 +7,25 @@ TEST_CASE(NormalizeWhitespaceCollapsesRuns) {
                std::wstring(L"alpha beta gamma"));
 }
 
+TEST_CASE(NormalizeEditableNotePreservesLineBreaks) {
+    REQUIRE_EQ(ClipSoul::NormalizeEditableNote(L"  first line\r\n  second\tline \r third  "),
+               std::wstring(L"first line\nsecond line\nthird"));
+    REQUIRE_EQ(ClipSoul::NormalizeEditableNote(L"first\r\n\r\nthird"),
+               std::wstring(L"first\n\nthird"));
+    REQUIRE_EQ(ClipSoul::NormalizeEditableNote(L"first\u2028second\u2029third"),
+               std::wstring(L"first\nsecond\nthird"));
+}
+
+TEST_CASE(MultilineEditTextRoundTripsStoredNotes) {
+    const std::wstring stored = L"first line\nsecond line\nthird";
+    const auto edit_text = ClipSoul::TextForMultilineEdit(stored);
+
+    REQUIRE_EQ(edit_text, std::wstring(L"first line\r\nsecond line\r\nthird"));
+    REQUIRE_EQ(ClipSoul::NormalizeEditableNote(edit_text), stored);
+    REQUIRE_EQ(ClipSoul::TextForMultilineEdit(L"first\u2028second\u2029third"),
+               std::wstring(L"first\r\nsecond\r\nthird"));
+}
+
 TEST_CASE(HtmlToPlainTextPrefersCfHtmlFragment) {
     const std::string html =
         "Version:0.9\r\n"

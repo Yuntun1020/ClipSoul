@@ -144,11 +144,34 @@ TEST_CASE(PopupLongPressDragCanSelectItemBeforeMouseUp) {
 }
 
 TEST_CASE(PopupOutsideClickHidesOnlyWhenUnpinned) {
-    REQUIRE(ClipSoul::ShouldHidePopupAfterOutsideClick(false, false, true, false));
-    REQUIRE(!ClipSoul::ShouldHidePopupAfterOutsideClick(true, false, true, false));
-    REQUIRE(!ClipSoul::ShouldHidePopupAfterOutsideClick(false, true, true, false));
-    REQUIRE(!ClipSoul::ShouldHidePopupAfterOutsideClick(false, false, true, true));
-    REQUIRE(!ClipSoul::ShouldHidePopupAfterOutsideClick(false, false, false, false));
+    REQUIRE(ClipSoul::ShouldHidePopupAfterOutsideClick(false, false, false, false, false, true, true, false));
+    REQUIRE(!ClipSoul::ShouldHidePopupAfterOutsideClick(true, false, false, false, false, true, true, false));
+    REQUIRE(!ClipSoul::ShouldHidePopupAfterOutsideClick(false, true, false, false, false, true, true, false));
+    REQUIRE(!ClipSoul::ShouldHidePopupAfterOutsideClick(false, false, true, false, false, true, true, false));
+    REQUIRE(!ClipSoul::ShouldHidePopupAfterOutsideClick(false, false, false, true, false, true, true, false));
+    REQUIRE(!ClipSoul::ShouldHidePopupAfterOutsideClick(false, false, false, false, true, true, true, false));
+    REQUIRE(!ClipSoul::ShouldHidePopupAfterOutsideClick(false, false, false, false, false, true, false, false));
+    REQUIRE(!ClipSoul::ShouldHidePopupAfterOutsideClick(false, false, false, false, false, true, true, true));
+    REQUIRE(!ClipSoul::ShouldHidePopupAfterOutsideClick(false, false, false, false, false, false, true, false));
+    REQUIRE(!ClipSoul::ShouldHidePopupAfterOutsideClick(false, false, false, true, false, true, true, true));
+}
+
+TEST_CASE(PopupInactiveHideWaitsForTransientInteractions) {
+    REQUIRE(ClipSoul::ShouldHidePopupAfterInactive(false, false, false, false, true, false));
+    REQUIRE(!ClipSoul::ShouldHidePopupAfterInactive(true, false, false, false, true, false));
+    REQUIRE(!ClipSoul::ShouldHidePopupAfterInactive(false, true, false, false, true, false));
+    REQUIRE(!ClipSoul::ShouldHidePopupAfterInactive(false, false, true, false, true, false));
+    REQUIRE(!ClipSoul::ShouldHidePopupAfterInactive(false, false, false, true, true, false));
+    REQUIRE(!ClipSoul::ShouldHidePopupAfterInactive(false, false, false, false, true, true));
+    REQUIRE(!ClipSoul::ShouldHidePopupAfterInactive(false, false, false, false, false, false));
+}
+
+TEST_CASE(PopupPointerInteractionsSuppressInactiveHideUntilTheySettle) {
+    REQUIRE(ClipSoul::PopupPointerInteractionSuppressesInactiveHide(true, false, false, false));
+    REQUIRE(ClipSoul::PopupPointerInteractionSuppressesInactiveHide(false, true, false, false));
+    REQUIRE(ClipSoul::PopupPointerInteractionSuppressesInactiveHide(false, false, true, false));
+    REQUIRE(ClipSoul::PopupPointerInteractionSuppressesInactiveHide(false, false, false, true));
+    REQUIRE(!ClipSoul::PopupPointerInteractionSuppressesInactiveHide(false, false, false, false));
 }
 
 TEST_CASE(PopupContextMenuLabelsReflectCurrentItemState) {
@@ -333,6 +356,18 @@ TEST_CASE(PopupFixedHeightShowsFiveCompactCards) {
     REQUIRE_EQ(ClipSoul::PopupVisibleCardCapacity(), 5);
 }
 
+TEST_CASE(PopupVisibleCapacityTracksCurrentWindowHeight) {
+    const auto metrics = ClipSoul::PopupMetrics();
+    const int compact_height =
+        static_cast<int>(ClipSoul::PopupListTop()) + metrics.card_height * 3 + metrics.card_gap * 2;
+    const int tall_height =
+        static_cast<int>(ClipSoul::PopupListTop()) + metrics.card_height * 8 + metrics.card_gap * 7;
+
+    REQUIRE_EQ(ClipSoul::PopupVisibleCardCapacityForHeight(metrics.height), ClipSoul::PopupVisibleCardCapacity());
+    REQUIRE_EQ(ClipSoul::PopupVisibleCardCapacityForHeight(compact_height), 3);
+    REQUIRE_EQ(ClipSoul::PopupVisibleCardCapacityForHeight(tall_height), 8);
+}
+
 TEST_CASE(PopupListScrollOffsetClampsToAvailableRows) {
     REQUIRE_EQ(ClipSoul::ClampPopupScrollOffset(5, 4), 0);
     REQUIRE_EQ(ClipSoul::ClampPopupScrollOffset(9, 0), 0);
@@ -340,10 +375,37 @@ TEST_CASE(PopupListScrollOffsetClampsToAvailableRows) {
     REQUIRE_EQ(ClipSoul::ClampPopupScrollOffset(9, -2), 0);
 }
 
+TEST_CASE(PopupScrollOffsetClampsToCurrentWindowHeight) {
+    const auto metrics = ClipSoul::PopupMetrics();
+    const int tall_height =
+        static_cast<int>(ClipSoul::PopupListTop()) + metrics.card_height * 8 + metrics.card_gap * 7;
+
+    REQUIRE_EQ(ClipSoul::ClampPopupScrollOffsetForHeight(9, 99, tall_height), 1);
+    REQUIRE_EQ(ClipSoul::PopupScrollOffsetToRevealSelectionForHeight(9, 0, 7, tall_height), 0);
+    REQUIRE_EQ(ClipSoul::PopupScrollOffsetToRevealSelectionForHeight(9, 0, 8, tall_height), 1);
+}
+
 TEST_CASE(PopupMouseWheelMovesVisibleHistoryWindow) {
     REQUIRE_EQ(ClipSoul::PopupScrollOffsetAfterWheel(9, 0, -120), 1);
     REQUIRE_EQ(ClipSoul::PopupScrollOffsetAfterWheel(9, 1, 120), 0);
     REQUIRE_EQ(ClipSoul::PopupScrollOffsetAfterWheel(9, 4, -120), 4);
+}
+
+TEST_CASE(PopupMouseWheelMovesBySmoothPixelsWithinRows) {
+    const auto metrics = ClipSoul::PopupMetrics();
+    const float row_pitch = static_cast<float>(metrics.card_height + metrics.card_gap);
+
+    const float first = ClipSoul::PopupScrollOffsetAfterWheelForHeight(12, 0.0f, -120, metrics.height);
+    REQUIRE(first > 8.0f);
+    REQUIRE(first < row_pitch);
+
+    const float second = ClipSoul::PopupScrollOffsetAfterWheelForHeight(12, first, -120, metrics.height);
+    REQUIRE(second > first);
+    REQUIRE(second < row_pitch * 2.0f);
+
+    const float up = ClipSoul::PopupScrollOffsetAfterWheelForHeight(12, second, 120, metrics.height);
+    REQUIRE(up < second);
+    REQUIRE(up > 0.0f);
 }
 
 TEST_CASE(PopupSelectionStaysBoundToItemWhenListScrolls) {
@@ -357,6 +419,23 @@ TEST_CASE(PopupContinuousPasteMovesHighlightToNextItemAndRevealsIt) {
     REQUIRE_EQ(ClipSoul::PopupNextSelectedIndex(4, 3), 0);
     REQUIRE_EQ(ClipSoul::PopupScrollOffsetToRevealSelection(9, 0, 7), 3);
     REQUIRE_EQ(ClipSoul::PopupScrollOffsetToRevealSelection(9, 3, 2), 2);
+}
+
+TEST_CASE(PopupSmoothRevealKeepsSelectionVisibleWithoutRowJump) {
+    const auto metrics = ClipSoul::PopupMetrics();
+    const float row_pitch = static_cast<float>(metrics.card_height + metrics.card_gap);
+
+    const float offset = ClipSoul::PopupScrollOffsetToRevealSelectionForHeight(12, 0.0f, 5, metrics.height);
+    REQUIRE(offset > 8.0f);
+    REQUIRE(offset < row_pitch);
+}
+
+TEST_CASE(PopupSmoothViewportClampDoesNotSnapBackToSelection) {
+    const auto metrics = ClipSoul::PopupMetrics();
+    const float scrolled = ClipSoul::PopupScrollOffsetAfterWheelForHeight(12, 0.0f, -120, metrics.height);
+
+    REQUIRE_EQ(ClipSoul::PopupScrollOffsetAfterViewportClampForHeight(12, scrolled, metrics.height), scrolled);
+    REQUIRE(ClipSoul::PopupScrollOffsetToRevealSelectionForHeight(12, scrolled, 0, metrics.height) < scrolled);
 }
 
 TEST_CASE(PopupScrollbarThumbMapsDragPositionToScrollOffset) {
@@ -376,6 +455,97 @@ TEST_CASE(PopupScrollbarThumbMapsDragPositionToScrollOffset) {
     REQUIRE_EQ(ClipSoul::PopupScrollOffsetForThumbCenterY(10, track.bottom + 200.0f), 5);
 }
 
+TEST_CASE(PopupScrollbarThumbMapsToCurrentWindowHeight) {
+    const auto metrics = ClipSoul::PopupMetrics();
+    const int tall_height =
+        static_cast<int>(ClipSoul::PopupListTop()) + metrics.card_height * 8 + metrics.card_gap * 7 + 10;
+    const auto default_track = ClipSoul::PopupScrollbarTrackRect();
+    const auto tall_track = ClipSoul::PopupScrollbarTrackRectForHeight(tall_height);
+    const auto tall_thumb = ClipSoul::PopupScrollbarThumbRectForHeight(10, 0, tall_height);
+    const auto tall_bottom_thumb = ClipSoul::PopupScrollbarThumbRectForHeight(10, 2, tall_height);
+
+    REQUIRE(tall_track.bottom > default_track.bottom);
+    REQUIRE(tall_thumb.Height() > ClipSoul::PopupScrollbarThumbRect(10, 0).Height());
+    REQUIRE(tall_bottom_thumb.bottom <= tall_track.bottom);
+    REQUIRE_EQ(ClipSoul::PopupScrollOffsetForThumbCenterYForHeight(10, tall_track.bottom + 200.0f, tall_height), 2);
+}
+
+TEST_CASE(PopupScrollbarThumbOpacityReflectsHoverAndDragFeedback) {
+    REQUIRE_EQ(ClipSoul::PopupScrollbarThumbOpacity(false, false, 1.0f), 0.56f);
+    REQUIRE(ClipSoul::PopupScrollbarThumbOpacity(true, false, 0.5f) > 0.56f);
+    REQUIRE(ClipSoul::PopupScrollbarThumbOpacity(true, false, 0.5f) < 0.86f);
+    REQUIRE_EQ(ClipSoul::PopupScrollbarThumbOpacity(false, true, 0.0f), 0.90f);
+}
+
+TEST_CASE(PopupListClipRectStartsAtListAndEndsBeforeWindowBottom) {
+    const auto metrics = ClipSoul::PopupMetrics();
+    const auto clip = ClipSoul::PopupListClipRectForHeight(metrics.width + 120, metrics.height + 80);
+
+    REQUIRE_EQ(clip.left, 0.0f);
+    REQUIRE_EQ(clip.top, ClipSoul::PopupListTop());
+    REQUIRE_EQ(clip.right, static_cast<float>(metrics.width + 120));
+    REQUIRE_EQ(clip.bottom, static_cast<float>(metrics.height + 80 - 4));
+    REQUIRE(clip.top > ClipSoul::BuildPopupTabsLayout(false).divider.bottom);
+}
+
+TEST_CASE(PopupExpandedCardHeightUsesMeasuredTextHeight) {
+    const auto card = ClipSoul::BuildPopupCardLayout(false, ClipSoul::PopupListTop());
+    const float measured_height = 188.0f;
+    const float extra = ClipSoul::PopupExpandedCardExtraHeightForMeasuredDetail(measured_height);
+    const float detail_top = card.meta.bottom + 6.0f;
+    const float detail_bottom = card.card.bottom + extra - 12.0f;
+
+    REQUIRE(extra > ClipSoul::PopupExpandedCardExtraHeight(true));
+    REQUIRE(detail_bottom - detail_top >= measured_height);
+}
+
+TEST_CASE(PopupExpandedImageCardHeightLeavesRoomForPreviewAndMeasuredText) {
+    const auto card = ClipSoul::BuildPopupCardLayout(false, ClipSoul::PopupListTop());
+    const float measured_height = 72.0f;
+    const float extra = ClipSoul::PopupExpandedImageCardExtraHeightForMeasuredDetail(measured_height);
+    const float detail_top = card.meta.bottom + 6.0f;
+    const float detail_bottom = card.card.bottom + extra - 12.0f;
+
+    REQUIRE(detail_bottom - detail_top >= 116.0f + 8.0f + measured_height);
+}
+
+TEST_CASE(PopupExpandedCardGrowsForMultiLineNotes) {
+    REQUIRE_EQ(ClipSoul::PopupExpandedCardExtraHeightForText(L"one line"), ClipSoul::PopupExpandedCardExtraHeight(true));
+    REQUIRE(ClipSoul::PopupExpandedCardExtraHeightForText(L"line 1\nline 2\nline 3\nline 4") >
+            ClipSoul::PopupExpandedCardExtraHeight(true));
+    REQUIRE(ClipSoul::PopupExpandedCardExtraHeightForText(L"备注：第一行\n第二行\n第三行\n\n正文") >
+            ClipSoul::PopupExpandedCardExtraHeight(true));
+}
+
+TEST_CASE(PopupExpandedCardHeightUsesAvailableTextWidth) {
+    const std::wstring long_path =
+        L"F:\\ClipSoul\\cache\\very-long-folder-name\\another-long-folder-name\\record-with-a-very-long-file-name.png";
+
+    REQUIRE(ClipSoul::PopupExpandedCardExtraHeightForText(long_path, 110.0f) >
+            ClipSoul::PopupExpandedCardExtraHeightForText(long_path, 230.0f));
+    REQUIRE(ClipSoul::PopupExpandedCardExtraHeightForText(L"备注：第一行\n第二行\n第三行\n第四行", 230.0f) >
+            ClipSoul::PopupExpandedCardExtraHeight(true));
+}
+
+TEST_CASE(PopupExpandedCardHeightAccountsForWideChineseText) {
+    const std::wstring narrow_chinese = L"备注：这是一段很长的中文备注内容用来验证宽字符换行高度不会被低估";
+
+    REQUIRE(ClipSoul::PopupExpandedCardExtraHeightForText(narrow_chinese, 80.0f) >
+            ClipSoul::PopupExpandedCardExtraHeightForText(narrow_chinese, 230.0f));
+    REQUIRE(ClipSoul::PopupExpandedCardExtraHeightForText(narrow_chinese, 80.0f) >
+            ClipSoul::PopupExpandedCardExtraHeight(true));
+}
+
+TEST_CASE(PopupExpandedCardHeightLeavesRoomForWrappedDetailText) {
+    const std::wstring eight_lines = L"line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8";
+    const auto card = ClipSoul::BuildPopupCardLayout(false, ClipSoul::PopupListTop());
+    const float extra = ClipSoul::PopupExpandedCardExtraHeightForText(eight_lines, 180.0f);
+    const float detail_top = card.meta.bottom + 6.0f;
+    const float detail_bottom = card.card.bottom + extra - 12.0f;
+
+    REQUIRE(detail_bottom - detail_top >= 8.0f * 20.0f + 6.0f);
+}
+
 TEST_CASE(PopupCardExpandButtonUsesRightSideChevronSlot) {
     const auto card = ClipSoul::BuildPopupCardLayout(false, 168.0f);
 
@@ -392,7 +562,7 @@ TEST_CASE(PopupHitTestingUsesExpandedCardHeight) {
     const float second_y = first.card.bottom + ClipSoul::PopupExpandedCardExtraHeight(true) +
                            ClipSoul::PopupMetrics().card_gap + 8.0f;
 
-    REQUIRE_EQ(ClipSoul::HitTestPopupCardIndex(3, 0, static_cast<int64_t>(10), ids, 120.0f, second_y), 1);
+    REQUIRE_EQ(ClipSoul::HitTestPopupCardIndex(3, 0, static_cast<int64_t>(10), ids, 120.0f, second_y), -1);
     REQUIRE_EQ(ClipSoul::HitTestPopupCardExpandIndex(3, 0, static_cast<int64_t>(10), ids,
                                                      first.expand.left + 4.0f, first.expand.top + 4.0f),
                0);

@@ -3,8 +3,10 @@
 
 #define CLIPSOUL_VERSION_MAJOR 1
 #define CLIPSOUL_VERSION_MINOR 1
-#define CLIPSOUL_VERSION_PATCH 0
+#define CLIPSOUL_VERSION_PATCH 1
 #define CLIPSOUL_VERSION_BUILD 0
+
+IDI_CLIPSOUL_APP ICON "../assets/ClipSoul.ico"
 
 IDR_CLIPSOUL_ICON_PIN RCDATA "../assets/icons/pin.png"
 IDR_CLIPSOUL_ICON_PIN_ACTIVE RCDATA "../assets/icons/pin-active.png"
@@ -38,11 +40,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "Yuntun1020"
             VALUE "FileDescription", "ClipSoul clipboard history"
-            VALUE "FileVersion", "1.1.0.0"
+            VALUE "FileVersion", "1.1.1.0"
             VALUE "InternalName", "ClipSoul"
             VALUE "OriginalFilename", "ClipSoul.exe"
             VALUE "ProductName", "ClipSoul"
-            VALUE "ProductVersion", "1.1.0"
+            VALUE "ProductVersion", "1.1.1"
         END
     END
     BLOCK "VarFileInfo"

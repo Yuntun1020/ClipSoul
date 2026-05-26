@@ -269,6 +269,8 @@ AppSettings HistoryStore::LoadSettings() const {
             settings.continuous_paste_hotkey_vk = static_cast<unsigned>(std::stoul(value));
         } else if (key == "theme_mode") {
             settings.theme_mode = std::clamp(std::stoi(value), 0, 2);
+        } else if (key == "popup_resizable") {
+            settings.popup_resizable = value == "1";
         }
     }
     ApplyAppSettingsDefaults(settings);
@@ -300,6 +302,7 @@ void HistoryStore::SaveSettings(const AppSettings& settings) {
     save("continuous_paste_hotkey_modifiers", std::to_string(settings.continuous_paste_hotkey_modifiers));
     save("continuous_paste_hotkey_vk", std::to_string(settings.continuous_paste_hotkey_vk));
     save("theme_mode", std::to_string(std::clamp(settings.theme_mode, 0, 2)));
+    save("popup_resizable", settings.popup_resizable ? "1" : "0");
 
     EnforceLimit();
 }
@@ -355,7 +358,7 @@ bool HistoryStore::AddFavoritePhrase(std::wstring_view text, std::wstring_view n
     }
 
     const auto hash = StableHash(normalized);
-    const auto normalized_note = NormalizeWhitespace(note);
+    const auto normalized_note = NormalizeEditableNote(note);
     {
         Statement update(impl_->db,
                          "UPDATE history_items SET is_favorite = 1, is_phrase = 1, text = ?, preview = ?, "
@@ -621,7 +624,7 @@ bool HistoryStore::DeleteFavoriteGroup(int64_t group_id) {
 
 bool HistoryStore::SetNote(int64_t id, std::wstring_view note) {
     Statement stmt(impl_->db, "UPDATE history_items SET note = ? WHERE id = ?;");
-    BindText(stmt.get(), 1, NormalizeWhitespace(note));
+    BindText(stmt.get(), 1, NormalizeEditableNote(note));
     sqlite3_bind_int64(stmt.get(), 2, id);
     if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
         ThrowSqlite(impl_->db, "sqlite set note failed");

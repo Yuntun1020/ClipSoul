@@ -7,6 +7,8 @@
 namespace ClipSoul {
 
 std::wstring NormalizeWhitespace(std::wstring_view input);
+std::wstring NormalizeEditableNote(std::wstring_view input);
+std::wstring TextForMultilineEdit(std::wstring_view input);
 std::wstring Utf8ToWide(std::string_view input);
 std::string WideToUtf8(std::wstring_view input);
 std::wstring HtmlClipboardToPlainText(std::string_view cf_html);

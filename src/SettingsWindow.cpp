@@ -37,6 +37,8 @@ constexpr int kTargetHotkeyReset = 10;
 constexpr int kTargetStorageBrowse = 11;
 constexpr int kTargetContinuousPasteHotkey = 12;
 constexpr int kTargetContinuousPasteHotkeyReset = 13;
+constexpr int kTargetPopupResizable = 14;
+constexpr int kTargetPopupSizeReset = 15;
 constexpr UINT_PTR kSettingsHoverTimer = 61;
 
 bool InRect(int x, int y, int left, int top, int right, int bottom) {
@@ -149,6 +151,8 @@ int HitTarget(int x, int y) {
     if (InRect(x, y, 150, 218, 276, 248)) return kTargetContinuousPasteHotkey;
     if (InRect(x, y, 280, 218, 326, 248)) return kTargetContinuousPasteHotkeyReset;
     if (InRect(x, y, kStorageBrowseLeft, 294, kStorageBrowseRight, 324)) return kTargetStorageBrowse;
+    if (InRect(x, y, 222, 390, 266, 420)) return kTargetPopupResizable;
+    if (InRect(x, y, 274, 390, 326, 420)) return kTargetPopupSizeReset;
     return 0;
 }
 
@@ -205,6 +209,7 @@ void SettingsWindow::LoadToControls() {
     continuous_paste_hotkey_modifiers_ = settings.continuous_paste_hotkey_modifiers;
     continuous_paste_hotkey_vk_ = settings.continuous_paste_hotkey_vk;
     theme_mode_ = std::clamp(settings.theme_mode, 0, 2);
+    popup_resizable_ = settings.popup_resizable;
     capturing_hotkey_ = false;
     capturing_continuous_paste_hotkey_ = false;
     editing_limit_ = false;
@@ -230,6 +235,7 @@ bool SettingsWindow::SaveFromControls() {
     settings.continuous_paste_hotkey_modifiers = continuous_paste_hotkey_modifiers_;
     settings.continuous_paste_hotkey_vk = continuous_paste_hotkey_vk_;
     settings.theme_mode = theme_mode_;
+    settings.popup_resizable = popup_resizable_;
     app_.SaveSettings(settings);
     const auto storage_dir = std::filesystem::path(storage_path_);
     if (storage_dir.empty() || !app_.SaveStorageDirectory(storage_dir)) {
@@ -248,6 +254,16 @@ void SettingsWindow::TogglePause() {
 
 void SettingsWindow::ToggleStartup() {
     startup_ = !startup_;
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void SettingsWindow::TogglePopupResizable() {
+    popup_resizable_ = !popup_resizable_;
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void SettingsWindow::ResetPopupSize() {
+    app_.ResetPopupSize();
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
@@ -411,6 +427,8 @@ void SettingsWindow::Paint() {
                                         : border_color));
     hover_rect(3, 222, 116, 288, 146, 15);
     hover_rect(4, 222, 150, 288, 180, 15);
+    hover_rect(kTargetPopupResizable, 222, 390, 266, 420, 15);
+    hover_rect(kTargetPopupSizeReset, 274, 390, 326, 420, 12);
     DrawRoundRect(dc, 150, 184, 276, 214, 10,
                   capturing_hotkey_ && !capturing_continuous_paste_hotkey_ ? RGB(221, 252, 248)
                                     : (hover_target_ == 5 ? Mix(search_fill, dark ? RGB(54, 63, 77) : RGB(244, 255, 253), hover_progress_ * 0.45f)
@@ -454,6 +472,7 @@ void SettingsWindow::Paint() {
     TextOutW(dc, 38, 224, L"连续粘贴", 4);
     TextOutW(dc, 38, 264, L"\u5b58\u50a8\u4f4d\u7f6e", 4);
     TextOutW(dc, 38, 334, L"主题颜色", 4);
+    TextOutW(dc, 38, 394, L"窗口缩放", 4);
     TextOutW(dc, 188, 85, limit_text_.c_str(), static_cast<int>(limit_text_.size()));
     const auto hotkey = capturing_hotkey_ && !capturing_continuous_paste_hotkey_
                             ? std::wstring(L"按下新热键")
@@ -502,6 +521,11 @@ void SettingsWindow::Paint() {
 
     DrawToggle(dc, 236, 120, paused_, hover_target_ == 3 ? hover_progress_ : 0.0f, palette);
     DrawToggle(dc, 236, 154, startup_, hover_target_ == 4 ? hover_progress_ : 0.0f, palette);
+    DrawToggle(dc, 225, 394, popup_resizable_,
+               hover_target_ == kTargetPopupResizable ? hover_progress_ : 0.0f, palette);
+    SetTextColor(dc, text_color);
+    RECT reset_size_rect{274, 390, 326, 420};
+    DrawCenteredText(dc, reset_size_rect, L"默认");
 
     SetTextColor(dc, RGB(255, 255, 255));
     RECT save_rect{kSaveLeft, kSaveTop, kSaveRight, kSaveBottom};
@@ -622,6 +646,14 @@ LRESULT SettingsWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam
         }
         if (target == 4) {
             ToggleStartup();
+            return 0;
+        }
+        if (target == kTargetPopupResizable) {
+            TogglePopupResizable();
+            return 0;
+        }
+        if (target == kTargetPopupSizeReset) {
+            ResetPopupSize();
             return 0;
         }
         if (target == 5) {

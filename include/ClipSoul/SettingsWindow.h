@@ -23,6 +23,8 @@ private:
     void Paint();
     void TogglePause();
     void ToggleStartup();
+    void TogglePopupResizable();
+    void ResetPopupSize();
     void BrowseStorageDirectory();
     void SetThemeMode(int mode);
     void ResetHotkeyToDefault();
@@ -39,6 +41,7 @@ private:
     bool storage_save_failed_ = false;
     bool paused_ = false;
     bool startup_ = false;
+    bool popup_resizable_ = false;
     bool capturing_hotkey_ = false;
     bool capturing_continuous_paste_hotkey_ = false;
     bool editing_limit_ = false;

@@ -39,6 +39,7 @@ public:
     bool SaveStorageDirectory(const std::filesystem::path& storage_dir);
     bool HotkeyAvailable(unsigned modifiers, unsigned vk) const;
     void RefreshPopupTheme();
+    void ResetPopupSize();
 
 private:
     bool Initialize();

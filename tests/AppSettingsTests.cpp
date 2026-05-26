@@ -20,7 +20,7 @@ TEST_CASE(AppSettingsDefaultsUseAltC) {
 }
 
 TEST_CASE(AppVersionLabelIsCurrentRelease) {
-    REQUIRE_EQ(std::wstring(ClipSoul::kClipSoulVersion), std::wstring(L"v1.1.0"));
+    REQUIRE_EQ(std::wstring(ClipSoul::kClipSoulVersion), std::wstring(L"v1.1.1"));
 }
 
 TEST_CASE(AppSettingsDefaultsMigrateLegacyCtrlShiftV) {
@@ -46,20 +46,24 @@ TEST_CASE(AppSettingsDefaultsThemeToSystem) {
     ClipSoul::ApplyAppSettingsDefaults(settings);
 
     REQUIRE_EQ(settings.theme_mode, 0);
+    REQUIRE(!settings.popup_resizable);
 }
 
-TEST_CASE(AppSettingsPersistsThemeMode) {
+TEST_CASE(AppSettingsPersistsThemeModeAndPopupResizeToggle) {
     ClipSoul::HistoryStore store;
-    const auto path = std::filesystem::temp_directory_path() / L"ClipSoulTests" / L"theme-settings.db";
+    const auto path = std::filesystem::temp_directory_path() / L"ClipSoulTests" / L"theme-resize-settings.db";
     std::filesystem::create_directories(path.parent_path());
     std::filesystem::remove(path);
     store.Open(path);
 
     auto settings = store.LoadSettings();
     settings.theme_mode = 2;
+    settings.popup_resizable = true;
     store.SaveSettings(settings);
 
-    REQUIRE_EQ(store.LoadSettings().theme_mode, 2);
+    const auto saved = store.LoadSettings();
+    REQUIRE_EQ(saved.theme_mode, 2);
+    REQUIRE(saved.popup_resizable);
 }
 
 TEST_CASE(AppSettingsPersistsHistoryLimitAndDefaultHotkey) {

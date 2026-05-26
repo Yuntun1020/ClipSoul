@@ -66,6 +66,7 @@ struct AppSettings {
     unsigned continuous_paste_hotkey_modifiers = 0;
     unsigned continuous_paste_hotkey_vk = 0;
     int theme_mode = 0; // 0 system, 1 light, 2 dark
+    bool popup_resizable = false;
 };
 
 struct FavoriteGroup {

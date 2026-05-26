@@ -17,6 +17,10 @@ bool IsWhitespace(wchar_t ch) {
     return std::iswspace(ch) != 0;
 }
 
+bool IsEditableLineBreak(wchar_t ch) {
+    return ch == L'\r' || ch == L'\n' || ch == L'\u2028' || ch == L'\u2029';
+}
+
 std::wstring DecodeHtmlEntity(std::wstring_view entity) {
     if (entity == L"amp") return L"&";
     if (entity == L"lt") return L"<";
@@ -113,6 +117,76 @@ std::wstring NormalizeWhitespace(std::wstring_view input) {
         result.push_back(ch);
     }
 
+    return result;
+}
+
+std::wstring NormalizeEditableNote(std::wstring_view input) {
+    std::wstring normalized_lines;
+    normalized_lines.reserve(input.size());
+    std::wstring current_line;
+    current_line.reserve(input.size());
+    bool pending_space = false;
+    bool has_content = false;
+
+    auto append_line = [&]() {
+        if (!normalized_lines.empty()) {
+            normalized_lines.push_back(L'\n');
+        }
+        normalized_lines += current_line;
+        current_line.clear();
+        pending_space = false;
+        has_content = true;
+    };
+
+    for (size_t index = 0; index < input.size(); ++index) {
+        const wchar_t ch = input[index];
+        if (IsEditableLineBreak(ch)) {
+            if (ch == L'\r' && index + 1 < input.size() && input[index + 1] == L'\n') {
+                ++index;
+            }
+            if (has_content || !current_line.empty()) {
+                append_line();
+            }
+            continue;
+        }
+        if (ch == L'\t' || ch == L' ' || (IsWhitespace(ch) && ch != L'\r' && ch != L'\n')) {
+            pending_space = !current_line.empty();
+            continue;
+        }
+        if (pending_space && !current_line.empty()) {
+            current_line.push_back(L' ');
+        }
+        pending_space = false;
+        current_line.push_back(ch);
+    }
+
+    if (!current_line.empty()) {
+        append_line();
+    }
+
+    return normalized_lines;
+}
+
+std::wstring TextForMultilineEdit(std::wstring_view input) {
+    std::wstring result;
+    result.reserve(input.size() + 8);
+    for (size_t index = 0; index < input.size(); ++index) {
+        const wchar_t ch = input[index];
+        if (ch == L'\r') {
+            if (index + 1 < input.size() && input[index + 1] == L'\n') {
+                result += L"\r\n";
+                ++index;
+            } else {
+                result += L"\r\n";
+            }
+            continue;
+        }
+        if (ch == L'\n' || ch == L'\u2028' || ch == L'\u2029') {
+            result += L"\r\n";
+            continue;
+        }
+        result.push_back(ch);
+    }
     return result;
 }
 

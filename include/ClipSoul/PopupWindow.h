@@ -40,6 +40,8 @@ public:
     std::optional<int64_t> SelectedItemId() const;
     HWND PasteTarget() const { return paste_target_; }
     bool PasteSelectedForContinuousPaste();
+    void UpdateBehaviorFromSettings();
+    void ResetManualSize();
     LRESULT HandleMessage(UINT message, WPARAM wparam, LPARAM lparam);
 
 private:
@@ -135,6 +137,26 @@ private:
     bool HandleFavoriteGroupDeleteConfirmClick(POINT point);
     POINT ResolvePopupPosition(HWND target, SIZE size, RECT work, UINT dpi) const;
     void HideIfInactive(HWND next_active);
+    void BeginTransientHideSuppression();
+    void EndTransientHideSuppressionSoon();
+    bool IsTransientHideSuppressed() const;
+    void UpdatePopupLogicalSize();
+    void ClampScrollToCurrentPopupHeight();
+    int DesiredPopupLogicalHeight() const;
+    float ExpandedExtraHeightForItem(const HistoryItem& item) const;
+    float MeasureDetailTextHeight(std::wstring_view text, float width) const;
+    float ItemScrollTop(int item_index) const;
+    float ItemScrollHeight(int item_index) const;
+    float TotalScrollHeight() const;
+    float ViewportScrollHeight() const;
+    float ClampSmoothScrollOffset(float requested_offset) const;
+    float ScrollOffsetToRevealSelection(float requested_offset, int selected_index) const;
+    int FirstVisibleItemIndex() const;
+    int ResizeHitTest(POINT point) const;
+    void BeginWindowMove();
+    void BeginWindowResize(int edges);
+    void UpdateWindowMoveOrResize();
+    void EndWindowMoveOrResize();
     void UpdateScrollDrag(POINT point);
 
     static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam);
@@ -160,7 +182,20 @@ private:
     bool search_focused_ = false;
     bool search_caret_on_ = true;
     bool updating_search_ime_ = false;
-    int scroll_offset_ = 0;
+    bool moving_window_ = false;
+    bool resizing_window_ = false;
+    int resize_edges_ = 0;
+    POINT drag_start_screen_{0, 0};
+    RECT drag_start_rect_{};
+    bool mouse_down_started_inside_popup_ = false;
+    bool suppress_inactive_hide_ = false;
+    bool left_button_was_down_ = false;
+    DWORD suppress_inactive_hide_until_ = 0;
+    bool popup_resizable_ = false;
+    bool manual_popup_size_ = false;
+    int popup_logical_width_ = 340;
+    int popup_logical_height_ = 560;
+    float scroll_offset_ = 0.0f;
     bool dragging_scrollbar_ = false;
     int pressed_item_index_ = -1;
     bool long_press_selected_ = false;
