@@ -89,6 +89,101 @@ TEST_CASE(HistoryStoreClearRemovesAllEntries) {
     REQUIRE_EQ(store.Recent(10, L"").size(), static_cast<size_t>(0));
 }
 
+TEST_CASE(HistoryStoreClearKeepsFavoriteGroupsAndFavoriteItems) {
+    ClipSoul::HistoryStore store;
+    store.Open(TempDbPath(L"clear-keeps-favorites.db"));
+
+    const auto work_group = store.EnsureFavoriteGroup(L"工作");
+    REQUIRE(store.Add(TextContent(L"history only")));
+    REQUIRE(store.Add(TextContent(L"favorite record")));
+
+    const auto history = store.Query(ClipSoul::HistoryQuery{});
+    REQUIRE_EQ(history.size(), static_cast<size_t>(2));
+    REQUIRE(store.SetFavoriteGroup(history.front().id, work_group));
+    REQUIRE(store.SetNote(history.front().id, L"保留这个收藏"));
+    REQUIRE(store.AddFavoritePhrase(L"常用语", L"也要保留", work_group));
+
+    store.Clear();
+
+    const auto groups = store.FavoriteGroups();
+    REQUIRE(std::any_of(groups.begin(), groups.end(), [work_group](const ClipSoul::FavoriteGroup& group) {
+        return group.id == work_group && group.name == L"工作";
+    }));
+
+    const auto recent_after_clear = store.Recent(10, L"");
+    REQUIRE(recent_after_clear.empty());
+    REQUIRE(std::none_of(recent_after_clear.begin(), recent_after_clear.end(), [](const ClipSoul::HistoryItem& item) {
+        return item.text == L"history only";
+    }));
+
+    ClipSoul::HistoryQuery favorites_query;
+    favorites_query.favorites_only = true;
+    favorites_query.favorite_group_id = work_group;
+    const auto favorites = store.Query(favorites_query);
+
+    REQUIRE_EQ(favorites.size(), static_cast<size_t>(2));
+    REQUIRE(std::any_of(favorites.begin(), favorites.end(), [](const ClipSoul::HistoryItem& item) {
+        return item.text == L"favorite record" && item.note == L"保留这个收藏" && !item.is_phrase;
+    }));
+    REQUIRE(std::any_of(favorites.begin(), favorites.end(), [](const ClipSoul::HistoryItem& item) {
+        return item.text == L"常用语" && item.note == L"也要保留" && item.is_phrase;
+    }));
+}
+
+TEST_CASE(HistoryStoreQueryExcludesFavoriteItemsFromHistory) {
+    ClipSoul::HistoryStore store;
+    store.Open(TempDbPath(L"history-excludes-favorites.db"));
+
+    const auto group = store.EnsureFavoriteGroup(L"工作");
+    REQUIRE(store.Add(TextContent(L"history item")));
+    REQUIRE(store.Add(TextContent(L"favorite item")));
+
+    const auto initial_history = store.Query(ClipSoul::HistoryQuery{});
+    REQUIRE_EQ(initial_history.size(), static_cast<size_t>(2));
+    REQUIRE(store.SetFavoriteGroup(initial_history.front().id, group));
+
+    const auto history = store.Recent(10, L"");
+    REQUIRE_EQ(history.size(), static_cast<size_t>(1));
+    REQUIRE_EQ(history.front().text, std::wstring(L"history item"));
+    REQUIRE(!history.front().is_favorite);
+
+    ClipSoul::HistoryQuery favorites_query;
+    favorites_query.favorites_only = true;
+    const auto favorites = store.Query(favorites_query);
+    REQUIRE_EQ(favorites.size(), static_cast<size_t>(1));
+    REQUIRE_EQ(favorites.front().text, std::wstring(L"favorite item"));
+    REQUIRE(favorites.front().is_favorite);
+}
+
+TEST_CASE(HistoryStoreLimitCountsOnlyNonFavoriteHistory) {
+    ClipSoul::HistoryStore store;
+    store.Open(TempDbPath(L"history-limit-excludes-favorites.db"));
+    auto settings = store.LoadSettings();
+    settings.history_limit = 2;
+    store.SaveSettings(settings);
+
+    const auto group = store.EnsureFavoriteGroup(L"工作");
+    REQUIRE(store.Add(TextContent(L"favorite item")));
+    REQUIRE(store.SetFavoriteGroup(store.Query(ClipSoul::HistoryQuery{}).front().id, group));
+    REQUIRE(store.Add(TextContent(L"one")));
+    REQUIRE(store.Add(TextContent(L"two")));
+    REQUIRE(store.Add(TextContent(L"three")));
+
+    const auto history = store.Recent(10, L"");
+    REQUIRE_EQ(history.size(), static_cast<size_t>(2));
+    REQUIRE_EQ(history[0].text, std::wstring(L"three"));
+    REQUIRE_EQ(history[1].text, std::wstring(L"two"));
+    REQUIRE(std::none_of(history.begin(), history.end(), [](const ClipSoul::HistoryItem& item) {
+        return item.text == L"favorite item";
+    }));
+
+    ClipSoul::HistoryQuery favorites_query;
+    favorites_query.favorites_only = true;
+    const auto favorites = store.Query(favorites_query);
+    REQUIRE_EQ(favorites.size(), static_cast<size_t>(1));
+    REQUIRE_EQ(favorites.front().text, std::wstring(L"favorite item"));
+}
+
 TEST_CASE(HistoryStoreFiltersByKindAndFavorite) {
     ClipSoul::HistoryStore store;
     store.Open(TempDbPath(L"filters.db"));

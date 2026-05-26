@@ -1188,7 +1188,7 @@ float PopupWindow::SearchCaretOffsetDips() const {
         return 0.0f;
     }
 
-    const auto search_layout = BuildPopupSearchLayout();
+    const auto search_layout = BuildPopupSearchLayoutForWidth(popup_logical_width_);
     IDWriteTextLayout* text_layout = nullptr;
     float offset = 0.0f;
     if (SUCCEEDED(dwrite_factory_->CreateTextLayout(query_.c_str(), static_cast<UINT32>(query_.size()),
@@ -1217,7 +1217,8 @@ float PopupWindow::SearchCaretOffsetDips() const {
 }
 
 POINT PopupWindow::SearchImeAnchorClient() const {
-    const POINT anchor = PopupSearchImeAnchorDips(BuildPopupSearchLayout(), SearchCaretOffsetDips());
+    const POINT anchor = PopupSearchImeAnchorDips(BuildPopupSearchLayoutForWidth(popup_logical_width_),
+                                                  SearchCaretOffsetDips());
     const UINT dpi = CurrentDpi();
     return POINT{
         MulDiv(anchor.x, static_cast<int>(dpi), 96),
@@ -1864,7 +1865,7 @@ void PopupWindow::EndWindowMoveOrResize() {
 }
 
 void PopupWindow::UpdateScrollDrag(POINT point) {
-    const auto track = PopupScrollbarTrackRectForHeight(popup_logical_height_);
+    const auto track = PopupScrollbarTrackRectForSize(popup_logical_width_, popup_logical_height_);
     const float content_height = TotalScrollHeight();
     const float viewport_height = ViewportScrollHeight();
     if (content_height <= viewport_height) {
@@ -2265,7 +2266,7 @@ void PopupWindow::Paint() {
                                                    static_cast<float>(metrics.corner_radius)),
                                          brush, 1.0f);
 
-    const auto header = BuildPopupHeaderLayout();
+    const auto header = BuildPopupHeaderLayoutForWidth(popup_logical_width_);
     render_target_->DrawTextW(L"ClipSoul", 8, title_format_, Rect(header.title), text_brush_);
     render_target_->DrawTextW(kClipSoulVersion.data(), static_cast<UINT32>(kClipSoulVersion.size()), small_format_,
                               Rect(header.title.left + 80.0f, header.title.top + 4.0f,
@@ -2302,7 +2303,7 @@ void PopupWindow::Paint() {
              palette.dark ? 0.92f : 0.70f);
 
     const float search_top = PopupSearchTop();
-    const auto search_layout = BuildPopupSearchLayout();
+    const auto search_layout = BuildPopupSearchLayoutForWidth(popup_logical_width_);
     const bool search_hovered = hover_action_ == UiAction::Search || Contains(search_layout.box, hover_point_);
     const bool search_active = search_focused_ && GetFocus() == hwnd_;
     const float search_focus = PopupSearchFocusProgress(search_active, search_hovered, hover_progress_);
@@ -2394,7 +2395,7 @@ void PopupWindow::Paint() {
         render_target_->DrawTextW(label, static_cast<UINT32>(wcslen(label)), small_format_,
                                   Rect(PopupToolbarLabelRect(rect, has_chevron)), label_brush);
     };
-    const auto toolbar = BuildPopupToolbarLayout(multi_select_);
+    const auto toolbar = BuildPopupToolbarLayoutForWidth(multi_select_, popup_logical_width_);
     if (multi_select_) {
         drawButton(toolbar.select_all, L"\u5168\u9009", L'A', UiAction::SelectAll, true);
         drawButton(toolbar.cancel_multi_select, L"取消", L'C', UiAction::MultiSelect);
@@ -2406,7 +2407,7 @@ void PopupWindow::Paint() {
         drawButton(toolbar.clear_all, L"全部清除", L'D', UiAction::ClearAll);
     }
 
-    const auto tabs = BuildPopupTabsLayout(view_mode_ == ViewMode::Favorites);
+    const auto tabs = BuildPopupTabsLayoutForWidth(view_mode_ == ViewMode::Favorites, popup_logical_width_);
     auto drawTabGlow = [&](const UiRect& rect) {
         const float cx = (rect.left + rect.right) * 0.5f;
         const float cy = (rect.top + rect.bottom) * 0.5f;
@@ -2591,7 +2592,7 @@ void PopupWindow::Paint() {
     render_target_->PopAxisAlignedClip();
 
     if (TotalScrollHeight() > ViewportScrollHeight()) {
-        const auto track = PopupScrollbarTrackRectForHeight(popup_logical_height_);
+        const auto track = PopupScrollbarTrackRectForSize(popup_logical_width_, popup_logical_height_);
         const float content_height = TotalScrollHeight();
         const float viewport_height = ViewportScrollHeight();
         const float thumb_height = std::max(32.0f, track.Height() * viewport_height / content_height);
@@ -2599,8 +2600,9 @@ void PopupWindow::Paint() {
         const float thumb_top =
             track.top + (track.Height() - thumb_height) * ClampSmoothScrollOffset(scroll_offset_) / max_offset;
         const UiRect thumb{track.left, thumb_top, track.right, thumb_top + thumb_height};
-        const bool scrollbar_hovered = hover_action_ == UiAction::Scrollbar ||
-                                       Contains(PopupScrollbarHitRectForHeight(popup_logical_height_), hover_point_);
+        const bool scrollbar_hovered =
+            hover_action_ == UiAction::Scrollbar ||
+            Contains(PopupScrollbarHitRectForSize(popup_logical_width_, popup_logical_height_), hover_point_);
         const float thumb_opacity = PopupScrollbarThumbOpacity(scrollbar_hovered, dragging_scrollbar_, hover_progress_);
         brush->SetColor(D2D1::ColorF(palette.border, 0.34f));
         render_target_->FillRoundedRectangle(RoundRect(track, 2), brush);
@@ -3196,7 +3198,7 @@ bool PopupWindow::HandleFavoriteGroupDeleteConfirmClick(POINT point) {
 
 int PopupWindow::HitTestItem(POINT point) const {
     if (items_.empty() || point.y < PopupListTop() ||
-        Contains(PopupScrollbarHitRectForHeight(popup_logical_height_), point)) {
+        Contains(PopupScrollbarHitRectForSize(popup_logical_width_, popup_logical_height_), point)) {
         return -1;
     }
     const int first_index = FirstVisibleItemIndex();
@@ -3227,7 +3229,7 @@ int PopupWindow::HitTestItem(POINT point) const {
 
 int PopupWindow::HitTestExpandItem(POINT point) const {
     if (items_.empty() || point.y < PopupListTop() ||
-        Contains(PopupScrollbarHitRectForHeight(popup_logical_height_), point)) {
+        Contains(PopupScrollbarHitRectForSize(popup_logical_width_, popup_logical_height_), point)) {
         return -1;
     }
     const int first_index = FirstVisibleItemIndex();
@@ -3256,18 +3258,18 @@ int PopupWindow::HitTestExpandItem(POINT point) const {
 }
 
 PopupWindow::UiAction PopupWindow::HitTestAction(POINT point) const {
-    if (items_.size() > static_cast<size_t>(PopupVisibleCardCapacityForHeight(popup_logical_height_)) &&
-        Contains(PopupScrollbarHitRectForHeight(popup_logical_height_), point)) {
+    if (TotalScrollHeight() > ViewportScrollHeight() &&
+        Contains(PopupScrollbarHitRectForSize(popup_logical_width_, popup_logical_height_), point)) {
         return UiAction::Scrollbar;
     }
     if (HitTestExpandItem(point) >= 0) {
         return UiAction::ExpandItem;
     }
-    if (Contains(BuildPopupSearchLayout().box, point)) return UiAction::Search;
-    const auto header = BuildPopupHeaderLayout();
+    if (Contains(BuildPopupSearchLayoutForWidth(popup_logical_width_).box, point)) return UiAction::Search;
+    const auto header = BuildPopupHeaderLayoutForWidth(popup_logical_width_);
     if (Contains(header.close, point)) return UiAction::Close;
     if (Contains(header.pin, point)) return UiAction::Pin;
-    const auto toolbar = BuildPopupToolbarLayout(multi_select_);
+    const auto toolbar = BuildPopupToolbarLayoutForWidth(multi_select_, popup_logical_width_);
     if (point.y >= PopupToolbarTop() && point.y <= PopupToolbarTop() + 32.0f) {
         if (multi_select_) {
             if (Contains(toolbar.cancel_multi_select, point)) return UiAction::MultiSelect;
@@ -3280,7 +3282,7 @@ PopupWindow::UiAction PopupWindow::HitTestAction(POINT point) const {
             if (Contains(toolbar.clear_all, point)) return UiAction::ClearAll;
         }
     }
-    const auto tabs = BuildPopupTabsLayout(view_mode_ == ViewMode::Favorites);
+    const auto tabs = BuildPopupTabsLayoutForWidth(view_mode_ == ViewMode::Favorites, popup_logical_width_);
     if (Contains(tabs.history, point)) return UiAction::HistoryTab;
     if (Contains(tabs.favorites, point)) return UiAction::FavoritesTab;
     if (view_mode_ == ViewMode::Favorites && Contains(tabs.favorite_group, point)) {
@@ -3444,7 +3446,7 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
                 SetCursor(LoadCursorW(nullptr, IDC_SIZENS));
                 return TRUE;
             }
-            if (Contains(BuildPopupSearchLayout().box, logical_point)) {
+            if (Contains(BuildPopupSearchLayoutForWidth(popup_logical_width_).box, logical_point)) {
                 SetCursor(LoadCursorW(nullptr, IDC_IBEAM));
                 return TRUE;
             }
@@ -3582,7 +3584,7 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
             UpdateScrollDrag(point);
             return 0;
         }
-        if (Contains(BuildPopupSearchLayout().box, point)) {
+        if (Contains(BuildPopupSearchLayoutForWidth(popup_logical_width_).box, point)) {
             SetCursor(LoadCursorW(nullptr, IDC_IBEAM));
         }
         if (!tracking_mouse_) {
@@ -3790,14 +3792,15 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
             BeginWindowResize(resize_edges);
             return 0;
         }
-        if (IsPopupHeaderDragArea(static_cast<float>(point.x), static_cast<float>(point.y))) {
+        if (IsPopupHeaderDragAreaForWidth(static_cast<float>(point.x), static_cast<float>(point.y),
+                                          popup_logical_width_)) {
             BeginWindowMove();
             return 0;
         }
         const float search_top = PopupSearchTop();
         const auto& metrics = PopupMetrics();
         const UiRect search_rect{static_cast<float>(metrics.margin), search_top,
-                                 static_cast<float>(metrics.width - metrics.margin),
+                                 static_cast<float>(popup_logical_width_ - metrics.margin),
                                  search_top + static_cast<float>(metrics.search_height)};
         if (Contains(search_rect, point)) {
             if (pending_favorite_group_delete_) {

@@ -68,7 +68,7 @@ const PopupMetricsData& PopupMetrics() {
 }
 
 int PopupItemLongPressMilliseconds() {
-    return 100;
+    return 200;
 }
 
 int ScalePopupMetricForDpi(int value, unsigned dpi) {
@@ -192,8 +192,12 @@ UiRect PopupScrollbarTrackRect() {
 }
 
 UiRect PopupScrollbarTrackRectForHeight(int logical_height) {
-    return Rect(static_cast<float>(kMetrics.width - 12), PopupListTop(),
-                static_cast<float>(kMetrics.width - 6), static_cast<float>(logical_height - 10));
+    return PopupScrollbarTrackRectForSize(kMetrics.width, logical_height);
+}
+
+UiRect PopupScrollbarTrackRectForSize(int logical_width, int logical_height) {
+    return Rect(static_cast<float>(logical_width - 12), PopupListTop(),
+                static_cast<float>(logical_width - 6), static_cast<float>(logical_height - 10));
 }
 
 UiRect PopupScrollbarHitRect() {
@@ -201,8 +205,12 @@ UiRect PopupScrollbarHitRect() {
 }
 
 UiRect PopupScrollbarHitRectForHeight(int logical_height) {
-    const auto track = PopupScrollbarTrackRectForHeight(logical_height);
-    return Rect(track.left - 8.0f, track.top, static_cast<float>(kMetrics.width), track.bottom);
+    return PopupScrollbarHitRectForSize(kMetrics.width, logical_height);
+}
+
+UiRect PopupScrollbarHitRectForSize(int logical_width, int logical_height) {
+    const auto track = PopupScrollbarTrackRectForSize(logical_width, logical_height);
+    return Rect(track.left - 8.0f, track.top, static_cast<float>(logical_width), track.bottom);
 }
 
 UiRect PopupScrollbarThumbRect(int item_count, int scroll_offset) {
@@ -226,7 +234,11 @@ UiRect PopupScrollbarThumbRectForHeight(int item_count, int scroll_offset, int l
 }
 
 UiRect PopupScrollbarThumbRectForHeight(int item_count, float scroll_offset, int logical_height) {
-    const auto track = PopupScrollbarTrackRectForHeight(logical_height);
+    return PopupScrollbarThumbRectForSize(item_count, scroll_offset, kMetrics.width, logical_height);
+}
+
+UiRect PopupScrollbarThumbRectForSize(int item_count, float scroll_offset, int logical_width, int logical_height) {
+    const auto track = PopupScrollbarTrackRectForSize(logical_width, logical_height);
     const auto& metrics = PopupMetrics();
     const float viewport_height =
         std::max(0.0f, static_cast<float>(logical_height) - PopupListTop() - 4.0f);
@@ -471,25 +483,35 @@ float PopupListTop() {
 }
 
 PopupHeaderLayout BuildPopupHeaderLayout() {
+    return BuildPopupHeaderLayoutForWidth(kMetrics.width);
+}
+
+PopupHeaderLayout BuildPopupHeaderLayoutForWidth(int logical_width) {
+    logical_width = std::max(logical_width, 1);
     PopupHeaderLayout layout;
     layout.title = Rect(static_cast<float>(kMetrics.margin), 10.0f, 160.0f, 38.0f);
-    layout.pin = Rect(static_cast<float>(kMetrics.width - 70), 13.0f,
-                      static_cast<float>(kMetrics.width - 48), 35.0f);
-    layout.close = Rect(static_cast<float>(kMetrics.width - 38), 13.0f,
-                        static_cast<float>(kMetrics.width - 16), 35.0f);
+    layout.pin = Rect(static_cast<float>(logical_width - 70), 13.0f,
+                      static_cast<float>(logical_width - 48), 35.0f);
+    layout.close = Rect(static_cast<float>(logical_width - 38), 13.0f,
+                        static_cast<float>(logical_width - 16), 35.0f);
     return layout;
 }
 
 PopupSearchLayout BuildPopupSearchLayout() {
+    return BuildPopupSearchLayoutForWidth(kMetrics.width);
+}
+
+PopupSearchLayout BuildPopupSearchLayoutForWidth(int logical_width) {
+    logical_width = std::max(logical_width, 1);
     const float top = PopupSearchTop();
     PopupSearchLayout layout;
     layout.box = Rect(static_cast<float>(kMetrics.margin), top,
-                      static_cast<float>(kMetrics.width - kMetrics.margin),
+                      static_cast<float>(logical_width - kMetrics.margin),
                       top + static_cast<float>(kMetrics.search_height));
     layout.icon = Rect(static_cast<float>(kMetrics.margin + 14), top + 11.0f,
                        static_cast<float>(kMetrics.margin + 30), top + 27.0f);
     layout.text = Rect(static_cast<float>(kMetrics.margin + 42), top + 8.0f,
-                       static_cast<float>(kMetrics.width - kMetrics.margin - 12), top + 31.0f);
+                       static_cast<float>(logical_width - kMetrics.margin - 12), top + 31.0f);
     return layout;
 }
 
@@ -503,18 +525,26 @@ UiRect BuildPopupHeaderCloseIconRect(const PopupHeaderLayout& header) {
 }
 
 PopupToolbarLayout BuildPopupToolbarLayout(bool multi_select) {
+    return BuildPopupToolbarLayoutForWidth(multi_select, kMetrics.width);
+}
+
+PopupToolbarLayout BuildPopupToolbarLayoutForWidth(bool multi_select, int logical_width) {
+    logical_width = std::max(logical_width, 1);
     const float y = PopupToolbarTop();
     const float bottom = y + 30.0f;
+    const float right_edge = static_cast<float>(logical_width - kMetrics.margin);
     PopupToolbarLayout layout;
     layout.filter = Rect(static_cast<float>(kMetrics.margin), y, static_cast<float>(kMetrics.margin + 92), bottom);
     if (multi_select) {
         layout.cancel_multi_select = Rect(static_cast<float>(kMetrics.margin), y, 76.0f, bottom);
         layout.select_all = Rect(80.0f, y, 138.0f, bottom);
-        layout.delete_selected = Rect(142.0f, y, 232.0f, bottom);
-        layout.paste_selected = Rect(236.0f, y, static_cast<float>(kMetrics.width - kMetrics.margin), bottom);
+        const float right_group_left = right_edge - 184.0f;
+        layout.delete_selected = Rect(right_group_left, y, right_group_left + 90.0f, bottom);
+        layout.paste_selected = Rect(right_group_left + 94.0f, y, right_group_left + 184.0f, bottom);
     } else {
-        layout.multi_select = Rect(160.0f, y, 224.0f, bottom);
-        layout.clear_all = Rect(230.0f, y, static_cast<float>(kMetrics.width - kMetrics.margin), bottom);
+        const float right_group_left = right_edge - 166.0f;
+        layout.multi_select = Rect(right_group_left, y, right_group_left + 64.0f, bottom);
+        layout.clear_all = Rect(right_group_left + 70.0f, y, right_group_left + 166.0f, bottom);
     }
     return layout;
 }
@@ -527,18 +557,25 @@ UiRect PopupToolbarLabelRect(const UiRect& button, bool has_chevron) {
 }
 
 PopupTabsLayout BuildPopupTabsLayout(bool favorites_active) {
+    return BuildPopupTabsLayoutForWidth(favorites_active, kMetrics.width);
+}
+
+PopupTabsLayout BuildPopupTabsLayoutForWidth(bool favorites_active, int logical_width) {
+    logical_width = std::max(logical_width, 1);
     const float top = PopupTabsTop();
+    const float tab_offset = static_cast<float>(logical_width - kMetrics.width) * 0.5f;
+    const float action_offset = static_cast<float>(logical_width - kMetrics.width);
     PopupTabsLayout layout;
-    layout.history = Rect(96.0f, top + 4.0f, 170.0f, top + 32.0f);
-    layout.favorites = Rect(170.0f, top + 4.0f, 244.0f, top + 32.0f);
-    layout.favorite_group = Rect(static_cast<float>(kMetrics.width - 74), top + 8.0f,
-                                 static_cast<float>(kMetrics.width - 50), top + 32.0f);
-    layout.add_favorite_phrase = Rect(static_cast<float>(kMetrics.width - 42), top + 8.0f,
-                                      static_cast<float>(kMetrics.width - 18), top + 32.0f);
+    layout.history = Rect(96.0f + tab_offset, top + 4.0f, 170.0f + tab_offset, top + 32.0f);
+    layout.favorites = Rect(170.0f + tab_offset, top + 4.0f, 244.0f + tab_offset, top + 32.0f);
+    layout.favorite_group = Rect(static_cast<float>(kMetrics.width - 74) + action_offset, top + 8.0f,
+                                 static_cast<float>(kMetrics.width - 50) + action_offset, top + 32.0f);
+    layout.add_favorite_phrase = Rect(static_cast<float>(kMetrics.width - 42) + action_offset, top + 8.0f,
+                                      static_cast<float>(kMetrics.width - 18) + action_offset, top + 32.0f);
     const UiRect& active = favorites_active ? layout.favorites : layout.history;
     layout.active_indicator = Rect(active.left + 14.0f, top + 33.0f, active.right - 14.0f, top + 35.0f);
     layout.divider = Rect(static_cast<float>(kMetrics.margin), top + 35.0f,
-                         static_cast<float>(kMetrics.width - kMetrics.margin), top + 36.0f);
+                         static_cast<float>(logical_width - kMetrics.margin), top + 36.0f);
     return layout;
 }
 
@@ -878,10 +915,14 @@ std::wstring_view PopupPinMenuLabel(bool is_pinned) {
 }
 
 bool IsPopupHeaderDragArea(float x, float y) {
+    return IsPopupHeaderDragAreaForWidth(x, y, kMetrics.width);
+}
+
+bool IsPopupHeaderDragAreaForWidth(float x, float y, int logical_width) {
     if (y < 0.0f || y > static_cast<float>(kMetrics.header_height)) {
         return false;
     }
-    const auto header = BuildPopupHeaderLayout();
+    const auto header = BuildPopupHeaderLayoutForWidth(logical_width);
     return !Contains(header.pin, x, y) && !Contains(header.close, x, y);
 }
 

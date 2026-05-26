@@ -480,7 +480,7 @@ std::vector<HistoryItem> HistoryStore::Query(const HistoryQuery& query) const {
             sql << " AND favorite_group_id = ?";
         }
     } else {
-        sql << " AND is_phrase = 0";
+        sql << " AND is_phrase = 0 AND is_favorite = 0";
     }
     sql << " ORDER BY is_pinned DESC, created_at DESC, id DESC LIMIT ?;";
 
@@ -645,14 +645,15 @@ void HistoryStore::Clear() {
     if (!impl_->db) {
         throw std::runtime_error("database is not open");
     }
-    Exec(impl_->db, "DELETE FROM history_items;");
+    Exec(impl_->db, "DELETE FROM history_items WHERE is_favorite = 0;");
 }
 
 void HistoryStore::EnforceLimit() {
     const int limit = LoadSettings().history_limit;
     Statement stmt(impl_->db,
-                   "DELETE FROM history_items WHERE id NOT IN ("
-                   "SELECT id FROM history_items ORDER BY is_pinned DESC, created_at DESC, id DESC LIMIT ?"
+                   "DELETE FROM history_items WHERE is_favorite = 0 AND id NOT IN ("
+                   "SELECT id FROM history_items WHERE is_favorite = 0 "
+                   "ORDER BY is_pinned DESC, created_at DESC, id DESC LIMIT ?"
                    ");");
     sqlite3_bind_int(stmt.get(), 1, std::max(1, limit));
     if (sqlite3_step(stmt.get()) != SQLITE_DONE) {

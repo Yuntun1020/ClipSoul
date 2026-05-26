@@ -122,8 +122,8 @@ TEST_CASE(PopupPinnedWindowStaysVisibleAfterPaste) {
     REQUIRE(!ClipSoul::ShouldHidePopupAfterContinuousPaste(true));
 }
 
-TEST_CASE(PopupItemLongPressThresholdIsShorterThanSystemDoubleClick) {
-    REQUIRE_EQ(ClipSoul::PopupItemLongPressMilliseconds(), 100);
+TEST_CASE(PopupItemLongPressThresholdAllowsDeliberateSlowClick) {
+    REQUIRE_EQ(ClipSoul::PopupItemLongPressMilliseconds(), 200);
 }
 
 TEST_CASE(PopupItemPressReleaseDistinguishesShortClickAndLongPress) {
@@ -214,6 +214,20 @@ TEST_CASE(PopupSearchFieldHasVisiblePlaceholderAndTextArea) {
     REQUIRE(search.text.bottom < search.box.bottom);
 }
 
+TEST_CASE(PopupHeaderAndSearchControlsAdaptToCurrentWindowWidth) {
+    const auto metrics = ClipSoul::PopupMetrics();
+    const int resized_width = metrics.width + 120;
+
+    const auto header = ClipSoul::BuildPopupHeaderLayoutForWidth(resized_width);
+    const auto search = ClipSoul::BuildPopupSearchLayoutForWidth(resized_width);
+
+    REQUIRE_EQ(header.close.right, static_cast<float>(resized_width - 16));
+    REQUIRE_EQ(header.pin.right, static_cast<float>(resized_width - 48));
+    REQUIRE_EQ(search.box.right, static_cast<float>(resized_width - metrics.margin));
+    REQUIRE_EQ(search.text.right, static_cast<float>(resized_width - metrics.margin - 12));
+    REQUIRE(!ClipSoul::RectsOverlap(header.pin, header.close));
+}
+
 TEST_CASE(PopupSearchDisplayTextShowsQueryOrPlaceholder) {
     REQUIRE_EQ(std::wstring(ClipSoul::PopupSearchDisplayText(L"")),
                std::wstring(L"\u641c\u7d22\u5386\u53f2\u8bb0\u5f55..."));
@@ -245,6 +259,50 @@ TEST_CASE(PopupSearchDisplayTextShowsQueryOrPlaceholder) {
     REQUIRE(ime_anchor.x <= static_cast<LONG>(layout.text.right));
     REQUIRE(ime_anchor.y > static_cast<LONG>(layout.text.top));
     REQUIRE(ime_anchor.y <= static_cast<LONG>(layout.box.bottom));
+}
+
+TEST_CASE(PopupToolbarButtonsAdaptToCurrentWindowWidth) {
+    const auto metrics = ClipSoul::PopupMetrics();
+    const int resized_width = metrics.width + 120;
+    const auto default_normal = ClipSoul::BuildPopupToolbarLayout(false);
+    const auto default_multi = ClipSoul::BuildPopupToolbarLayout(true);
+    const float width_delta = static_cast<float>(resized_width - metrics.width);
+
+    const auto normal = ClipSoul::BuildPopupToolbarLayoutForWidth(false, resized_width);
+    REQUIRE_EQ(normal.clear_all.Width(), default_normal.clear_all.Width());
+    REQUIRE_EQ(normal.clear_all.left, default_normal.clear_all.left + width_delta);
+    REQUIRE_EQ(normal.clear_all.right, default_normal.clear_all.right + width_delta);
+    REQUIRE_EQ(normal.multi_select.Width(), default_normal.multi_select.Width());
+    REQUIRE_EQ(normal.multi_select.left, default_normal.multi_select.left + width_delta);
+    REQUIRE(!ClipSoul::RectsOverlap(normal.multi_select, normal.clear_all));
+
+    const auto multi = ClipSoul::BuildPopupToolbarLayoutForWidth(true, resized_width);
+    REQUIRE_EQ(multi.delete_selected.Width(), default_multi.delete_selected.Width());
+    REQUIRE_EQ(multi.delete_selected.left, default_multi.delete_selected.left + width_delta);
+    REQUIRE_EQ(multi.paste_selected.Width(), default_multi.paste_selected.Width());
+    REQUIRE_EQ(multi.paste_selected.left, default_multi.paste_selected.left + width_delta);
+    REQUIRE_EQ(multi.paste_selected.right, default_multi.paste_selected.right + width_delta);
+    REQUIRE(!ClipSoul::RectsOverlap(multi.delete_selected, multi.paste_selected));
+}
+
+TEST_CASE(PopupTabsButtonsAdaptToCurrentWindowWidth) {
+    const auto metrics = ClipSoul::PopupMetrics();
+    const int resized_width = metrics.width + 120;
+    const float center_delta = static_cast<float>(resized_width - metrics.width) * 0.5f;
+    const float right_delta = static_cast<float>(resized_width - metrics.width);
+
+    const auto default_tabs = ClipSoul::BuildPopupTabsLayout(true);
+    const auto resized_tabs = ClipSoul::BuildPopupTabsLayoutForWidth(true, resized_width);
+
+    REQUIRE_EQ(resized_tabs.history.Width(), default_tabs.history.Width());
+    REQUIRE_EQ(resized_tabs.history.left, default_tabs.history.left + center_delta);
+    REQUIRE_EQ(resized_tabs.favorites.Width(), default_tabs.favorites.Width());
+    REQUIRE_EQ(resized_tabs.favorites.left, default_tabs.favorites.left + center_delta);
+    REQUIRE_EQ(resized_tabs.favorite_group.Width(), default_tabs.favorite_group.Width());
+    REQUIRE_EQ(resized_tabs.favorite_group.left, default_tabs.favorite_group.left + right_delta);
+    REQUIRE_EQ(resized_tabs.add_favorite_phrase.Width(), default_tabs.add_favorite_phrase.Width());
+    REQUIRE_EQ(resized_tabs.add_favorite_phrase.left, default_tabs.add_favorite_phrase.left + right_delta);
+    REQUIRE_EQ(resized_tabs.divider.right, static_cast<float>(resized_width - metrics.margin));
 }
 
 TEST_CASE(PopupMultiSelectToolbarButtonsFitCompactPanel) {
@@ -477,6 +535,26 @@ TEST_CASE(PopupScrollbarThumbMapsToCurrentWindowHeight) {
     REQUIRE(tall_thumb.Height() > ClipSoul::PopupScrollbarThumbRect(10, 0).Height());
     REQUIRE(tall_bottom_thumb.bottom <= tall_track.bottom);
     REQUIRE_EQ(ClipSoul::PopupScrollOffsetForThumbCenterYForHeight(10, tall_track.bottom + 200.0f, tall_height), 2);
+}
+
+TEST_CASE(PopupScrollbarTrackAndHitRectAdaptToCurrentWindowSize) {
+    const auto metrics = ClipSoul::PopupMetrics();
+    const int resized_width = metrics.width + 120;
+    const int resized_height = metrics.height + 90;
+
+    const auto default_track = ClipSoul::PopupScrollbarTrackRect();
+    const auto resized_track = ClipSoul::PopupScrollbarTrackRectForSize(resized_width, resized_height);
+    const auto resized_hit = ClipSoul::PopupScrollbarHitRectForSize(resized_width, resized_height);
+    const auto resized_thumb = ClipSoul::PopupScrollbarThumbRectForSize(12, 80.0f, resized_width, resized_height);
+
+    REQUIRE(resized_track.left > default_track.left);
+    REQUIRE_EQ(resized_track.right, static_cast<float>(resized_width - 6));
+    REQUIRE_EQ(resized_track.bottom, static_cast<float>(resized_height - 10));
+    REQUIRE_EQ(resized_hit.right, static_cast<float>(resized_width));
+    REQUIRE(resized_hit.left < resized_track.left);
+    REQUIRE_EQ(resized_thumb.left, resized_track.left);
+    REQUIRE_EQ(resized_thumb.right, resized_track.right);
+    REQUIRE(resized_thumb.bottom <= resized_track.bottom);
 }
 
 TEST_CASE(PopupScrollbarThumbOpacityReflectsHoverAndDragFeedback) {

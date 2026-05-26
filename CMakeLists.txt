@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(ClipSoul VERSION 1.1.2 LANGUAGES CXX)
+project(ClipSoul VERSION 1.1.3 LANGUAGES CXX)
 
 if(MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
