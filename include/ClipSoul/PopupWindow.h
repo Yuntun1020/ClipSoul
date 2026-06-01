@@ -12,6 +12,7 @@
 #include <memory>
 #include <optional>
 #include <set>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -34,6 +35,7 @@ public:
     bool Create(HWND owner);
     void Show(HWND target);
     void Hide();
+    void Hide(std::wstring_view reason);
     void Refresh();
     HWND hwnd() const { return hwnd_; }
     bool IsVisible() const;
@@ -42,6 +44,8 @@ public:
     bool PasteSelectedForContinuousPaste();
     void UpdateBehaviorFromSettings();
     void ResetManualSize();
+    void SetDebugLogger(std::function<void(std::wstring_view)> logger);
+    void SetKeyboardInvocation(bool keyboard_invocation);
     LRESULT HandleMessage(UINT message, WPARAM wparam, LPARAM lparam);
 
 private:
@@ -92,6 +96,7 @@ private:
     void ToggleFavorite(int64_t id);
     void TogglePinned(int64_t id);
     void DeleteItem(int64_t id);
+    void MoveItemInCurrentList(int item_index, int delta);
     void SelectAllVisible();
     void PasteSelected();
     void PromptAddFavoritePhrase();
@@ -111,7 +116,11 @@ private:
     void ApplyBackdrop();
     ID2D1Bitmap* LoadIconBitmap(IconId icon);
     ID2D1Bitmap* LoadImagePreviewBitmap(const std::filesystem::path& path);
+    ID2D1Bitmap* LoadImageFilePreviewBitmap(const std::filesystem::path& path);
     ID2D1Bitmap* LoadFileIconBitmap(const std::wstring& path);
+    ID2D1Bitmap* CachedIconBitmap(IconId icon) const;
+    ID2D1Bitmap* CachedImagePreviewBitmap(const std::filesystem::path& path) const;
+    ID2D1Bitmap* CachedFileIconBitmap(const std::wstring& path) const;
     IconId ToWindowIcon(PopupIconAssetSlot slot) const;
     void DrawIcon(IconId icon, const UiRect& rect, float opacity = 0.82f);
     void DrawCardMedia(const HistoryItem& item, const PopupCardLayout& card, ID2D1SolidColorBrush* brush);
@@ -123,8 +132,12 @@ private:
     void UpdateSearchEditBounds();
     void UpdateThemeFromSettings();
     float SearchCaretOffsetDips() const;
-    POINT SearchImeAnchorClient() const;
-    void UpdateSearchImePosition();
+    float SearchTextOffsetDips(size_t text_index, bool trailing) const;
+    size_t SearchTextIndexFromPoint(POINT point) const;
+    PopupSearchSelectionRange CurrentSearchSelection() const;
+    void SyncSearchSelectionFromEdit();
+    void SetSearchSelection(size_t anchor, size_t caret);
+    void EndSearchSelectionDrag();
     int HitTestItem(POINT point) const;
     int HitTestExpandItem(POINT point) const;
     UiAction HitTestAction(POINT point) const;
@@ -135,8 +148,9 @@ private:
     bool HandleFilterClick(POINT point);
     bool HandleFavoriteGroupMenuClick(POINT point);
     bool HandleFavoriteGroupDeleteConfirmClick(POINT point);
-    POINT ResolvePopupPosition(HWND target, SIZE size, RECT work, UINT dpi) const;
+    POINT ResolvePopupPosition(HWND target, SIZE size, RECT monitor, RECT work, UINT dpi) const;
     void HideIfInactive(HWND next_active);
+    void RaiseAboveShellSurface();
     void BeginTransientHideSuppression();
     void EndTransientHideSuppressionSoon();
     bool IsTransientHideSuppressed() const;
@@ -158,6 +172,7 @@ private:
     void UpdateWindowMoveOrResize();
     void EndWindowMoveOrResize();
     void UpdateScrollDrag(POINT point);
+    void DebugLog(std::wstring_view message) const;
 
     static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam);
 
@@ -181,7 +196,9 @@ private:
     bool tracking_mouse_ = false;
     bool search_focused_ = false;
     bool search_caret_on_ = true;
-    bool updating_search_ime_ = false;
+    bool search_selecting_ = false;
+    size_t search_selection_anchor_ = 0;
+    size_t search_selection_caret_ = 0;
     bool moving_window_ = false;
     bool resizing_window_ = false;
     int resize_edges_ = 0;
@@ -193,6 +210,9 @@ private:
     DWORD suppress_inactive_hide_until_ = 0;
     bool popup_resizable_ = false;
     bool manual_popup_size_ = false;
+    bool keyboard_invocation_ = false;
+    bool shell_topmost_raise_ = false;
+    DWORD shell_topmost_raise_until_ = 0;
     int popup_logical_width_ = 340;
     int popup_logical_height_ = 560;
     float scroll_offset_ = 0.0f;
@@ -247,6 +267,7 @@ private:
     IDWriteTextFormat* centered_small_format_ = nullptr;
     IDWriteInlineObject* ellipsis_trimming_sign_ = nullptr;
     HBRUSH search_edit_brush_ = nullptr;
+    std::function<void(std::wstring_view)> debug_logger_;
 };
 
 } // namespace ClipSoul

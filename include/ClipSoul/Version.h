@@ -4,6 +4,8 @@
 
 namespace ClipSoul {
 
-constexpr std::wstring_view kClipSoulVersion = L"v1.1.3";
+constexpr std::wstring_view kClipSoulVersion = L"v1.2.0";
+constexpr std::wstring_view kClipSoulProjectUrl = L"https://github.com/Yuntun1020/ClipSoul";
+constexpr std::wstring_view kClipSoulProjectDisplayUrl = L"github.com/Yuntun1020/ClipSoul";
 
 } // namespace ClipSoul

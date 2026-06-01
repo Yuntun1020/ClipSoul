@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cwctype>
 #include <string_view>
 
 namespace ClipSoul {
@@ -21,6 +22,7 @@ constexpr PopupMetricsData kMetrics{
     14,  // toolbar_icon_size
     0.14f,
 };
+constexpr int kMinTextRangeHeight = 2;
 
 UiRect Rect(float left, float top, float right, float bottom) {
     return UiRect{left, top, right, bottom};
@@ -185,6 +187,10 @@ float PopupScrollOffsetToRevealSelectionForHeight(int item_count, float current_
 
 float PopupScrollOffsetAfterViewportClampForHeight(int item_count, float current_offset, int logical_height) {
     return ClampPopupScrollOffsetForHeight(item_count, current_offset, logical_height);
+}
+
+float PopupScrollOffsetAfterReopen(float, float, float) {
+    return 0.0f;
 }
 
 UiRect PopupScrollbarTrackRect() {
@@ -424,6 +430,25 @@ std::wstring PopupNotePreviewText(std::wstring_view note) {
     return preview;
 }
 
+bool PopupFileCanUseImagePreview(std::wstring_view path) {
+    const size_t slash = path.find_last_of(LR"(\/)");
+    const size_t dot = path.find_last_of(L'.');
+    if (dot == std::wstring_view::npos || dot + 1 >= path.size() ||
+        (slash != std::wstring_view::npos && dot < slash)) {
+        return false;
+    }
+
+    wchar_t extension[6]{};
+    const size_t length = std::min<size_t>(path.size() - dot - 1, std::size(extension) - 1);
+    for (size_t index = 0; index < length; ++index) {
+        extension[index] = static_cast<wchar_t>(std::towlower(path[dot + 1 + index]));
+    }
+
+    const std::wstring_view ext(extension, length);
+    return ext == L"png" || ext == L"jpg" || ext == L"jpeg" || ext == L"bmp" || ext == L"gif" ||
+           ext == L"tif" || ext == L"tiff" || ext == L"webp";
+}
+
 bool PopupSearchCaretVisible(bool focused, bool blink_on) {
     return focused && blink_on;
 }
@@ -446,6 +471,163 @@ bool PopupSearchDeletesOnKeyDown(unsigned) {
 
 bool PopupSearchAppendsChar(wchar_t value) {
     return value >= 32;
+}
+
+bool PopupResizeShouldDiscardDeviceResources() {
+    return false;
+}
+
+bool PopupDpiChangeShouldDiscardDeviceResources() {
+    return true;
+}
+
+bool PopupPaintShouldUpdateLayout() {
+    return false;
+}
+
+bool PopupShouldAnimateHoverWhileResizing(bool resizing_window) {
+    return !resizing_window;
+}
+
+bool PopupShouldActivateWhenShown(bool keyboard_invocation) {
+    return !keyboard_invocation;
+}
+
+bool PopupShouldActivateForShellSurface(bool shell_surface) {
+    return shell_surface;
+}
+
+bool PopupShowShouldActivate(bool keyboard_invocation, bool shell_surface) {
+    return PopupShouldActivateForShellSurface(shell_surface) || PopupShouldActivateWhenShown(keyboard_invocation);
+}
+
+bool PopupSetWindowPosShouldUseNoActivate(bool activate_window) {
+    return !activate_window;
+}
+
+LRESULT PopupMouseActivateResult() {
+    return MA_NOACTIVATE;
+}
+
+bool PopupShouldFocusWindowForPointerPress(bool search_clicked) {
+    return search_clicked;
+}
+
+bool PopupShouldActivateForSearchFocus(bool search_clicked, bool has_native_edit) {
+    return search_clicked && has_native_edit;
+}
+
+bool PopupShouldFocusNativeSearchEdit(bool search_clicked, bool has_native_edit) {
+    return search_clicked && has_native_edit;
+}
+
+bool PopupShouldAutoFocusSearchOnShow(bool has_native_edit) {
+    return false;
+}
+
+bool PopupWindowShouldUseNoActivateStyle() {
+    return true;
+}
+
+bool PopupWindowShouldUseNoActivateStyle(bool activate_on_show) {
+    return !activate_on_show && PopupWindowShouldUseNoActivateStyle();
+}
+
+bool PopupNativeSearchCueBannerShowsWhenFocused() {
+    return true;
+}
+
+bool PopupSearchShouldStayFocusedAfterNativeBlur(bool next_focus_inside_popup) {
+    return next_focus_inside_popup;
+}
+
+bool PopupShouldRedrawNativeSearchAfterParentPaint(bool has_native_edit, bool moving_or_resizing_window) {
+    return has_native_edit && !moving_or_resizing_window;
+}
+
+bool PopupSearchShouldDrawSelection(bool focused, bool has_query_text, PopupSearchSelectionRange selection) {
+    return focused && has_query_text && PopupSearchHasSelection(selection);
+}
+
+bool PopupShouldDrawDecorativeShadows(bool moving_or_resizing_window) {
+    return !moving_or_resizing_window;
+}
+
+bool PopupShouldLoadUiIcon(bool moving_or_resizing_window) {
+    return !moving_or_resizing_window;
+}
+
+bool PopupShouldLoadImagePreview(bool moving_or_resizing_window) {
+    return !moving_or_resizing_window;
+}
+
+bool PopupShouldLoadFileIcon(bool moving_or_resizing_window) {
+    return !moving_or_resizing_window;
+}
+
+bool PopupShouldDrawCachedMediaDuringFastInteraction(bool moving_or_resizing_window, bool cached) {
+    return !moving_or_resizing_window || cached;
+}
+
+bool PopupShouldUseCurrentWindowWidthForLayout(bool popup_resizable, bool manual_popup_size,
+                                               int current_logical_width, int default_logical_width) {
+    return manual_popup_size || (popup_resizable && current_logical_width != default_logical_width);
+}
+
+bool PopupNativeSearchKeyHandledByPopup(unsigned virtual_key) {
+    return virtual_key == VK_ESCAPE || virtual_key == VK_RETURN || virtual_key == VK_UP || virtual_key == VK_DOWN;
+}
+
+UiRect PopupNativeSearchEditRect(const PopupSearchLayout& layout) {
+    return Rect(layout.text.right - 1.0f, layout.text.top + 1.0f, layout.text.right, layout.text.bottom - 1.0f);
+}
+
+PopupSearchSelectionRange NormalizePopupSearchSelection(size_t anchor, size_t caret, size_t text_length) {
+    anchor = std::min(anchor, text_length);
+    caret = std::min(caret, text_length);
+    return PopupSearchSelectionRange{std::min(anchor, caret), std::max(anchor, caret)};
+}
+
+bool PopupSearchHasSelection(PopupSearchSelectionRange selection) {
+    return selection.start < selection.end;
+}
+
+bool PopupShouldResizeNativeSearchDuringLiveResize(bool resizing_window, bool bounds_changed) {
+    return !resizing_window && bounds_changed;
+}
+
+bool PopupShouldInvalidateDuringLiveResize(bool, bool size_changed) {
+    return size_changed;
+}
+
+bool PopupShouldApplyWindowRect(const RECT& current, const RECT& next) {
+    return current.left != next.left || current.top != next.top || current.right != next.right ||
+           current.bottom != next.bottom;
+}
+
+bool PopupShouldFlushPaintDuringLiveResize(bool resizing_window, bool rect_changed) {
+    return resizing_window && rect_changed;
+}
+
+unsigned PopupImageFilePreviewDecodePixelLimit() {
+    return 160;
+}
+
+unsigned PopupImagePreviewDecodePixelLimit() {
+    return 220;
+}
+
+SIZE PopupPreviewDecodeSize(unsigned source_width, unsigned source_height, unsigned max_dimension) {
+    if (source_width == 0 || source_height == 0 || max_dimension == 0) {
+        return SIZE{0, 0};
+    }
+    const unsigned largest = std::max(source_width, source_height);
+    if (largest <= max_dimension) {
+        return SIZE{static_cast<LONG>(source_width), static_cast<LONG>(source_height)};
+    }
+    const double scale = static_cast<double>(max_dimension) / static_cast<double>(largest);
+    return SIZE{static_cast<LONG>(std::max(1u, static_cast<unsigned>(std::lround(source_width * scale)))),
+                static_cast<LONG>(std::max(1u, static_cast<unsigned>(std::lround(source_height * scale))))};
 }
 
 float PopupSearchFocusProgress(bool focused, bool hovered, float hover_progress) {
@@ -838,10 +1020,247 @@ POINT ClampPopupToWorkArea(POINT anchor, SIZE size, RECT work, unsigned dpi) {
     };
 }
 
+bool PopupTextRangeRectUsable(RECT rect) {
+    constexpr int kMaxCaretRangeWidth = 12;
+    return rect.right >= rect.left &&
+           rect.right - rect.left <= kMaxCaretRangeWidth &&
+           rect.bottom - rect.top >= kMinTextRangeHeight &&
+           rect.bottom > 1 &&
+           (rect.left > 1 || rect.top > 1);
+}
+
+POINT PopupTextRangeAnchor(RECT rect) {
+    return POINT{rect.right, rect.top};
+}
+
+bool PopupTextCharacterRectUsable(RECT rect, unsigned dpi) {
+    const int max_width = ScalePopupMetricForDpi(64, dpi);
+    const int max_height = ScalePopupMetricForDpi(72, dpi);
+    return rect.right > rect.left &&
+           rect.bottom > rect.top &&
+           rect.right - rect.left <= max_width &&
+           rect.bottom - rect.top >= kMinTextRangeHeight &&
+           rect.bottom - rect.top <= max_height &&
+           rect.bottom > 1 &&
+           (rect.left > 1 || rect.top > 1);
+}
+
+RECT PopupTextCharacterCaretRect(RECT rect, bool after_character) {
+    const LONG x = after_character ? rect.right : rect.left;
+    return RECT{after_character ? x - 1 : x, rect.top, after_character ? x : x + 1, rect.bottom};
+}
+
+bool PopupTextInputRectUsable(RECT rect) {
+    constexpr int kMinInputWidth = 24;
+    constexpr int kMinInputHeight = 8;
+    constexpr int kMaxInputHeight = 120;
+    return rect.right > rect.left &&
+           rect.bottom > rect.top &&
+           rect.right - rect.left >= kMinInputWidth &&
+           rect.bottom - rect.top >= kMinInputHeight &&
+           rect.bottom - rect.top <= kMaxInputHeight &&
+           rect.bottom > 1 &&
+           (rect.left > 1 || rect.top > 1);
+}
+
+POINT PopupTextInputRectAnchor(RECT rect, unsigned dpi) {
+    const int text_inset = ScalePopupMetricForDpi(8, dpi);
+    const int right_padding = ScalePopupMetricForDpi(48, dpi);
+    return POINT{ClampToRange(rect.left + text_inset, rect.left, rect.right - right_padding), rect.top};
+}
+
+bool PopupCaretAnchorAllowedByFocusedText(bool focused_text_editable, RECT focused_rect, bool has_focused_rect,
+                                          RECT caret_rect, unsigned dpi) {
+    if (!focused_text_editable || !has_focused_rect || focused_rect.right <= focused_rect.left ||
+        focused_rect.bottom <= focused_rect.top) {
+        return false;
+    }
+    const int tolerance = ScalePopupMetricForDpi(96, dpi);
+    return focused_rect.left - tolerance <= caret_rect.right &&
+           focused_rect.right + tolerance >= caret_rect.left &&
+           focused_rect.top - tolerance <= caret_rect.bottom &&
+           focused_rect.bottom + tolerance >= caret_rect.top;
+}
+
+bool PopupJavaCaretRectUsable(RECT caret_rect, RECT window_rect, unsigned dpi) {
+    if (caret_rect.right <= caret_rect.left || caret_rect.bottom <= caret_rect.top ||
+        window_rect.right <= window_rect.left || window_rect.bottom <= window_rect.top) {
+        return false;
+    }
+    const int max_width = ScalePopupMetricForDpi(16, dpi);
+    const int min_height = ScalePopupMetricForDpi(4, dpi);
+    const int max_height = ScalePopupMetricForDpi(96, dpi);
+    const int tolerance = ScalePopupMetricForDpi(96, dpi);
+    const int width = caret_rect.right - caret_rect.left;
+    const int height = caret_rect.bottom - caret_rect.top;
+    if (width > max_width || height < min_height || height > max_height) {
+        return false;
+    }
+    return window_rect.left - tolerance <= caret_rect.right &&
+           window_rect.right + tolerance >= caret_rect.left &&
+           window_rect.top - tolerance <= caret_rect.bottom &&
+           window_rect.bottom + tolerance >= caret_rect.top;
+}
+
+bool PopupVisualCaretRectUsable(RECT caret_rect, RECT window_rect, unsigned dpi) {
+    if (caret_rect.right <= caret_rect.left || caret_rect.bottom <= caret_rect.top ||
+        window_rect.right <= window_rect.left || window_rect.bottom <= window_rect.top) {
+        return false;
+    }
+    const int max_width = ScalePopupMetricForDpi(10, dpi);
+    const int min_height = ScalePopupMetricForDpi(8, dpi);
+    const int max_height = ScalePopupMetricForDpi(48, dpi);
+    const int tolerance = ScalePopupMetricForDpi(4, dpi);
+    const int width = caret_rect.right - caret_rect.left;
+    const int height = caret_rect.bottom - caret_rect.top;
+    if (width > max_width || height < min_height || height > max_height) {
+        return false;
+    }
+    return window_rect.left - tolerance <= caret_rect.left &&
+           window_rect.right + tolerance >= caret_rect.right &&
+           window_rect.top - tolerance <= caret_rect.top &&
+           window_rect.bottom + tolerance >= caret_rect.bottom;
+}
+
+POINT PopupTextAvoidRectPosition(RECT avoid, SIZE size, RECT work, unsigned dpi) {
+    const int corner_gap = ScalePopupMetricForDpi(8, dpi);
+    const int work_gap = ScalePopupMetricForDpi(16, dpi);
+    const bool wide_input_fallback =
+        PopupTextInputRectUsable(avoid) && avoid.right - avoid.left > ScalePopupMetricForDpi(420, dpi);
+    const int horizontal_anchor = wide_input_fallback ? PopupTextInputRectAnchor(avoid, dpi).x : avoid.right;
+    const int soft_min_x = work.left + work_gap;
+    const int soft_max_x = work.right - size.cx - work_gap;
+    const int hard_min_y = work.top;
+    const int hard_max_y = work.bottom - size.cy;
+
+    const int right_x = horizontal_anchor + corner_gap;
+    const int above_y = avoid.top - size.cy - corner_gap;
+    const int below_y = avoid.bottom + corner_gap;
+    const int x = ClampToRange(right_x, soft_min_x, soft_max_x);
+
+    const int clamped_above_y = ClampToRange(above_y, hard_min_y, hard_max_y);
+    const int clamped_below_y = ClampToRange(below_y, hard_min_y, hard_max_y);
+    const int above_overlap =
+        std::max(0, clamped_above_y + static_cast<int>(size.cy) + corner_gap - static_cast<int>(avoid.top));
+    const int below_overlap = std::max(0, static_cast<int>(avoid.bottom) + corner_gap - clamped_below_y);
+    const int y = above_overlap <= below_overlap ? clamped_above_y : clamped_below_y;
+
+    return POINT{
+        x,
+        y,
+    };
+}
+
+POINT PopupTextAnchorPosition(POINT anchor, SIZE size, RECT work, unsigned dpi) {
+    return PopupTextAvoidRectPosition(RECT{anchor.x, anchor.y, anchor.x, anchor.y}, size, work, dpi);
+}
+
+POINT PopupWindowsClipboardPosition(SIZE size, RECT monitor, RECT work, unsigned dpi) {
+    const int min_gap = ScalePopupMetricForDpi(16, dpi);
+    const int taskbar_gap = ScalePopupMetricForDpi(16, dpi);
+    const int unadjusted_work_threshold = ScalePopupMetricForDpi(4, dpi);
+    const int taskbar_guard = ScalePopupMetricForDpi(72, dpi);
+    const bool work_looks_unadjusted = std::abs(work.bottom - monitor.bottom) <= unadjusted_work_threshold;
+    const int bottom_gap = work_looks_unadjusted ? std::max(taskbar_gap, taskbar_guard) : taskbar_gap;
+    const int bottom_limit = std::min(work.bottom, monitor.bottom) - size.cy - bottom_gap;
+    const RECT bounds{
+        monitor.left,
+        monitor.top,
+        monitor.right,
+        monitor.bottom,
+    };
+    return POINT{
+        ClampToRange(bounds.right - size.cx, bounds.left + min_gap, bounds.right - size.cx),
+        ClampToRange(work.bottom - size.cy - bottom_gap, bounds.top + min_gap, bottom_limit),
+    };
+}
+
+POINT PopupKeyboardInvocationPosition(bool has_text_avoid, RECT avoid, SIZE size, RECT monitor, RECT work,
+                                      unsigned dpi) {
+    if (has_text_avoid) {
+        return PopupTextAvoidRectPosition(avoid, size, work, dpi);
+    }
+    return PopupWindowsClipboardPosition(size, monitor, work, dpi);
+}
+
+bool PopupTargetNeedsShellTopmostRaise(std::wstring_view class_name, std::wstring_view title) {
+    return class_name == L"Windows.UI.Core.CoreWindow" || title == L"搜索" || title == L"Search";
+}
+
+bool PopupTargetNeedsShellTopmostRaise(std::wstring_view class_name, std::wstring_view title,
+                                       std::wstring_view process_name) {
+    return PopupTargetNeedsShellTopmostRaise(class_name, title) ||
+           process_name == L"SearchHost" || process_name == L"StartMenuExperienceHost" ||
+           process_name == L"TextInputHost";
+}
+
+bool PopupShellTopmostRaiseShouldExpire(bool keep_above_shell_surface, long remaining_ms) {
+    return !keep_above_shell_surface && remaining_ms <= 0;
+}
+
+bool PopupShouldCreateInShellWindowBand() {
+    return true;
+}
+
+bool PopupTargetRequiresExplicitTextInputFocus(std::wstring_view class_name, std::wstring_view title,
+                                               std::wstring_view process_name) {
+    (void)class_name;
+    (void)title;
+    (void)process_name;
+    return false;
+}
+
+bool PopupShouldUseTextAvoidForTarget(bool has_text_avoid, std::wstring_view class_name, std::wstring_view title) {
+    (void)class_name;
+    (void)title;
+    return has_text_avoid;
+}
+
+bool PopupTargetCanUseConsoleAnchor(std::wstring_view class_name) {
+    return class_name == L"ConsoleWindowClass";
+}
+
+POINT PopupWindowRectFallback(RECT target, SIZE size, RECT work, unsigned dpi) {
+    const int gap = ScalePopupMetricForDpi(10, dpi);
+    POINT anchor{target.right, target.top};
+    POINT position = ClampPopupToWorkArea(anchor, size, work, dpi);
+    if (position.x + size.cx <= target.left || position.x >= target.right ||
+        position.y + size.cy <= target.top || position.y >= target.bottom) {
+        return position;
+    }
+    anchor = POINT{target.left, target.bottom};
+    return ClampPopupToWorkArea(anchor, size, work, dpi);
+}
+
+POINT PopupTargetCenterFallback(RECT target, SIZE size, RECT work, unsigned dpi) {
+    const POINT anchor{
+        target.left + (target.right - target.left) / 2,
+        target.top + (target.bottom - target.top) / 2,
+    };
+    return ClampPopupToWorkArea(anchor, size, work, dpi);
+}
+
+POINT PopupConsoleCellAnchor(POINT client_origin_screen, COORD cell, SMALL_RECT viewport, COORD font_size) {
+    const int column = std::max(0, static_cast<int>(cell.X) - static_cast<int>(viewport.Left));
+    const int row = std::max(0, static_cast<int>(cell.Y) - static_cast<int>(viewport.Top));
+    return POINT{
+        client_origin_screen.x + (column + 1) * std::max(1, static_cast<int>(font_size.X)),
+        client_origin_screen.y + row * std::max(1, static_cast<int>(font_size.Y)),
+    };
+}
+
+COORD PopupConsoleAnchorCell(CONSOLE_SELECTION_INFO selection, COORD cursor_position) {
+    return (selection.dwFlags & CONSOLE_SELECTION_NOT_EMPTY) ? selection.dwSelectionAnchor : cursor_position;
+}
+
+COORD PopupConsoleSelectionAnchor(CONSOLE_SELECTION_INFO selection) {
+    return selection.dwSelectionAnchor;
+}
+
 POINT PopupBottomRightFallback(SIZE size, RECT work, unsigned dpi) {
     return POINT{
         work.right - size.cx - ScalePopupMetricForDpi(32, dpi),
-        work.bottom - size.cy - ScalePopupMetricForDpi(56, dpi),
+        work.bottom - size.cy - ScalePopupMetricForDpi(16, dpi),
     };
 }
 
@@ -872,9 +1291,10 @@ bool ShouldHidePopupAfterOutsideClick(bool pinned_open, bool prompt_open, bool m
 }
 
 bool ShouldHidePopupAfterInactive(bool pinned_open, bool prompt_open, bool moving_window,
-                                  bool transient_hide_suppressed, bool visible, bool next_active_inside_popup) {
+                                  bool transient_hide_suppressed, bool visible, bool next_active_inside_popup,
+                                  bool shell_surface_raise_active) {
     return visible && !pinned_open && !prompt_open && !moving_window && !transient_hide_suppressed &&
-           !next_active_inside_popup;
+           !next_active_inside_popup && !shell_surface_raise_active;
 }
 
 bool PopupPointerInteractionSuppressesInactiveHide(bool moving_window, bool resizing_window,

@@ -3,6 +3,7 @@
 #include "ClipSoul/App.h"
 #include "ClipSoul/Hotkey.h"
 #include "ClipSoul/PopupLayout.h"
+#include "ClipSoul/Version.h"
 #include "ClipSoul/Win32Util.h"
 
 #include <ShObjIdl.h>
@@ -18,7 +19,7 @@ namespace ClipSoul {
 namespace {
 constexpr wchar_t kSettingsClass[] = L"ClipSoul.SettingsWindow";
 constexpr int kSettingsWidth = 640;
-constexpr int kSettingsHeight = 526;
+constexpr int kSettingsHeight = 638;
 constexpr int kCloseBoxLeft = kSettingsWidth - 38;
 constexpr int kCloseBoxTop = 14;
 constexpr int kCloseBoxSize = 24;
@@ -28,10 +29,18 @@ constexpr int kStorageBrowseLeft = kSettingsWidth - 102;
 constexpr int kStorageBrowseRight = kSettingsWidth - 38;
 constexpr int kSaveLeft = kSettingsWidth - 114;
 constexpr int kSaveRight = kSettingsWidth - 40;
-constexpr int kSaveTop = 470;
-constexpr int kSaveBottom = 498;
-constexpr int kStorageNoticeTop = 444;
-constexpr int kStorageNoticeBottom = 462;
+constexpr int kSaveTop = 582;
+constexpr int kSaveBottom = 610;
+constexpr int kStorageNoticeTop = 426;
+constexpr int kStorageNoticeBottom = 444;
+constexpr int kProjectSectionLeft = 36;
+constexpr int kProjectSectionTop = 458;
+constexpr int kProjectSectionRight = kContentRight;
+constexpr int kProjectSectionBottom = 574;
+constexpr int kProjectButtonLeft = 54;
+constexpr int kProjectButtonTop = 500;
+constexpr int kProjectButtonRight = 222;
+constexpr int kProjectButtonBottom = 544;
 constexpr int kTargetLimit = 9;
 constexpr int kTargetHotkeyReset = 10;
 constexpr int kTargetStorageBrowse = 11;
@@ -39,6 +48,7 @@ constexpr int kTargetContinuousPasteHotkey = 12;
 constexpr int kTargetContinuousPasteHotkeyReset = 13;
 constexpr int kTargetPopupResizable = 14;
 constexpr int kTargetPopupSizeReset = 15;
+constexpr int kTargetProjectUrl = 16;
 constexpr UINT_PTR kSettingsHoverTimer = 61;
 
 bool InRect(int x, int y, int left, int top, int right, int bottom) {
@@ -153,6 +163,9 @@ int HitTarget(int x, int y) {
     if (InRect(x, y, kStorageBrowseLeft, 294, kStorageBrowseRight, 324)) return kTargetStorageBrowse;
     if (InRect(x, y, 222, 390, 266, 420)) return kTargetPopupResizable;
     if (InRect(x, y, 274, 390, 326, 420)) return kTargetPopupSizeReset;
+    if (InRect(x, y, kProjectButtonLeft, kProjectButtonTop, kProjectButtonRight, kProjectButtonBottom)) {
+        return kTargetProjectUrl;
+    }
     return 0;
 }
 
@@ -459,6 +472,15 @@ void SettingsWindow::Paint() {
     DrawRoundRect(dc, 36, 354, kContentRight, 386, 14,
                   dark ? RGB(34, 40, 51) : RGB(244, 248, 252),
                   dark ? RGB(62, 70, 84) : RGB(220, 232, 244));
+    DrawRoundRect(dc, kProjectSectionLeft, kProjectSectionTop, kProjectSectionRight, kProjectSectionBottom, 14,
+                  dark ? RGB(34, 40, 51) : RGB(244, 248, 252),
+                  dark ? RGB(62, 70, 84) : RGB(220, 232, 244));
+    DrawRoundRect(dc, kProjectButtonLeft, kProjectButtonTop, kProjectButtonRight, kProjectButtonBottom, 12,
+                  hover_target_ == kTargetProjectUrl
+                      ? Mix(search_fill, dark ? RGB(54, 63, 77) : RGB(244, 255, 253), hover_progress_ * 0.45f)
+                      : search_fill,
+                  hover_target_ == kTargetProjectUrl ? Mix(border_color, accent_color, hover_progress_ * 0.38f)
+                                                     : border_color);
     DrawRoundRect(dc, kSaveLeft, kSaveTop, kSaveRight, kSaveBottom, 12, accent_color, accent_color);
 
     auto font = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
@@ -526,6 +548,17 @@ void SettingsWindow::Paint() {
     SetTextColor(dc, text_color);
     RECT reset_size_rect{274, 390, 326, 420};
     DrawCenteredText(dc, reset_size_rect, L"默认");
+
+    SetTextColor(dc, muted_color);
+    TextOutW(dc, 54, 472, L"\u9879\u76ee\u5730\u5740", 4);
+    SetTextColor(dc, text_color);
+    TextOutW(dc, 184, 472, kClipSoulProjectDisplayUrl.data(), static_cast<int>(kClipSoulProjectDisplayUrl.size()));
+    RECT project_url_rect{kProjectButtonLeft, kProjectButtonTop, kProjectButtonRight, kProjectButtonBottom};
+    DrawCenteredText(dc, project_url_rect, L"\u6253\u5f00\u9879\u76ee\u4e3b\u9875");
+    SetTextColor(dc, muted_color);
+    TextOutW(dc, 54, 552, L"\u5f53\u524d\u7248\u672c", 4);
+    SetTextColor(dc, text_color);
+    TextOutW(dc, 184, 552, kClipSoulVersion.data(), static_cast<int>(kClipSoulVersion.size()));
 
     SetTextColor(dc, RGB(255, 255, 255));
     RECT save_rect{kSaveLeft, kSaveTop, kSaveRight, kSaveBottom};
@@ -674,6 +707,10 @@ LRESULT SettingsWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam
         }
         if (target == kTargetStorageBrowse) {
             BrowseStorageDirectory();
+            return 0;
+        }
+        if (target == kTargetProjectUrl) {
+            ShellExecuteW(hwnd_, L"open", kClipSoulProjectUrl.data(), nullptr, nullptr, SW_SHOWNORMAL);
             return 0;
         }
         return 0;

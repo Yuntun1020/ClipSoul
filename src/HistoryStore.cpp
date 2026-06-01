@@ -126,6 +126,14 @@ void BindOptionalInt64(sqlite3_stmt* stmt, int index, std::optional<int64_t> val
     }
 }
 
+int64_t NextSortOrder(sqlite3* db) {
+    Statement stmt(db, "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM history_items;");
+    if (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+        return sqlite3_column_int64(stmt.get(), 0);
+    }
+    return 1;
+}
+
 } // namespace
 
 void ApplyAppSettingsDefaults(AppSettings& settings) {
@@ -211,6 +219,7 @@ void HistoryStore::Open(const std::filesystem::path& database_path) {
          "preview TEXT NOT NULL DEFAULT '',"
          "search_text TEXT NOT NULL DEFAULT '',"
          "content_hash TEXT NOT NULL,"
+         "sort_order INTEGER NOT NULL DEFAULT 0,"
          "is_pinned INTEGER NOT NULL DEFAULT 0,"
          "is_favorite INTEGER NOT NULL DEFAULT 0,"
          "is_phrase INTEGER NOT NULL DEFAULT 0,"
@@ -222,8 +231,10 @@ void HistoryStore::Open(const std::filesystem::path& database_path) {
     TryExec(impl_->db, "ALTER TABLE history_items ADD COLUMN is_phrase INTEGER NOT NULL DEFAULT 0;");
     TryExec(impl_->db, "ALTER TABLE history_items ADD COLUMN favorite_group_id INTEGER;");
     TryExec(impl_->db, "ALTER TABLE history_items ADD COLUMN note TEXT NOT NULL DEFAULT '';");
+    TryExec(impl_->db, "ALTER TABLE history_items ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0;");
+    Exec(impl_->db, "UPDATE history_items SET sort_order = id WHERE sort_order = 0;");
     Exec(impl_->db,
-         "CREATE INDEX IF NOT EXISTS idx_history_sort ON history_items(is_pinned DESC, created_at DESC, id DESC);");
+         "CREATE INDEX IF NOT EXISTS idx_history_sort ON history_items(is_pinned DESC, sort_order DESC, id DESC);");
     Exec(impl_->db,
          "CREATE TABLE IF NOT EXISTS favorite_groups ("
          "id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -316,15 +327,19 @@ bool HistoryStore::Add(const CapturedContent& content) {
     }
 
     {
-    Statement latest(impl_->db, "SELECT content_hash FROM history_items ORDER BY created_at DESC, id DESC LIMIT 1;");
-        if (sqlite3_step(latest.get()) == SQLITE_ROW && DbText(latest.get(), 0) == content.content_hash) {
+        Statement existing(impl_->db,
+                           "SELECT 1 FROM history_items WHERE kind = ? AND content_hash = ? LIMIT 1;");
+        sqlite3_bind_int(existing.get(), 1, static_cast<int>(content.kind));
+        BindText(existing.get(), 2, content.content_hash);
+        if (sqlite3_step(existing.get()) == SQLITE_ROW) {
             return true;
         }
     }
 
     Statement stmt(impl_->db,
-                   "INSERT INTO history_items(kind, created_at, text, html, files, payload_path, preview, search_text, content_hash) "
-                   "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?);");
+                   "INSERT INTO history_items(kind, created_at, text, html, files, payload_path, preview, "
+                   "search_text, content_hash, sort_order) "
+                   "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?);");
     sqlite3_bind_int(stmt.get(), 1, static_cast<int>(content.kind));
     sqlite3_bind_int64(stmt.get(), 2, content.created_at_unix.value_or(NowUnixSeconds()));
     BindText(stmt.get(), 3, content.text);
@@ -334,6 +349,7 @@ bool HistoryStore::Add(const CapturedContent& content) {
     BindText(stmt.get(), 7, content.preview);
     BindText(stmt.get(), 8, content.search_text);
     BindText(stmt.get(), 9, content.content_hash);
+    sqlite3_bind_int64(stmt.get(), 10, NextSortOrder(impl_->db));
 
     if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
         ThrowSqlite(impl_->db, "sqlite insert history failed");
@@ -380,16 +396,17 @@ bool HistoryStore::AddFavoritePhrase(std::wstring_view text, std::wstring_view n
 
     Statement stmt(impl_->db,
                    "INSERT INTO history_items(kind, created_at, text, preview, search_text, content_hash, "
-                   "is_favorite, is_phrase, favorite_group_id, note) "
-                   "VALUES(?, ?, ?, ?, ?, ?, 1, 1, ?, ?);");
+                   "sort_order, is_favorite, is_phrase, favorite_group_id, note) "
+                   "VALUES(?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?);");
     sqlite3_bind_int(stmt.get(), 1, static_cast<int>(ClipboardKind::Text));
     sqlite3_bind_int64(stmt.get(), 2, NowUnixSeconds());
     BindText(stmt.get(), 3, normalized);
     BindText(stmt.get(), 4, normalized);
     BindText(stmt.get(), 5, normalized);
     BindText(stmt.get(), 6, hash);
-    BindOptionalInt64(stmt.get(), 7, group_id);
-    BindText(stmt.get(), 8, normalized_note);
+    sqlite3_bind_int64(stmt.get(), 7, NextSortOrder(impl_->db));
+    BindOptionalInt64(stmt.get(), 8, group_id);
+    BindText(stmt.get(), 9, normalized_note);
 
     if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
         ThrowSqlite(impl_->db, "sqlite insert favorite phrase failed");
@@ -458,7 +475,7 @@ std::vector<HistoryItem> HistoryStore::Query(const HistoryQuery& query) const {
 
     const bool has_query = !NormalizeWhitespace(query.text).empty();
     if (has_query) {
-        sql << " AND search_text LIKE ?";
+        sql << " AND (search_text LIKE ? OR note LIKE ?)";
     }
     if (!query.kinds.empty()) {
         sql << " AND kind IN (";
@@ -482,12 +499,14 @@ std::vector<HistoryItem> HistoryStore::Query(const HistoryQuery& query) const {
     } else {
         sql << " AND is_phrase = 0 AND is_favorite = 0";
     }
-    sql << " ORDER BY is_pinned DESC, created_at DESC, id DESC LIMIT ?;";
+    sql << " ORDER BY is_pinned DESC, sort_order DESC, id DESC LIMIT ?;";
 
     Statement stmt(impl_->db, sql.str().c_str());
     int bind_index = 1;
     if (has_query) {
-        BindText(stmt.get(), bind_index++, L"%" + NormalizeWhitespace(query.text) + L"%");
+        const auto search_pattern = L"%" + NormalizeWhitespace(query.text) + L"%";
+        BindText(stmt.get(), bind_index++, search_pattern);
+        BindText(stmt.get(), bind_index++, search_pattern);
     }
     for (const auto kind : query.kinds) {
         sqlite3_bind_int(stmt.get(), bind_index++, static_cast<int>(kind));
@@ -632,6 +651,58 @@ bool HistoryStore::SetNote(int64_t id, std::wstring_view note) {
     return sqlite3_changes(impl_->db) > 0;
 }
 
+bool HistoryStore::SwapSortOrder(int64_t first_id, int64_t second_id) {
+    if (!impl_->db) {
+        throw std::runtime_error("database is not open");
+    }
+    if (first_id == second_id) {
+        return false;
+    }
+
+    Exec(impl_->db, "BEGIN IMMEDIATE;");
+    try {
+        Statement read(impl_->db, "SELECT id, sort_order FROM history_items WHERE id IN (?, ?);");
+        sqlite3_bind_int64(read.get(), 1, first_id);
+        sqlite3_bind_int64(read.get(), 2, second_id);
+
+        std::optional<int64_t> first_order;
+        std::optional<int64_t> second_order;
+        while (sqlite3_step(read.get()) == SQLITE_ROW) {
+            const auto id = sqlite3_column_int64(read.get(), 0);
+            const auto order = sqlite3_column_int64(read.get(), 1);
+            if (id == first_id) {
+                first_order = order;
+            } else if (id == second_id) {
+                second_order = order;
+            }
+        }
+
+        if (!first_order || !second_order) {
+            Exec(impl_->db, "COMMIT;");
+            return false;
+        }
+
+        Statement update(impl_->db,
+                         "UPDATE history_items SET sort_order = CASE id WHEN ? THEN ? WHEN ? THEN ? ELSE sort_order END "
+                         "WHERE id IN (?, ?);");
+        sqlite3_bind_int64(update.get(), 1, first_id);
+        sqlite3_bind_int64(update.get(), 2, *second_order);
+        sqlite3_bind_int64(update.get(), 3, second_id);
+        sqlite3_bind_int64(update.get(), 4, *first_order);
+        sqlite3_bind_int64(update.get(), 5, first_id);
+        sqlite3_bind_int64(update.get(), 6, second_id);
+        if (sqlite3_step(update.get()) != SQLITE_DONE) {
+            ThrowSqlite(impl_->db, "sqlite swap sort order failed");
+        }
+
+        Exec(impl_->db, "COMMIT;");
+        return sqlite3_changes(impl_->db) > 0;
+    } catch (...) {
+        TryExec(impl_->db, "ROLLBACK;");
+        throw;
+    }
+}
+
 bool HistoryStore::Delete(int64_t id) {
     Statement stmt(impl_->db, "DELETE FROM history_items WHERE id = ?;");
     sqlite3_bind_int64(stmt.get(), 1, id);
@@ -653,7 +724,7 @@ void HistoryStore::EnforceLimit() {
     Statement stmt(impl_->db,
                    "DELETE FROM history_items WHERE is_favorite = 0 AND id NOT IN ("
                    "SELECT id FROM history_items WHERE is_favorite = 0 "
-                   "ORDER BY is_pinned DESC, created_at DESC, id DESC LIMIT ?"
+                   "ORDER BY is_pinned DESC, sort_order DESC, id DESC LIMIT ?"
                    ");");
     sqlite3_bind_int(stmt.get(), 1, std::max(1, limit));
     if (sqlite3_step(stmt.get()) != SQLITE_DONE) {

@@ -109,6 +109,11 @@ struct PopupSearchLayout {
     UiRect text;
 };
 
+struct PopupSearchSelectionRange {
+    size_t start = 0;
+    size_t end = 0;
+};
+
 struct PopupCalendarDate {
     int year = 0;
     int month = 0;
@@ -239,6 +244,7 @@ int PopupScrollOffsetToRevealSelectionForHeight(int item_count, int current_offs
 float PopupScrollOffsetToRevealSelectionForHeight(int item_count, float current_offset, int selected_index,
                                                   int logical_height);
 float PopupScrollOffsetAfterViewportClampForHeight(int item_count, float current_offset, int logical_height);
+float PopupScrollOffsetAfterReopen(float saved_offset, float content_height, float viewport_height);
 UiRect PopupScrollbarTrackRect();
 UiRect PopupScrollbarTrackRectForHeight(int logical_height);
 UiRect PopupScrollbarTrackRectForSize(int logical_width, int logical_height);
@@ -262,12 +268,50 @@ std::wstring_view PopupSearchPlaceholderText();
 std::wstring_view PopupSearchDisplayText(std::wstring_view query);
 std::wstring PopupEmptyMessage(bool favorites_view, std::wstring_view active_favorite_group);
 std::wstring PopupNotePreviewText(std::wstring_view note);
+bool PopupFileCanUseImagePreview(std::wstring_view path);
 bool PopupSearchCaretVisible(bool focused, bool blink_on);
 bool PopupSearchAcceptsTextInput(bool focused);
 bool PopupSearchShouldUpdateImePosition(bool focused, bool updating_ime);
 bool PopupSearchDeletesOnChar(wchar_t value);
 bool PopupSearchDeletesOnKeyDown(unsigned virtual_key);
 bool PopupSearchAppendsChar(wchar_t value);
+bool PopupResizeShouldDiscardDeviceResources();
+bool PopupDpiChangeShouldDiscardDeviceResources();
+bool PopupPaintShouldUpdateLayout();
+bool PopupShouldAnimateHoverWhileResizing(bool resizing_window);
+bool PopupShouldActivateWhenShown(bool keyboard_invocation);
+bool PopupShouldActivateForShellSurface(bool shell_surface);
+bool PopupShowShouldActivate(bool keyboard_invocation, bool shell_surface);
+bool PopupSetWindowPosShouldUseNoActivate(bool activate_window);
+LRESULT PopupMouseActivateResult();
+bool PopupShouldFocusWindowForPointerPress(bool search_clicked);
+bool PopupShouldActivateForSearchFocus(bool search_clicked, bool has_native_edit);
+bool PopupShouldFocusNativeSearchEdit(bool search_clicked, bool has_native_edit);
+bool PopupShouldAutoFocusSearchOnShow(bool has_native_edit);
+bool PopupWindowShouldUseNoActivateStyle();
+bool PopupWindowShouldUseNoActivateStyle(bool activate_on_show);
+bool PopupNativeSearchCueBannerShowsWhenFocused();
+bool PopupSearchShouldStayFocusedAfterNativeBlur(bool next_focus_inside_popup);
+bool PopupShouldRedrawNativeSearchAfterParentPaint(bool has_native_edit, bool moving_or_resizing_window);
+bool PopupSearchShouldDrawSelection(bool focused, bool has_query_text, PopupSearchSelectionRange selection);
+bool PopupShouldDrawDecorativeShadows(bool moving_or_resizing_window);
+bool PopupShouldLoadUiIcon(bool moving_or_resizing_window);
+bool PopupShouldLoadImagePreview(bool moving_or_resizing_window);
+bool PopupShouldLoadFileIcon(bool moving_or_resizing_window);
+bool PopupShouldDrawCachedMediaDuringFastInteraction(bool moving_or_resizing_window, bool cached);
+bool PopupShouldUseCurrentWindowWidthForLayout(bool popup_resizable, bool manual_popup_size,
+                                               int current_logical_width, int default_logical_width);
+bool PopupNativeSearchKeyHandledByPopup(unsigned virtual_key);
+UiRect PopupNativeSearchEditRect(const PopupSearchLayout& layout);
+PopupSearchSelectionRange NormalizePopupSearchSelection(size_t anchor, size_t caret, size_t text_length);
+bool PopupSearchHasSelection(PopupSearchSelectionRange selection);
+bool PopupShouldResizeNativeSearchDuringLiveResize(bool resizing_window, bool bounds_changed);
+bool PopupShouldInvalidateDuringLiveResize(bool resizing_window, bool size_changed);
+bool PopupShouldApplyWindowRect(const RECT& current, const RECT& next);
+bool PopupShouldFlushPaintDuringLiveResize(bool resizing_window, bool rect_changed);
+unsigned PopupImageFilePreviewDecodePixelLimit();
+unsigned PopupImagePreviewDecodePixelLimit();
+SIZE PopupPreviewDecodeSize(unsigned source_width, unsigned source_height, unsigned max_dimension);
 float PopupSearchFocusProgress(bool focused, bool hovered, float hover_progress);
 float ClampPopupSearchCaretX(const PopupSearchLayout& layout, float measured_text_width);
 POINT PopupSearchImeAnchorDips(const PopupSearchLayout& layout, float measured_text_width);
@@ -314,6 +358,34 @@ PopupFilterTarget HitTestPopupFilterTarget(const PopupFilterLayout& layout, int 
 void SelectPopupDateRangeDate(PopupDateRangeState& state, PopupCalendarDate date);
 bool RectsOverlap(const UiRect& a, const UiRect& b);
 POINT ClampPopupToWorkArea(POINT anchor, SIZE size, RECT work, unsigned dpi);
+bool PopupTextRangeRectUsable(RECT rect);
+POINT PopupTextRangeAnchor(RECT rect);
+bool PopupTextCharacterRectUsable(RECT rect, unsigned dpi);
+RECT PopupTextCharacterCaretRect(RECT rect, bool after_character);
+bool PopupTextInputRectUsable(RECT rect);
+POINT PopupTextInputRectAnchor(RECT rect, unsigned dpi);
+bool PopupCaretAnchorAllowedByFocusedText(bool focused_text_editable, RECT focused_rect, bool has_focused_rect,
+                                          RECT caret_rect, unsigned dpi);
+bool PopupJavaCaretRectUsable(RECT caret_rect, RECT window_rect, unsigned dpi);
+bool PopupVisualCaretRectUsable(RECT caret_rect, RECT window_rect, unsigned dpi);
+POINT PopupTextAvoidRectPosition(RECT avoid, SIZE size, RECT work, unsigned dpi);
+POINT PopupTextAnchorPosition(POINT anchor, SIZE size, RECT work, unsigned dpi);
+POINT PopupWindowsClipboardPosition(SIZE size, RECT monitor, RECT work, unsigned dpi);
+POINT PopupKeyboardInvocationPosition(bool has_text_avoid, RECT avoid, SIZE size, RECT monitor, RECT work, unsigned dpi);
+bool PopupTargetNeedsShellTopmostRaise(std::wstring_view class_name, std::wstring_view title);
+bool PopupTargetNeedsShellTopmostRaise(std::wstring_view class_name, std::wstring_view title,
+                                       std::wstring_view process_name);
+bool PopupShellTopmostRaiseShouldExpire(bool keep_above_shell_surface, long remaining_ms);
+bool PopupShouldCreateInShellWindowBand();
+bool PopupTargetRequiresExplicitTextInputFocus(std::wstring_view class_name, std::wstring_view title,
+                                               std::wstring_view process_name = {});
+bool PopupShouldUseTextAvoidForTarget(bool has_text_avoid, std::wstring_view class_name, std::wstring_view title);
+bool PopupTargetCanUseConsoleAnchor(std::wstring_view class_name);
+POINT PopupWindowRectFallback(RECT target, SIZE size, RECT work, unsigned dpi);
+POINT PopupTargetCenterFallback(RECT target, SIZE size, RECT work, unsigned dpi);
+POINT PopupConsoleCellAnchor(POINT client_origin_screen, COORD cell, SMALL_RECT viewport, COORD font_size);
+COORD PopupConsoleAnchorCell(CONSOLE_SELECTION_INFO selection, COORD cursor_position);
+COORD PopupConsoleSelectionAnchor(CONSOLE_SELECTION_INFO selection);
 POINT PopupBottomRightFallback(SIZE size, RECT work, unsigned dpi);
 POINT CenterWindowInWorkArea(SIZE size, RECT work);
 int PopupHoverItemIndex(bool filter_open, int hit_item_index);
@@ -323,7 +395,8 @@ bool ShouldHidePopupAfterOutsideClick(bool pinned_open, bool prompt_open, bool m
                                       bool mouse_down_started_inside_popup, bool transient_hide_suppressed,
                                       bool visible, bool new_mouse_press, bool click_inside_popup);
 bool ShouldHidePopupAfterInactive(bool pinned_open, bool prompt_open, bool moving_window,
-                                  bool transient_hide_suppressed, bool visible, bool next_active_inside_popup);
+                                  bool transient_hide_suppressed, bool visible, bool next_active_inside_popup,
+                                  bool shell_surface_raise_active = false);
 bool PopupPointerInteractionSuppressesInactiveHide(bool moving_window, bool resizing_window,
                                                    bool mouse_down_started_inside_popup,
                                                    bool left_button_was_down);

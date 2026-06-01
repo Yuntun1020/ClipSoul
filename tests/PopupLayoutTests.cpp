@@ -47,6 +47,20 @@ TEST_CASE(PopupRoundedWindowRegionScalesCornerRadiusWithDpi) {
     REQUIRE_EQ(ClipSoul::ScalePopupMetricForDpi(metrics.corner_radius, 192), 36);
 }
 
+TEST_CASE(PopupFileImagePreviewRecognizesImageFileExtensions) {
+    REQUIRE(ClipSoul::PopupFileCanUseImagePreview(LR"(C:\Users\yang\Pictures\sample.png)"));
+    REQUIRE(ClipSoul::PopupFileCanUseImagePreview(LR"(C:\Users\yang\Pictures\SAMPLE.JPG)"));
+    REQUIRE(ClipSoul::PopupFileCanUseImagePreview(LR"(F:\xz\photo.jpeg)"));
+    REQUIRE(ClipSoul::PopupFileCanUseImagePreview(LR"(F:\xz\scan.bmp)"));
+    REQUIRE(ClipSoul::PopupFileCanUseImagePreview(LR"(F:\xz\animation.gif)"));
+    REQUIRE(ClipSoul::PopupFileCanUseImagePreview(LR"(F:\xz\preview.webp)"));
+    REQUIRE(ClipSoul::PopupFileCanUseImagePreview(LR"(F:\xz\image.tif)"));
+    REQUIRE(ClipSoul::PopupFileCanUseImagePreview(LR"(F:\xz\image.tiff)"));
+    REQUIRE(!ClipSoul::PopupFileCanUseImagePreview(LR"(F:\xz\document.pdf)"));
+    REQUIRE(!ClipSoul::PopupFileCanUseImagePreview(LR"(F:\xz\notes.txt)"));
+    REQUIRE(!ClipSoul::PopupFileCanUseImagePreview(LR"(F:\xz\no-extension)"));
+}
+
 TEST_CASE(PopupHeaderButtonsUseCompactIconTargets) {
     const auto metrics = ClipSoul::PopupMetrics();
     const auto layout = ClipSoul::BuildPopupHeaderLayout();
@@ -175,6 +189,11 @@ TEST_CASE(PopupInactiveHideWaitsForTransientInteractions) {
     REQUIRE(!ClipSoul::ShouldHidePopupAfterInactive(false, false, false, false, false, false));
 }
 
+TEST_CASE(PopupInactiveHideWaitsWhileShellSurfaceRaiseIsActive) {
+    REQUIRE(!ClipSoul::ShouldHidePopupAfterInactive(false, false, false, false, true, false, true));
+    REQUIRE(ClipSoul::ShouldHidePopupAfterInactive(false, false, false, false, true, false, false));
+}
+
 TEST_CASE(PopupPointerInteractionsSuppressInactiveHideUntilTheySettle) {
     REQUIRE(ClipSoul::PopupPointerInteractionSuppressesInactiveHide(true, false, false, false));
     REQUIRE(ClipSoul::PopupPointerInteractionSuppressesInactiveHide(false, true, false, false));
@@ -244,12 +263,112 @@ TEST_CASE(PopupSearchDisplayTextShowsQueryOrPlaceholder) {
     REQUIRE(!ClipSoul::PopupSearchDeletesOnKeyDown(VK_BACK));
     REQUIRE(ClipSoul::PopupSearchAppendsChar(L'a'));
     REQUIRE(!ClipSoul::PopupSearchAppendsChar(L'\b'));
+    REQUIRE(ClipSoul::PopupSearchAcceptsTextInput(true));
+    REQUIRE(!ClipSoul::PopupSearchAcceptsTextInput(false));
+    REQUIRE(!ClipSoul::PopupResizeShouldDiscardDeviceResources());
+    REQUIRE(ClipSoul::PopupDpiChangeShouldDiscardDeviceResources());
+    REQUIRE(!ClipSoul::PopupPaintShouldUpdateLayout());
+    REQUIRE(!ClipSoul::PopupShouldAnimateHoverWhileResizing(true));
+    REQUIRE(ClipSoul::PopupShouldAnimateHoverWhileResizing(false));
+    REQUIRE(!ClipSoul::PopupShouldActivateWhenShown(true));
+    REQUIRE(ClipSoul::PopupShouldActivateWhenShown(false));
+    REQUIRE(ClipSoul::PopupShouldActivateForShellSurface(true));
+    REQUIRE(!ClipSoul::PopupShouldActivateForShellSurface(false));
+    REQUIRE(!ClipSoul::PopupShowShouldActivate(true, false));
+    REQUIRE(ClipSoul::PopupShowShouldActivate(false, false));
+    REQUIRE(ClipSoul::PopupShowShouldActivate(true, true));
+    REQUIRE(ClipSoul::PopupShowShouldActivate(false, true));
+    REQUIRE(!ClipSoul::PopupSetWindowPosShouldUseNoActivate(true));
+    REQUIRE(ClipSoul::PopupSetWindowPosShouldUseNoActivate(false));
+    REQUIRE_EQ(ClipSoul::PopupMouseActivateResult(), static_cast<LRESULT>(MA_NOACTIVATE));
+    REQUIRE(!ClipSoul::PopupShouldFocusWindowForPointerPress(false));
+    REQUIRE(ClipSoul::PopupShouldFocusWindowForPointerPress(true));
+    REQUIRE(ClipSoul::PopupShouldActivateForSearchFocus(true, true));
+    REQUIRE(!ClipSoul::PopupShouldActivateForSearchFocus(false, true));
+    REQUIRE(!ClipSoul::PopupShouldActivateForSearchFocus(true, false));
+    REQUIRE(ClipSoul::PopupShouldFocusNativeSearchEdit(true, true));
+    REQUIRE(!ClipSoul::PopupShouldFocusNativeSearchEdit(false, true));
+    REQUIRE(!ClipSoul::PopupShouldFocusNativeSearchEdit(true, false));
+    REQUIRE(!ClipSoul::PopupShouldAutoFocusSearchOnShow(true));
+    REQUIRE(!ClipSoul::PopupShouldAutoFocusSearchOnShow(false));
+    REQUIRE(ClipSoul::PopupWindowShouldUseNoActivateStyle());
+    REQUIRE(!ClipSoul::PopupWindowShouldUseNoActivateStyle(true));
+    REQUIRE(ClipSoul::PopupWindowShouldUseNoActivateStyle(false));
+    REQUIRE(ClipSoul::PopupNativeSearchCueBannerShowsWhenFocused());
+    REQUIRE(ClipSoul::PopupSearchShouldStayFocusedAfterNativeBlur(true));
+    REQUIRE(!ClipSoul::PopupSearchShouldStayFocusedAfterNativeBlur(false));
+    REQUIRE(ClipSoul::PopupShouldRedrawNativeSearchAfterParentPaint(true, false));
+    REQUIRE(!ClipSoul::PopupShouldRedrawNativeSearchAfterParentPaint(false, false));
+    REQUIRE(!ClipSoul::PopupShouldRedrawNativeSearchAfterParentPaint(true, true));
+    REQUIRE(!ClipSoul::PopupShouldDrawDecorativeShadows(true));
+    REQUIRE(ClipSoul::PopupShouldDrawDecorativeShadows(false));
+    REQUIRE(!ClipSoul::PopupShouldLoadUiIcon(true));
+    REQUIRE(ClipSoul::PopupShouldLoadUiIcon(false));
+    REQUIRE(!ClipSoul::PopupShouldLoadImagePreview(true));
+    REQUIRE(ClipSoul::PopupShouldLoadImagePreview(false));
+    REQUIRE(!ClipSoul::PopupShouldLoadFileIcon(true));
+    REQUIRE(ClipSoul::PopupShouldLoadFileIcon(false));
+    REQUIRE(ClipSoul::PopupShouldDrawCachedMediaDuringFastInteraction(true, true));
+    REQUIRE(!ClipSoul::PopupShouldDrawCachedMediaDuringFastInteraction(true, false));
+    REQUIRE(ClipSoul::PopupShouldDrawCachedMediaDuringFastInteraction(false, false));
+    REQUIRE(!ClipSoul::PopupShouldUseCurrentWindowWidthForLayout(false, false, 460, 340));
+    REQUIRE(ClipSoul::PopupShouldUseCurrentWindowWidthForLayout(false, true, 460, 340));
+    REQUIRE(ClipSoul::PopupShouldUseCurrentWindowWidthForLayout(true, false, 460, 340));
+    REQUIRE(!ClipSoul::PopupShouldUseCurrentWindowWidthForLayout(true, false, 340, 340));
+    REQUIRE(ClipSoul::PopupNativeSearchKeyHandledByPopup(VK_ESCAPE));
+    REQUIRE(ClipSoul::PopupNativeSearchKeyHandledByPopup(VK_RETURN));
+    REQUIRE(ClipSoul::PopupNativeSearchKeyHandledByPopup(VK_UP));
+    REQUIRE(ClipSoul::PopupNativeSearchKeyHandledByPopup(VK_DOWN));
+    REQUIRE(!ClipSoul::PopupNativeSearchKeyHandledByPopup(VK_BACK));
+    REQUIRE(!ClipSoul::PopupNativeSearchKeyHandledByPopup('A'));
+    REQUIRE(ClipSoul::PopupShouldFocusNativeSearchEdit(true, true));
+    REQUIRE(!ClipSoul::PopupShouldFocusNativeSearchEdit(false, true));
+    REQUIRE(!ClipSoul::PopupShouldFocusNativeSearchEdit(true, false));
+    REQUIRE(!ClipSoul::PopupShouldAutoFocusSearchOnShow(true));
+    REQUIRE(!ClipSoul::PopupShouldAutoFocusSearchOnShow(false));
+    REQUIRE(ClipSoul::PopupWindowShouldUseNoActivateStyle());
+    REQUIRE(ClipSoul::PopupNativeSearchCueBannerShowsWhenFocused());
+    REQUIRE(ClipSoul::PopupSearchShouldStayFocusedAfterNativeBlur(true));
+    REQUIRE(!ClipSoul::PopupSearchShouldStayFocusedAfterNativeBlur(false));
+    REQUIRE(ClipSoul::PopupImageFilePreviewDecodePixelLimit() <= 256);
+    REQUIRE(ClipSoul::PopupImagePreviewDecodePixelLimit() <= 256);
+    const auto wide_preview = ClipSoul::PopupPreviewDecodeSize(4000, 2000, ClipSoul::PopupImageFilePreviewDecodePixelLimit());
+    REQUIRE_EQ(wide_preview.cx, static_cast<LONG>(ClipSoul::PopupImageFilePreviewDecodePixelLimit()));
+    REQUIRE_EQ(wide_preview.cy, static_cast<LONG>(ClipSoul::PopupImageFilePreviewDecodePixelLimit() / 2));
+    const auto tall_preview = ClipSoul::PopupPreviewDecodeSize(1200, 2400, 160);
+    REQUIRE_EQ(tall_preview.cx, 80);
+    REQUIRE_EQ(tall_preview.cy, 160);
+    const auto small_preview = ClipSoul::PopupPreviewDecodeSize(64, 48, 160);
+    REQUIRE_EQ(small_preview.cx, 64);
+    REQUIRE_EQ(small_preview.cy, 48);
     REQUIRE_EQ(ClipSoul::PopupSearchFocusProgress(true, false, 0.0f), 1.0f);
     REQUIRE_EQ(ClipSoul::PopupSearchFocusProgress(false, false, 1.0f), 0.0f);
     REQUIRE_EQ(ClipSoul::PopupSearchFocusProgress(false, true, 0.45f), 0.45f);
     REQUIRE_EQ(ClipSoul::PopupSearchFocusProgress(false, true, 2.0f), 1.0f);
 
     const auto layout = ClipSoul::BuildPopupSearchLayout();
+    const auto native_edit = ClipSoul::PopupNativeSearchEditRect(layout);
+    REQUIRE(native_edit.left > layout.icon.right);
+    REQUIRE(native_edit.right <= layout.box.right - 8.0f);
+    REQUIRE(native_edit.Width() <= 2.0f);
+    REQUIRE(native_edit.Height() <= layout.text.Height());
+    REQUIRE(ClipSoul::PopupSearchCaretVisible(true, true));
+    REQUIRE(!ClipSoul::PopupSearchCaretVisible(true, false));
+    REQUIRE(!ClipSoul::PopupSearchCaretVisible(false, true));
+    const auto forward_selection = ClipSoul::NormalizePopupSearchSelection(1, 4, 8);
+    REQUIRE_EQ(forward_selection.start, static_cast<size_t>(1));
+    REQUIRE_EQ(forward_selection.end, static_cast<size_t>(4));
+    REQUIRE(ClipSoul::PopupSearchHasSelection(forward_selection));
+    const auto reverse_selection = ClipSoul::NormalizePopupSearchSelection(7, 2, 5);
+    REQUIRE_EQ(reverse_selection.start, static_cast<size_t>(2));
+    REQUIRE_EQ(reverse_selection.end, static_cast<size_t>(5));
+    REQUIRE(ClipSoul::PopupSearchHasSelection(reverse_selection));
+    REQUIRE(!ClipSoul::PopupSearchHasSelection(ClipSoul::NormalizePopupSearchSelection(3, 3, 8)));
+    REQUIRE(ClipSoul::PopupSearchShouldDrawSelection(true, true, forward_selection));
+    REQUIRE(!ClipSoul::PopupSearchShouldDrawSelection(false, true, forward_selection));
+    REQUIRE(!ClipSoul::PopupSearchShouldDrawSelection(true, false, forward_selection));
+    REQUIRE(!ClipSoul::PopupSearchShouldDrawSelection(true, true,
+                                                       ClipSoul::NormalizePopupSearchSelection(3, 3, 8)));
     REQUIRE_EQ(ClipSoul::ClampPopupSearchCaretX(layout, 0.0f), layout.text.left);
     REQUIRE_EQ(ClipSoul::ClampPopupSearchCaretX(layout, 9999.0f), layout.text.right - 2.0f);
     REQUIRE(ClipSoul::ClampPopupSearchCaretX(layout, 28.0f) > layout.text.left + 20.0f);
@@ -259,6 +378,19 @@ TEST_CASE(PopupSearchDisplayTextShowsQueryOrPlaceholder) {
     REQUIRE(ime_anchor.x <= static_cast<LONG>(layout.text.right));
     REQUIRE(ime_anchor.y > static_cast<LONG>(layout.text.top));
     REQUIRE(ime_anchor.y <= static_cast<LONG>(layout.box.bottom));
+    REQUIRE(!ClipSoul::PopupShouldResizeNativeSearchDuringLiveResize(true, true));
+    REQUIRE(ClipSoul::PopupShouldResizeNativeSearchDuringLiveResize(false, true));
+    REQUIRE(!ClipSoul::PopupShouldResizeNativeSearchDuringLiveResize(false, false));
+    REQUIRE(ClipSoul::PopupShouldInvalidateDuringLiveResize(true, true));
+    REQUIRE(!ClipSoul::PopupShouldInvalidateDuringLiveResize(true, false));
+    const RECT current_rect{10, 20, 350, 580};
+    const RECT same_rect{10, 20, 350, 580};
+    const RECT resized_rect{10, 20, 420, 640};
+    REQUIRE(!ClipSoul::PopupShouldApplyWindowRect(current_rect, same_rect));
+    REQUIRE(ClipSoul::PopupShouldApplyWindowRect(current_rect, resized_rect));
+    REQUIRE(ClipSoul::PopupShouldFlushPaintDuringLiveResize(true, true));
+    REQUIRE(!ClipSoul::PopupShouldFlushPaintDuringLiveResize(true, false));
+    REQUIRE(!ClipSoul::PopupShouldFlushPaintDuringLiveResize(false, true));
 }
 
 TEST_CASE(PopupToolbarButtonsAdaptToCurrentWindowWidth) {
@@ -505,6 +637,13 @@ TEST_CASE(PopupSmoothViewportClampDoesNotSnapBackToSelection) {
     REQUIRE(ClipSoul::PopupScrollOffsetToRevealSelectionForHeight(12, scrolled, 0, metrics.height) < scrolled);
 }
 
+TEST_CASE(PopupReopenStartsAtTop) {
+    REQUIRE_EQ(ClipSoul::PopupScrollOffsetAfterReopen(142.0f, 900.0f, 360.0f), 0.0f);
+    REQUIRE_EQ(ClipSoul::PopupScrollOffsetAfterReopen(700.0f, 900.0f, 360.0f), 0.0f);
+    REQUIRE_EQ(ClipSoul::PopupScrollOffsetAfterReopen(120.0f, 300.0f, 360.0f), 0.0f);
+    REQUIRE_EQ(ClipSoul::PopupScrollOffsetAfterReopen(-20.0f, 900.0f, 360.0f), 0.0f);
+}
+
 TEST_CASE(PopupScrollbarThumbMapsDragPositionToScrollOffset) {
     const auto track = ClipSoul::PopupScrollbarTrackRect();
     const auto hit = ClipSoul::PopupScrollbarHitRect();
@@ -610,7 +749,7 @@ TEST_CASE(PopupExpandedCardHeightUsesAvailableTextWidth) {
 
     REQUIRE(ClipSoul::PopupExpandedCardExtraHeightForText(long_path, 110.0f) >
             ClipSoul::PopupExpandedCardExtraHeightForText(long_path, 230.0f));
-    REQUIRE(ClipSoul::PopupExpandedCardExtraHeightForText(L"备注：第一行\n第二行\n第三行\n第四行", 230.0f) >
+    REQUIRE(ClipSoul::PopupExpandedCardExtraHeightForText(L"\u5907\u6ce8\uff1a\u7b2c\u4e00\u884c\n\u7b2c\u4e8c\u884c\n\u7b2c\u4e09\u884c\n\u7b2c\u56db\u884c", 230.0f) >
             ClipSoul::PopupExpandedCardExtraHeight(true));
 }
 
@@ -917,7 +1056,50 @@ TEST_CASE(PopupPositionFallsBackToBottomRightWithoutCaret) {
     SIZE size{340, 560};
     const auto fallback = ClipSoul::PopupBottomRightFallback(size, work, 96);
     REQUIRE_EQ(fallback.x, 1548);
-    REQUIRE_EQ(fallback.y, 464);
+    REQUIRE_EQ(fallback.y, 504);
+
+    const auto no_caret = ClipSoul::PopupBottomRightFallback(size, work, 96);
+    REQUIRE_EQ(no_caret.x, 1548);
+    REQUIRE_EQ(no_caret.y, 504);
+
+    const RECT target{120, 100, 920, 740};
+    const auto window = ClipSoul::PopupWindowRectFallback(target, size, work, 96);
+    REQUIRE_EQ(window.x, 930);
+    REQUIRE_EQ(window.y, 110);
+
+    const auto target_center = ClipSoul::PopupTargetCenterFallback(target, size, work, 96);
+    REQUIRE_EQ(target_center.x, 530);
+    REQUIRE_EQ(target_center.y, 430);
+
+    const auto console_anchor =
+        ClipSoul::PopupConsoleCellAnchor(POINT{100, 80}, COORD{12, 8}, SMALL_RECT{0, 3, 79, 32}, COORD{8, 16});
+    REQUIRE_EQ(console_anchor.x, 204);
+    REQUIRE_EQ(console_anchor.y, 160);
+
+    CONSOLE_SELECTION_INFO selection{};
+    selection.dwFlags = CONSOLE_SELECTION_NOT_EMPTY;
+    selection.dwSelectionAnchor = COORD{42, 19};
+    selection.srSelection = SMALL_RECT{10, 5, 30, 7};
+    const auto selection_anchor = ClipSoul::PopupConsoleSelectionAnchor(selection);
+    REQUIRE_EQ(selection_anchor.X, 42);
+    REQUIRE_EQ(selection_anchor.Y, 19);
+    const auto selected_anchor_cell = ClipSoul::PopupConsoleAnchorCell(selection, COORD{7, 4});
+    REQUIRE_EQ(selected_anchor_cell.X, 42);
+    REQUIRE_EQ(selected_anchor_cell.Y, 19);
+
+    CONSOLE_SELECTION_INFO cursor_selection{};
+    cursor_selection.dwSelectionAnchor = COORD{42, 19};
+    const auto cursor_anchor = ClipSoul::PopupConsoleSelectionAnchor(cursor_selection);
+    REQUIRE_EQ(cursor_anchor.X, 42);
+    REQUIRE_EQ(cursor_anchor.Y, 19);
+    const auto cursor_anchor_cell = ClipSoul::PopupConsoleAnchorCell(cursor_selection, COORD{7, 4});
+    REQUIRE_EQ(cursor_anchor_cell.X, 7);
+    REQUIRE_EQ(cursor_anchor_cell.Y, 4);
+
+    REQUIRE(target_center.x >= target.left);
+    REQUIRE(target_center.x <= target.right);
+    REQUIRE(target_center.y >= target.top);
+    REQUIRE(target_center.y <= target.bottom);
 }
 
 TEST_CASE(PopupPositionClampsAroundCaretAnchor) {
@@ -926,6 +1108,285 @@ TEST_CASE(PopupPositionClampsAroundCaretAnchor) {
     const auto position = ClipSoul::ClampPopupToWorkArea(POINT{1000, 400}, size, work, 96);
     REQUIRE_EQ(position.x, 1010);
     REQUIRE_EQ(position.y, 410);
+
+    const POINT caret{1000, 700};
+    const auto text_anchor = ClipSoul::PopupTextAnchorPosition(caret, size, work, 96);
+    REQUIRE_EQ(text_anchor.x, 1008);
+    REQUIRE_EQ(text_anchor.y, 132);
+    REQUIRE(text_anchor.x > caret.x);
+    REQUIRE(text_anchor.y + size.cy <= caret.y - 8);
+
+    const RECT text_range{1000, 680, 1000, 704};
+    REQUIRE(ClipSoul::PopupTextRangeRectUsable(text_range));
+    const auto range_anchor = ClipSoul::PopupTextRangeAnchor(text_range);
+    REQUIRE_EQ(range_anchor.x, 1000);
+    REQUIRE_EQ(range_anchor.y, 680);
+    REQUIRE(ClipSoul::PopupTextRangeRectUsable(RECT{1000, 680, 1001, 704}));
+    REQUIRE(!ClipSoul::PopupTextRangeRectUsable(RECT{0, 0, 0, 0}));
+    REQUIRE(!ClipSoul::PopupTextRangeRectUsable(RECT{0, 0, 0, 1}));
+    REQUIRE(!ClipSoul::PopupTextRangeRectUsable(RECT{64, 96, 1370, 148}));
+    REQUIRE(!ClipSoul::PopupTextRangeRectUsable(RECT{1000, 680, 1060, 704}));
+    REQUIRE(ClipSoul::PopupTextCharacterRectUsable(RECT{246, 78, 259, 102}, 144));
+    REQUIRE(!ClipSoul::PopupTextCharacterRectUsable(RECT{240, 72, 2199, 108}, 144));
+    const auto before_character = ClipSoul::PopupTextCharacterCaretRect(RECT{246, 78, 259, 102}, false);
+    REQUIRE_EQ(before_character.left, 246);
+    REQUIRE_EQ(before_character.right, 247);
+    const auto after_character = ClipSoul::PopupTextCharacterCaretRect(RECT{246, 78, 259, 102}, true);
+    REQUIRE_EQ(after_character.left, 258);
+    REQUIRE_EQ(after_character.right, 259);
+    REQUIRE(ClipSoul::PopupTextInputRectUsable(RECT{640, 96, 1370, 148}));
+    REQUIRE(!ClipSoul::PopupTextInputRectUsable(RECT{0, 0, 0, 0}));
+    REQUIRE(!ClipSoul::PopupTextInputRectUsable(RECT{100, 120, 110, 124}));
+    REQUIRE(!ClipSoul::PopupTextInputRectUsable(RECT{6, 120, 2555, 1593}));
+    REQUIRE(ClipSoul::PopupCaretAnchorAllowedByFocusedText(
+        true, RECT{520, 1260, 1720, 1420}, true, RECT{1113, 1319, 1114, 1347}, 144));
+    REQUIRE(!ClipSoul::PopupCaretAnchorAllowedByFocusedText(
+        false, RECT{520, 1260, 1720, 1420}, true, RECT{1113, 1319, 1114, 1347}, 144));
+    REQUIRE(!ClipSoul::PopupCaretAnchorAllowedByFocusedText(
+        true, RECT{100, 100, 500, 240}, true, RECT{1113, 1319, 1114, 1347}, 144));
+    REQUIRE(!ClipSoul::PopupCaretAnchorAllowedByFocusedText(
+        true, RECT{}, false, RECT{1113, 1319, 1114, 1347}, 144));
+    REQUIRE(ClipSoul::PopupJavaCaretRectUsable(RECT{560, 980, 562, 1008}, RECT{120, 80, 1800, 1200}, 144));
+    REQUIRE(!ClipSoul::PopupJavaCaretRectUsable(RECT{0, 0, 0, 0}, RECT{120, 80, 1800, 1200}, 144));
+    REQUIRE(!ClipSoul::PopupJavaCaretRectUsable(RECT{560, 980, 760, 1008}, RECT{120, 80, 1800, 1200}, 144));
+    REQUIRE(!ClipSoul::PopupJavaCaretRectUsable(RECT{2400, 980, 2401, 1008}, RECT{120, 80, 1800, 1200}, 144));
+    REQUIRE(ClipSoul::PopupVisualCaretRectUsable(RECT{650, 1040, 654, 1068}, RECT{120, 80, 1800, 1200}, 144));
+    REQUIRE(!ClipSoul::PopupVisualCaretRectUsable(RECT{650, 1040, 720, 1068}, RECT{120, 80, 1800, 1200}, 144));
+    REQUIRE(!ClipSoul::PopupVisualCaretRectUsable(RECT{650, 1040, 654, 1068}, RECT{800, 80, 1800, 1200}, 144));
+    const auto input_anchor = ClipSoul::PopupTextInputRectAnchor(RECT{640, 96, 1370, 148}, 144);
+    REQUIRE_EQ(input_anchor.x, 652);
+    REQUIRE_EQ(input_anchor.y, 96);
+    const auto input_position =
+        ClipSoul::PopupTextAvoidRectPosition(RECT{640, 96, 1370, 148}, size, work, 144);
+    REQUIRE_EQ(input_position.x, 664);
+    REQUIRE_EQ(input_position.y, 160);
+    REQUIRE(input_position.y > 148);
+
+    const auto right_edge_text_anchor = ClipSoul::PopupTextAnchorPosition(POINT{1860, 700}, size, work, 96);
+    REQUIRE_EQ(right_edge_text_anchor.x, 1564);
+    REQUIRE_EQ(right_edge_text_anchor.y, 132);
+
+    const auto top_edge_text_anchor = ClipSoul::PopupTextAnchorPosition(POINT{1000, 80}, size, work, 96);
+    REQUIRE_EQ(top_edge_text_anchor.x, 1008);
+    REQUIRE_EQ(top_edge_text_anchor.y, 88);
+    REQUIRE(top_edge_text_anchor.y >= 80 + 8);
+
+    const auto bottom_edge_text_anchor = ClipSoul::PopupTextAnchorPosition(POINT{1000, 1040}, size, work, 96);
+    REQUIRE_EQ(bottom_edge_text_anchor.x, 1008);
+    REQUIRE_EQ(bottom_edge_text_anchor.y, 472);
+    REQUIRE(bottom_edge_text_anchor.y + size.cy <= 1040 - 8);
+
+    REQUIRE(ClipSoul::PopupTargetNeedsShellTopmostRaise(L"Windows.UI.Core.CoreWindow", L""));
+    REQUIRE(ClipSoul::PopupTargetNeedsShellTopmostRaise(L"", L"\u641c\u7d22"));
+    REQUIRE(ClipSoul::PopupTargetNeedsShellTopmostRaise(L"Windows.UI.Core.CoreWindow", L"", L"SearchHost"));
+    REQUIRE(ClipSoul::PopupTargetNeedsShellTopmostRaise(L"ApplicationFrameWindow", L"", L"TextInputHost"));
+    REQUIRE(!ClipSoul::PopupTargetNeedsShellTopmostRaise(L"Chrome_WidgetWin_1", L"Codex"));
+    REQUIRE(!ClipSoul::PopupShellTopmostRaiseShouldExpire(true, -1));
+    REQUIRE(!ClipSoul::PopupShellTopmostRaiseShouldExpire(true, 0));
+    REQUIRE(ClipSoul::PopupShellTopmostRaiseShouldExpire(false, -1));
+    REQUIRE(!ClipSoul::PopupShellTopmostRaiseShouldExpire(false, 1));
+    REQUIRE(ClipSoul::PopupShouldCreateInShellWindowBand());
+    REQUIRE(!ClipSoul::PopupTargetRequiresExplicitTextInputFocus(L"Chrome_WidgetWin_1", L"Codex"));
+    REQUIRE(!ClipSoul::PopupTargetRequiresExplicitTextInputFocus(L"Chrome_WidgetWin_1", L"Codex", L"Codex"));
+    REQUIRE(!ClipSoul::PopupTargetRequiresExplicitTextInputFocus(L"Chrome_WidgetWin_1", L"Codex", L"msedge"));
+    REQUIRE(!ClipSoul::PopupTargetRequiresExplicitTextInputFocus(L"Chrome_WidgetWin_1", L"Chrome"));
+    REQUIRE(!ClipSoul::PopupTargetRequiresExplicitTextInputFocus(L"Chrome_WidgetWin_1", L"Visual Studio Code"));
+    REQUIRE(!ClipSoul::PopupTargetRequiresExplicitTextInputFocus(L"Notepad", L""));
+    REQUIRE(ClipSoul::PopupTargetCanUseConsoleAnchor(L"ConsoleWindowClass"));
+    REQUIRE(!ClipSoul::PopupTargetCanUseConsoleAnchor(L"SunAwtFrame"));
+    REQUIRE(!ClipSoul::PopupTargetCanUseConsoleAnchor(L"CASCADIA_HOSTING_WINDOW_CLASS"));
+    REQUIRE(ClipSoul::PopupShouldUseTextAvoidForTarget(true, L"Windows.UI.Core.CoreWindow", L""));
+    REQUIRE(ClipSoul::PopupShouldUseTextAvoidForTarget(true, L"", L"\u641c\u7d22"));
+    REQUIRE(ClipSoul::PopupShouldUseTextAvoidForTarget(true, L"Chrome_WidgetWin_1", L"Codex"));
+    REQUIRE(!ClipSoul::PopupShouldUseTextAvoidForTarget(false, L"Chrome_WidgetWin_1", L"Codex"));
+}
+
+TEST_CASE(PopupTextCaretPositionPrefersRightAboveCaret) {
+    const SIZE size{340, 560};
+    const RECT work{0, 0, 1920, 1080};
+
+    const auto normal = ClipSoul::PopupTextAnchorPosition(POINT{1000, 700}, size, work, 96);
+    REQUIRE_EQ(normal.x, 1008);
+    REQUIRE_EQ(normal.y, 132);
+    REQUIRE(normal.x > 1000);
+    REQUIRE(normal.y + size.cy <= 700 - 8);
+    REQUIRE(normal.y + size.cy <= work.bottom - 16);
+
+    const auto right_edge = ClipSoul::PopupTextAnchorPosition(POINT{1860, 700}, size, work, 96);
+    REQUIRE_EQ(right_edge.x, 1564);
+    REQUIRE_EQ(right_edge.y, 132);
+    REQUIRE(right_edge.x + size.cx <= work.right - 16);
+
+    const auto top_edge = ClipSoul::PopupTextAnchorPosition(POINT{1000, 40}, size, work, 96);
+    REQUIRE_EQ(top_edge.x, 1008);
+    REQUIRE_EQ(top_edge.y, 48);
+    REQUIRE(top_edge.y >= 40 + 8);
+
+    const auto bottom_edge = ClipSoul::PopupTextAnchorPosition(POINT{1000, 1060}, size, work, 96);
+    REQUIRE_EQ(bottom_edge.x, 1008);
+    REQUIRE_EQ(bottom_edge.y, 492);
+    REQUIRE(bottom_edge.y + size.cy <= work.bottom - 16);
+}
+
+TEST_CASE(PopupTextCaretPositionScalesGapsAndSupportsNegativeMonitorCoordinates) {
+    const SIZE size{510, 840};
+    const RECT work{-1920, 0, 0, 1440};
+
+    const auto position = ClipSoul::PopupTextAnchorPosition(POINT{-900, 1100}, size, work, 144);
+    REQUIRE_EQ(position.x, -888);
+    REQUIRE_EQ(position.y, 248);
+    REQUIRE(position.x >= work.left + 24);
+    REQUIRE(position.x + size.cx <= work.right - 24);
+    REQUIRE(position.y >= work.top + 24);
+    REQUIRE(position.y + size.cy <= work.bottom - 24);
+}
+
+TEST_CASE(PopupTextCaretPositionFallsBelowOnlyWhenAboveDoesNotFit) {
+    const SIZE size{510, 840};
+    const RECT work{0, 0, 2560, 1600};
+
+    const auto top_caret = ClipSoul::PopupTextAnchorPosition(POINT{1277, 100}, size, work, 144);
+    REQUIRE_EQ(top_caret.x, 1289);
+    REQUIRE_EQ(top_caret.y, 112);
+    REQUIRE(top_caret.y > 100);
+
+    const auto middle_caret = ClipSoul::PopupTextAnchorPosition(POINT{1277, 950}, size, work, 144);
+    REQUIRE_EQ(middle_caret.x, 1289);
+    REQUIRE_EQ(middle_caret.y, 98);
+    REQUIRE(middle_caret.y + size.cy <= 950 - 12);
+
+    const auto bottom_clamped = ClipSoul::PopupTextAnchorPosition(POINT{1277, 1500}, size, work, 144);
+    REQUIRE_EQ(bottom_clamped.x, 1289);
+    REQUIRE_EQ(bottom_clamped.y, 648);
+    REQUIRE(bottom_clamped.y < 1500);
+    REQUIRE(bottom_clamped.y + size.cy <= work.bottom - 24);
+}
+
+TEST_CASE(PopupTextCaretPositionDoesNotClampBelowChoiceBackOverCaret) {
+    const SIZE size{510, 840};
+    const RECT work{0, 0, 2560, 1000};
+    const RECT caret{834, 855, 835, 884};
+
+    const auto position = ClipSoul::PopupTextAvoidRectPosition(caret, size, work, 144);
+
+    REQUIRE(position.y + size.cy <= work.bottom - 24);
+    REQUIRE(position.y + size.cy <= caret.top - 12);
+}
+
+TEST_CASE(PopupWindowsClipboardPositionDocksToMonitorBottomRight) {
+    const SIZE size{340, 560};
+    const RECT monitor{0, 0, 1707, 1067};
+    const RECT work{0, 0, 1707, 1019};
+
+    const auto position = ClipSoul::PopupWindowsClipboardPosition(size, monitor, work, 96);
+    REQUIRE_EQ(position.x, 1367);
+    REQUIRE_EQ(position.y, 443);
+    REQUIRE_EQ(position.x + size.cx, monitor.right);
+    REQUIRE(position.y + size.cy <= work.bottom - 16);
+
+    const SIZE large_size{510, 840};
+    const RECT scaled_monitor{0, 0, 2560, 1600};
+    const RECT scaled_work{0, 0, 2560, 1528};
+    const auto scaled = ClipSoul::PopupWindowsClipboardPosition(large_size, scaled_monitor, scaled_work, 144);
+    REQUIRE_EQ(scaled.x, 2050);
+    REQUIRE_EQ(scaled.y, 664);
+    REQUIRE_EQ(scaled.x + large_size.cx, scaled_monitor.right);
+    REQUIRE(scaled.y + large_size.cy <= scaled_work.bottom - 24);
+
+    const RECT unadjusted_work{0, 0, 2560, 1600};
+    const auto unadjusted = ClipSoul::PopupWindowsClipboardPosition(large_size, scaled_monitor, unadjusted_work, 144);
+    REQUIRE_EQ(unadjusted.x, 2050);
+    REQUIRE_EQ(unadjusted.y, 652);
+    REQUIRE(unadjusted.y + large_size.cy <= unadjusted_work.bottom - 108);
+}
+
+TEST_CASE(PopupWindowsClipboardPositionSupportsNegativeMonitorCoordinates) {
+    const SIZE size{340, 560};
+    const RECT monitor{-1920, 0, 1920, 1080};
+    const RECT work{-1920, 0, 0, 1032};
+
+    const auto position = ClipSoul::PopupWindowsClipboardPosition(size, monitor, work, 96);
+    REQUIRE_EQ(position.x, 1580);
+    REQUIRE_EQ(position.y, 456);
+    REQUIRE(position.x >= monitor.left + 16);
+    REQUIRE(position.x + size.cx <= monitor.right);
+    REQUIRE(position.y >= monitor.top + 16);
+    REQUIRE(position.y + size.cy <= work.bottom - 16);
+}
+
+TEST_CASE(PopupTextCaretPositionTakesPrecedenceOverWindowsClipboardDock) {
+    const SIZE size{340, 560};
+    const RECT monitor{0, 0, 1707, 1067};
+    const RECT work{0, 0, 1707, 1019};
+    const RECT caret{540, 220, 542, 253};
+
+    const auto text_position = ClipSoul::PopupTextAvoidRectPosition(caret, size, work, 96);
+    const auto dock_position = ClipSoul::PopupWindowsClipboardPosition(size, monitor, work, 96);
+
+    REQUIRE_EQ(text_position.x, 550);
+    REQUIRE_EQ(text_position.y, 261);
+    REQUIRE(text_position.y >= caret.bottom + 8);
+    REQUIRE(text_position.x != dock_position.x);
+    REQUIRE(text_position.y != dock_position.y);
+}
+
+TEST_CASE(PopupTextCaretPositionUsesSameAnchorForShellSurfaces) {
+    const SIZE size{340, 560};
+    const RECT work{0, 0, 2560, 1528};
+    const RECT start_search_surface{16, 64, 1910, 1420};
+    const RECT middle_caret{120, 900, 121, 928};
+
+    const auto position = ClipSoul::PopupTextAvoidRectPosition(middle_caret, size, work, 96);
+
+    REQUIRE_EQ(position.x, 129);
+    REQUIRE(position.x < start_search_surface.right);
+    REQUIRE(position.y + size.cy <= middle_caret.top - 8);
+    REQUIRE(position.y >= work.top + 16);
+
+    const RECT top_caret{120, 120, 121, 148};
+    const auto below = ClipSoul::PopupTextAvoidRectPosition(top_caret, size, work, 96);
+    REQUIRE_EQ(below.x, 129);
+    REQUIRE(below.x < start_search_surface.right);
+    REQUIRE(below.y >= top_caret.bottom + 8);
+}
+
+TEST_CASE(PopupKeyboardInvocationPositionUsesTextCaretBeforeDockFallback) {
+    const SIZE size{340, 560};
+    const RECT monitor{0, 0, 1707, 1067};
+    const RECT work{0, 0, 1707, 1019};
+    const RECT caret{540, 220, 542, 253};
+
+    const auto with_caret = ClipSoul::PopupKeyboardInvocationPosition(true, caret, size, monitor, work, 96);
+    REQUIRE_EQ(with_caret.x, 550);
+    REQUIRE_EQ(with_caret.y, 261);
+    REQUIRE(with_caret.y >= caret.bottom + 8);
+
+    const auto without_caret = ClipSoul::PopupKeyboardInvocationPosition(false, RECT{}, size, monitor, work, 96);
+    REQUIRE_EQ(without_caret.x, 1367);
+    REQUIRE_EQ(without_caret.y, 443);
+}
+
+TEST_CASE(PopupTextAvoidRectPositionKeepsPopupOutsideCaretRectangle) {
+    const SIZE size{510, 840};
+    const RECT work{0, 0, 2560, 1600};
+
+    const RECT top_input{300, 60, 980, 108};
+    const auto below_top_input = ClipSoul::PopupTextAvoidRectPosition(top_input, size, work, 144);
+    REQUIRE_EQ(below_top_input.x, 324);
+    REQUIRE_EQ(below_top_input.y, 120);
+    REQUIRE(below_top_input.y >= top_input.bottom + 12);
+
+    const RECT mid_caret{410, 1000, 422, 1040};
+    const auto above_mid_caret = ClipSoul::PopupTextAvoidRectPosition(mid_caret, size, work, 144);
+    REQUIRE_EQ(above_mid_caret.x, 434);
+    REQUIRE_EQ(above_mid_caret.y, 148);
+    REQUIRE(above_mid_caret.y + size.cy <= mid_caret.top - 12);
+
+    const RECT lower_caret{1050, 1400, 1060, 1432};
+    const auto clamped_lower_caret = ClipSoul::PopupTextAvoidRectPosition(lower_caret, size, work, 144);
+    REQUIRE_EQ(clamped_lower_caret.x, 1072);
+    REQUIRE_EQ(clamped_lower_caret.y, 548);
+    REQUIRE(clamped_lower_caret.y + size.cy <= work.bottom - 24);
 }
 
 TEST_CASE(SettingsWindowCentersInWorkArea) {

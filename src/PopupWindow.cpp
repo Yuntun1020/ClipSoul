@@ -10,6 +10,7 @@
 
 #include <commctrl.h>
 #include <imm.h>
+#include <oleacc.h>
 #include <oleauto.h>
 #include <UIAutomationClient.h>
 #include <windowsx.h>
@@ -22,7 +23,9 @@
 #include <shellapi.h>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <utility>
+#include <vector>
 
 namespace ClipSoul {
 namespace {
@@ -33,7 +36,9 @@ constexpr UINT_PTR kSearchCaretTimer = 44;
 constexpr UINT_PTR kOutsideClickTimer = 45;
 constexpr UINT_PTR kItemLongPressTimer = 46;
 constexpr UINT_PTR kSuppressInactiveHideTimer = 47;
+constexpr UINT_PTR kShellTopmostRaiseTimer = 48;
 constexpr DWORD kTransientHideSuppressMs = 650;
+constexpr DWORD kShellTopmostRaiseMs = 700;
 constexpr int kPopupResizeLeft = 0x1;
 constexpr int kPopupResizeRight = 0x2;
 constexpr int kPopupResizeTop = 0x4;
@@ -47,6 +52,8 @@ constexpr int kContextDelete = 3001;
 constexpr int kContextPin = 3002;
 constexpr int kContextFavorite = 3003;
 constexpr int kContextSetNote = 3004;
+constexpr int kContextMoveUp = 3005;
+constexpr int kContextMoveDown = 3006;
 constexpr int kContextFavoriteGroupBase = 3100;
 constexpr int kContextFavoriteGroupMax = 3199;
 constexpr int kPhraseEditId = 4101;
@@ -57,6 +64,11 @@ constexpr wchar_t kPhrasePromptClass[] = L"ClipSoul.FavoritePhrasePrompt";
 constexpr int kTextPromptEditId = 4201;
 constexpr wchar_t kTextPromptClass[] = L"ClipSoul.TextPrompt";
 constexpr UINT_PTR kPhraseHoverTimer = 62;
+constexpr DWORD kAttachParentProcess = static_cast<DWORD>(-1);
+constexpr DWORD kPopupBandShellSurface = 16;
+
+using CreateWindowInBandProc = HWND(WINAPI*)(DWORD, LPCWSTR, LPCWSTR, DWORD, int, int, int, int, HWND, HMENU, HINSTANCE,
+                                             LPVOID, DWORD);
 
 template <typename T>
 void ReleasePtr(T*& ptr) {
@@ -106,6 +118,39 @@ bool ContainsWindow(HWND parent, HWND candidate) {
 bool ScreenPointInsideWindow(HWND hwnd, POINT point) {
     RECT rect{};
     return hwnd && GetWindowRect(hwnd, &rect) && PtInRect(&rect, point);
+}
+
+void ActivatePopupWindow(HWND hwnd) {
+    if (!hwnd) {
+        return;
+    }
+    const DWORD current_thread = GetCurrentThreadId();
+    DWORD foreground_process = 0;
+    const DWORD foreground_thread = GetWindowThreadProcessId(GetForegroundWindow(), &foreground_process);
+    const bool attach = foreground_thread != 0 && foreground_thread != current_thread;
+    if (attach) {
+        AttachThreadInput(current_thread, foreground_thread, TRUE);
+    }
+    BringWindowToTop(hwnd);
+    SetForegroundWindow(hwnd);
+    SetActiveWindow(hwnd);
+    SetFocus(hwnd);
+    if (attach) {
+        AttachThreadInput(current_thread, foreground_thread, FALSE);
+    }
+}
+
+CreateWindowInBandProc ResolveCreateWindowInBand() {
+    static const auto proc = reinterpret_cast<CreateWindowInBandProc>(
+        GetProcAddress(GetModuleHandleW(L"user32.dll"), "CreateWindowInBand"));
+    return proc;
+}
+
+void FocusSearchEdit(HWND search_edit) {
+    if (!search_edit) {
+        return;
+    }
+    SetFocus(search_edit);
 }
 
 HMENU ControlId(int id) {
@@ -428,7 +473,7 @@ LRESULT CALLBACK PhrasePromptProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM
         auto font = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
         HGDIOBJ old_font = SelectObject(mem_dc, font);
         SetTextColor(mem_dc, RGB(23, 32, 51));
-        TextOutW(mem_dc, 22, 18, L"添加常用语", 5);
+        TextOutW(mem_dc, 22, 18, L"\u6dfb\u52a0\u5e38\u7528\u8bed", 5);
         if (state->hover_target == 1 && state->hover_progress > 0.0f) {
             RECT close_rect{286, 12, 310, 36};
             DrawGdiRoundedPanel(mem_dc, close_rect, 8, RGB(255, 241, 242), RGB(242, 85, 90));
@@ -637,6 +682,65 @@ UINT DpiForWindowHandle(HWND hwnd) {
     return dpi == 0 ? 96 : dpi;
 }
 
+UINT DpiForMonitorHandle(HMONITOR monitor, UINT fallback_dpi) {
+    if (monitor) {
+        if (HMODULE shcore = LoadLibraryW(L"shcore.dll")) {
+            using GetDpiForMonitorFn = HRESULT(WINAPI*)(HMONITOR, int, UINT*, UINT*);
+            auto* get_dpi_for_monitor = reinterpret_cast<GetDpiForMonitorFn>(GetProcAddress(shcore, "GetDpiForMonitor"));
+            if (get_dpi_for_monitor) {
+                UINT dpi_x = 0;
+                UINT dpi_y = 0;
+                constexpr int kMdtEffectiveDpi = 0;
+                if (SUCCEEDED(get_dpi_for_monitor(monitor, kMdtEffectiveDpi, &dpi_x, &dpi_y)) && dpi_x != 0) {
+                    FreeLibrary(shcore);
+                    return dpi_x;
+                }
+            }
+            FreeLibrary(shcore);
+        }
+    }
+    return fallback_dpi == 0 ? 96 : fallback_dpi;
+}
+
+HMONITOR MonitorForPopupTarget(HWND target, HWND popup) {
+    if (target) {
+        return MonitorFromWindow(target, MONITOR_DEFAULTTONEAREST);
+    }
+    if (popup) {
+        return MonitorFromWindow(popup, MONITOR_DEFAULTTONEAREST);
+    }
+    return MonitorFromWindow(nullptr, MONITOR_DEFAULTTOPRIMARY);
+}
+
+RECT WorkAreaForMonitor(HMONITOR monitor, RECT fallback_work) {
+    MONITORINFO info{sizeof(info)};
+    if (monitor && GetMonitorInfoW(monitor, &info)) {
+        return info.rcWork;
+    }
+    return fallback_work;
+}
+
+RECT MonitorRectForMonitor(HMONITOR monitor, RECT fallback_monitor) {
+    MONITORINFO info{sizeof(info)};
+    if (monitor && GetMonitorInfoW(monitor, &info)) {
+        return info.rcMonitor;
+    }
+    return fallback_monitor;
+}
+
+RECT VirtualScreenRect() {
+    const int left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    const int top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    const int width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    const int height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    if (width > 0 && height > 0) {
+        return RECT{left, top, left + width, top + height};
+    }
+    RECT work{};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+    return work;
+}
+
 std::wstring ItemTitle(const HistoryItem& item) {
     if (item.kind == ClipboardKind::Files && !item.files.empty()) {
         return FileNameFromPath(item.files.front());
@@ -658,7 +762,7 @@ std::wstring ItemMeta(const HistoryItem& item) {
 std::wstring ItemDetailText(const HistoryItem& item) {
     std::wstring detail;
     if (!item.note.empty()) {
-        detail = L"备注：";
+        detail = L"\u5907\u6ce8\uff1a";
         detail += item.note;
     }
     auto append_content = [&](std::wstring value) {
@@ -727,11 +831,11 @@ const wchar_t* KindGlyph(ClipboardKind kind) {
     case ClipboardKind::Html:
         return L"T";
     case ClipboardKind::Image:
-        return L"◐";
+        return L"\u25d0";
     case ClipboardKind::Files:
         return L"F";
     case ClipboardKind::Link:
-        return L"↗";
+        return L"\u2197";
     }
     return L"T";
 }
@@ -759,8 +863,72 @@ std::wstring FormatDateValue(const std::optional<PopupCalendarDate>& date) {
 
 std::wstring FormatMonthTitle(int year, int month) {
     wchar_t buffer[16]{};
-    swprintf_s(buffer, L"%04d年%d月", year, month);
+    swprintf_s(buffer, L"%04d\u5e74%d\u6708", year, month);
     return buffer;
+}
+
+std::wstring HexWindow(HWND hwnd) {
+    wchar_t buffer[32]{};
+    swprintf_s(buffer, L"0x%p", hwnd);
+    return buffer;
+}
+
+std::wstring WindowClassName(HWND hwnd) {
+    wchar_t class_name[128]{};
+    if (!hwnd || GetClassNameW(hwnd, class_name, static_cast<int>(std::size(class_name))) <= 0) {
+        return L"";
+    }
+    return class_name;
+}
+
+std::wstring WindowTitle(HWND hwnd) {
+    wchar_t title[128]{};
+    if (!hwnd || GetWindowTextW(hwnd, title, static_cast<int>(std::size(title))) <= 0) {
+        return L"";
+    }
+    return title;
+}
+
+std::wstring WindowProcessName(HWND hwnd) {
+    DWORD process_id = 0;
+    if (!hwnd || GetWindowThreadProcessId(hwnd, &process_id) == 0 || process_id == 0) {
+        return L"";
+    }
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process_id);
+    if (!process) {
+        return L"";
+    }
+    wchar_t path[MAX_PATH]{};
+    DWORD length = static_cast<DWORD>(std::size(path));
+    std::wstring name;
+    if (QueryFullProcessImageNameW(process, 0, path, &length) && length > 0) {
+        name = std::filesystem::path(std::wstring(path, length)).stem().wstring();
+    }
+    CloseHandle(process);
+    return name;
+}
+
+std::wstring RectToLogString(RECT rect) {
+    std::wstring value = L"(";
+    value += std::to_wstring(rect.left);
+    value += L",";
+    value += std::to_wstring(rect.top);
+    value += L",";
+    value += std::to_wstring(rect.right);
+    value += L",";
+    value += std::to_wstring(rect.bottom);
+    value += L")";
+    return value;
+}
+
+std::wstring ForegroundWindowDebugInfo() {
+    HWND foreground = GetForegroundWindow();
+    std::wstring info = HexWindow(foreground);
+    info += L" class=";
+    info += WindowClassName(foreground);
+    info += L" process=";
+    info += WindowProcessName(foreground);
+    return info;
 }
 
 void ShiftMonth(int& year, int& month, int delta) {
@@ -838,24 +1006,681 @@ bool LoadWicFrameFromFile(IWICImagingFactory* factory, const std::filesystem::pa
            SUCCEEDED((*decoder)->GetFrame(0, frame));
 }
 
-bool TryGetCaretAnchor(HWND target, POINT& anchor) {
-    if (!target) {
+IWICBitmapSource* CreateScaledPreviewSource(IWICImagingFactory* factory, IWICBitmapFrameDecode* frame) {
+    if (!factory || !frame) {
+        return nullptr;
+    }
+    UINT width = 0;
+    UINT height = 0;
+    if (FAILED(frame->GetSize(&width, &height))) {
+        return nullptr;
+    }
+    const SIZE target = PopupPreviewDecodeSize(width, height, PopupImageFilePreviewDecodePixelLimit());
+    if (target.cx <= 0 || target.cy <= 0) {
+        return nullptr;
+    }
+    if (target.cx == static_cast<LONG>(width) && target.cy == static_cast<LONG>(height)) {
+        frame->AddRef();
+        return frame;
+    }
+
+    IWICBitmapScaler* scaler = nullptr;
+    if (FAILED(factory->CreateBitmapScaler(&scaler))) {
+        return nullptr;
+    }
+    if (FAILED(scaler->Initialize(frame, static_cast<UINT>(target.cx), static_cast<UINT>(target.cy),
+                                  WICBitmapInterpolationModeFant))) {
+        ReleasePtr(scaler);
+        return nullptr;
+    }
+    return scaler;
+}
+
+enum class TextAvoidSource {
+    None,
+    GuiCaret,
+    MsaaCaret,
+    ConsoleCursor,
+    JavaAccessBridgeCaret,
+    VisualTerminalCaret,
+    AutomationText2Caret,
+    AutomationText2Selection,
+    AutomationTextSelection,
+    AutomationTerminalVisibleLine,
+    AutomationElementRect,
+};
+
+const wchar_t* TextAvoidSourceName(TextAvoidSource source) {
+    switch (source) {
+    case TextAvoidSource::GuiCaret:
+        return L"gui-caret";
+    case TextAvoidSource::MsaaCaret:
+        return L"msaa-caret";
+    case TextAvoidSource::ConsoleCursor:
+        return L"console-cursor";
+    case TextAvoidSource::JavaAccessBridgeCaret:
+        return L"java-access-bridge-caret";
+    case TextAvoidSource::VisualTerminalCaret:
+        return L"visual-terminal-caret";
+    case TextAvoidSource::AutomationText2Caret:
+        return L"uia-text2-caret";
+    case TextAvoidSource::AutomationText2Selection:
+        return L"uia-text2-selection";
+    case TextAvoidSource::AutomationTextSelection:
+        return L"uia-text-selection";
+    case TextAvoidSource::AutomationTerminalVisibleLine:
+        return L"uia-terminal-visible-line";
+    case TextAvoidSource::AutomationElementRect:
+        return L"uia-element-rect";
+    case TextAvoidSource::None:
+    default:
+        return L"none";
+    }
+}
+
+bool TryGetGuiThreadInfo(DWORD thread_id, GUITHREADINFO& info) {
+    if (thread_id == 0) {
         return false;
     }
-    const DWORD thread_id = GetWindowThreadProcessId(target, nullptr);
-    GUITHREADINFO info{sizeof(info)};
-    if (!GetGUIThreadInfo(thread_id, &info) || !info.hwndCaret) {
+    info = GUITHREADINFO{sizeof(info)};
+    return GetGUIThreadInfo(thread_id, &info) == TRUE;
+}
+
+bool TryGetCaretAnchorFromThread(DWORD thread_id, RECT& avoid, TextAvoidSource& source) {
+    GUITHREADINFO info{};
+    if (!TryGetGuiThreadInfo(thread_id, info) || !info.hwndCaret ||
+        IsRectEmpty(&info.rcCaret) || (info.flags & GUI_CARETBLINKING) == 0) {
         return false;
     }
-    POINT point{info.rcCaret.left, info.rcCaret.bottom};
-    if (!ClientToScreen(info.hwndCaret, &point)) {
+    POINT top_left{info.rcCaret.left, info.rcCaret.top};
+    POINT bottom_right{info.rcCaret.right, info.rcCaret.bottom};
+    if (!ClientToScreen(info.hwndCaret, &top_left) || !ClientToScreen(info.hwndCaret, &bottom_right)) {
         return false;
     }
-    anchor = point;
+    avoid = RECT{top_left.x, top_left.y, bottom_right.x, bottom_right.y};
+    source = TextAvoidSource::GuiCaret;
     return true;
 }
 
-bool RectFromSafeArray(SAFEARRAY* rectangles, RECT& rect) {
+bool TryGetCaretAnchor(HWND target, RECT& avoid, TextAvoidSource& source) {
+    HWND foreground = GetForegroundWindow();
+    if (foreground && TryGetCaretAnchorFromThread(GetWindowThreadProcessId(foreground, nullptr), avoid, source)) {
+        return true;
+    }
+    if (target && target != foreground &&
+        TryGetCaretAnchorFromThread(GetWindowThreadProcessId(target, nullptr), avoid, source)) {
+        return true;
+    }
+    return false;
+}
+
+bool TryGetMsaaCaretAnchorFromWindow(HWND hwnd, RECT& avoid, TextAvoidSource& source) {
+    if (!hwnd) {
+        return false;
+    }
+    IAccessible* accessible = nullptr;
+    if (FAILED(AccessibleObjectFromWindow(hwnd, OBJID_CARET, IID_IAccessible,
+                                          reinterpret_cast<void**>(&accessible))) ||
+        !accessible) {
+        return false;
+    }
+
+    VARIANT child{};
+    child.vt = VT_I4;
+    child.lVal = CHILDID_SELF;
+    long x = 0;
+    long y = 0;
+    long width = 0;
+    long height = 0;
+    const bool ok = SUCCEEDED(accessible->accLocation(&x, &y, &width, &height, child)) &&
+                    width >= 0 && height > 0;
+    ReleasePtr(accessible);
+    if (!ok) {
+        return false;
+    }
+
+    avoid = RECT{x, y, x + std::max<long>(1, width), y + height};
+    source = TextAvoidSource::MsaaCaret;
+    return PopupTextRangeRectUsable(avoid);
+}
+
+bool TryGetMsaaCaretAnchorFromThread(DWORD thread_id, RECT& avoid, TextAvoidSource& source) {
+    GUITHREADINFO info{};
+    if (!TryGetGuiThreadInfo(thread_id, info)) {
+        return false;
+    }
+    if (info.hwndFocus && TryGetMsaaCaretAnchorFromWindow(info.hwndFocus, avoid, source)) {
+        return true;
+    }
+    if (info.hwndCaret && info.hwndCaret != info.hwndFocus &&
+        TryGetMsaaCaretAnchorFromWindow(info.hwndCaret, avoid, source)) {
+        return true;
+    }
+    return false;
+}
+
+bool TryGetMsaaCaretAnchor(HWND target, RECT& avoid, TextAvoidSource& source) {
+    HWND foreground = GetForegroundWindow();
+    if (foreground &&
+        (TryGetMsaaCaretAnchorFromThread(GetWindowThreadProcessId(foreground, nullptr), avoid, source) ||
+         TryGetMsaaCaretAnchorFromWindow(foreground, avoid, source))) {
+        return true;
+    }
+    if (target && target != foreground &&
+        (TryGetMsaaCaretAnchorFromThread(GetWindowThreadProcessId(target, nullptr), avoid, source) ||
+         TryGetMsaaCaretAnchorFromWindow(target, avoid, source))) {
+        return true;
+    }
+    return false;
+}
+
+bool TryGetConsoleAnchor(HWND target, RECT& avoid, TextAvoidSource& source) {
+    if (!target) {
+        return false;
+    }
+    DWORD process_id = 0;
+    GetWindowThreadProcessId(target, &process_id);
+    if (process_id == 0) {
+        return false;
+    }
+
+    bool attached = false;
+    if (GetConsoleWindow() != target) {
+        FreeConsole();
+        attached = AttachConsole(process_id) == TRUE;
+        if (!attached) {
+            AttachConsole(kAttachParentProcess);
+            return false;
+        }
+    }
+
+    const HANDLE output = CreateFileW(L"CONOUT$", GENERIC_READ | GENERIC_WRITE,
+                                      FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                                      FILE_ATTRIBUTE_NORMAL, nullptr);
+    CONSOLE_SCREEN_BUFFER_INFO info{};
+    CONSOLE_FONT_INFO font{};
+    CONSOLE_SELECTION_INFO selection{};
+    const bool has_selection = GetConsoleSelectionInfo(&selection) == TRUE;
+    const bool ok = output != INVALID_HANDLE_VALUE &&
+                    GetConsoleScreenBufferInfo(output, &info) &&
+                    GetCurrentConsoleFont(output, FALSE, &font);
+    if (ok) {
+        COORD cell = PopupConsoleAnchorCell(has_selection ? selection : CONSOLE_SELECTION_INFO{},
+                                            info.dwCursorPosition);
+        if (info.dwSize.X > 0 && info.dwSize.Y > 0) {
+            cell.X = std::clamp(cell.X, info.srWindow.Left, info.srWindow.Right);
+            cell.Y = std::clamp(cell.Y, info.srWindow.Top, info.srWindow.Bottom);
+        }
+        POINT origin{0, 0};
+        ClientToScreen(target, &origin);
+        const POINT anchor = PopupConsoleCellAnchor(origin, cell, info.srWindow, font.dwFontSize);
+        const int cell_width = std::max(1, static_cast<int>(font.dwFontSize.X));
+        const int cell_height = std::max(1, static_cast<int>(font.dwFontSize.Y));
+        avoid = RECT{anchor.x - cell_width, anchor.y, anchor.x, anchor.y + cell_height};
+        source = TextAvoidSource::ConsoleCursor;
+    }
+    if (output != INVALID_HANDLE_VALUE) {
+        CloseHandle(output);
+    }
+
+    if (attached) {
+        FreeConsole();
+        AttachConsole(kAttachParentProcess);
+    }
+    return ok;
+}
+
+constexpr int kJabShortStringSize = 256;
+constexpr int kJabMaxStringSize = 1024;
+using JabObject = long long;
+
+struct JabAccessibleContextInfo {
+    wchar_t name[kJabMaxStringSize];
+    wchar_t description[kJabMaxStringSize];
+    wchar_t role[kJabShortStringSize];
+    wchar_t role_en_US[kJabShortStringSize];
+    wchar_t states[kJabShortStringSize];
+    wchar_t states_en_US[kJabShortStringSize];
+    int indexInParent;
+    int childrenCount;
+    int x;
+    int y;
+    int width;
+    int height;
+    BOOL accessibleComponent;
+    BOOL accessibleAction;
+    BOOL accessibleSelection;
+    BOOL accessibleText;
+    BOOL accessibleInterfaces;
+};
+
+struct JabAccessibleTextInfo {
+    int charCount;
+    int caretIndex;
+    int indexAtPoint;
+};
+
+struct JabAccessibleTextRectInfo {
+    int x;
+    int y;
+    int width;
+    int height;
+};
+
+struct JavaAccessBridgeApi {
+    HMODULE module = nullptr;
+    void(WINAPI* windows_run)() = nullptr;
+    BOOL(WINAPI* is_java_window)(HWND) = nullptr;
+    BOOL(WINAPI* get_context_with_focus)(HWND, long*, JabObject*) = nullptr;
+    BOOL(WINAPI* get_context_info)(long, JabObject, JabAccessibleContextInfo*) = nullptr;
+    BOOL(WINAPI* get_text_info)(long, JabObject, JabAccessibleTextInfo*, int, int) = nullptr;
+    BOOL(WINAPI* get_caret_location)(long, JabObject, JabAccessibleTextRectInfo*, int) = nullptr;
+    void(WINAPI* release_java_object)(long, JabObject) = nullptr;
+    bool load_attempted = false;
+    bool enable_attempted = false;
+};
+
+std::wstring JavaAccessBridgeDllName() {
+    return L"WindowsAccessBridge-64.dll";
+}
+
+bool LoadJavaAccessBridgeApi(JavaAccessBridgeApi& api) {
+    if (api.load_attempted) {
+        return api.module && api.is_java_window && api.get_context_with_focus && api.get_context_info &&
+               api.get_text_info && api.get_caret_location && api.release_java_object;
+    }
+    api.load_attempted = true;
+    api.module = LoadLibraryW(JavaAccessBridgeDllName().c_str());
+    if (!api.module) {
+        return false;
+    }
+    api.windows_run = reinterpret_cast<decltype(api.windows_run)>(GetProcAddress(api.module, "Windows_run"));
+    api.is_java_window = reinterpret_cast<decltype(api.is_java_window)>(GetProcAddress(api.module, "isJavaWindow"));
+    api.get_context_with_focus =
+        reinterpret_cast<decltype(api.get_context_with_focus)>(GetProcAddress(api.module, "getAccessibleContextWithFocus"));
+    api.get_context_info =
+        reinterpret_cast<decltype(api.get_context_info)>(GetProcAddress(api.module, "getAccessibleContextInfo"));
+    api.get_text_info =
+        reinterpret_cast<decltype(api.get_text_info)>(GetProcAddress(api.module, "getAccessibleTextInfo"));
+    api.get_caret_location =
+        reinterpret_cast<decltype(api.get_caret_location)>(GetProcAddress(api.module, "getCaretLocation"));
+    api.release_java_object =
+        reinterpret_cast<decltype(api.release_java_object)>(GetProcAddress(api.module, "releaseJavaObject"));
+    if (api.windows_run) {
+        api.windows_run();
+    }
+    return api.is_java_window && api.get_context_with_focus && api.get_context_info &&
+           api.get_text_info && api.get_caret_location && api.release_java_object;
+}
+
+std::optional<std::filesystem::path> FindJavaAccessBridgeSwitch() {
+    wchar_t path_buffer[32768]{};
+    const DWORD length = SearchPathW(nullptr, L"jabswitch.exe", nullptr, static_cast<DWORD>(std::size(path_buffer)),
+                                     path_buffer, nullptr);
+    if (length > 0 && length < std::size(path_buffer)) {
+        return std::filesystem::path(path_buffer);
+    }
+
+    wchar_t program_files[MAX_PATH]{};
+    if (GetEnvironmentVariableW(L"ProgramFiles", program_files, static_cast<DWORD>(std::size(program_files))) > 0) {
+        std::error_code error;
+        const std::filesystem::path java_root = std::filesystem::path(program_files) / L"Java";
+        if (std::filesystem::exists(java_root, error)) {
+            for (const auto& entry : std::filesystem::recursive_directory_iterator(
+                     java_root, std::filesystem::directory_options::skip_permission_denied, error)) {
+                if (!error && entry.is_regular_file(error) && entry.path().filename() == L"jabswitch.exe") {
+                    return entry.path();
+                }
+                error.clear();
+            }
+        }
+    }
+
+    wchar_t java_home[MAX_PATH]{};
+    if (GetEnvironmentVariableW(L"JAVA_HOME", java_home, static_cast<DWORD>(std::size(java_home))) > 0) {
+        const std::filesystem::path candidate = std::filesystem::path(java_home) / L"bin" / L"jabswitch.exe";
+        std::error_code error;
+        if (std::filesystem::is_regular_file(candidate, error)) {
+            return candidate;
+        }
+    }
+    return std::nullopt;
+}
+
+std::wstring QuoteCommandPath(const std::filesystem::path& path) {
+    std::wstring value = L"\"";
+    value += path.wstring();
+    value += L"\"";
+    return value;
+}
+
+bool TryEnableJavaAccessBridge() {
+    const auto jabswitch = FindJavaAccessBridgeSwitch();
+    if (!jabswitch) {
+        return false;
+    }
+    std::wstring command = QuoteCommandPath(*jabswitch);
+    command += L" /enable";
+    STARTUPINFOW startup{sizeof(startup)};
+    PROCESS_INFORMATION process{};
+    std::vector<wchar_t> command_buffer(command.begin(), command.end());
+    command_buffer.push_back(L'\0');
+    const bool started = CreateProcessW(nullptr, command_buffer.data(), nullptr, nullptr, FALSE,
+                                        CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process) == TRUE;
+    if (!started) {
+        return false;
+    }
+    WaitForSingleObject(process.hProcess, 3000);
+    DWORD exit_code = 1;
+    GetExitCodeProcess(process.hProcess, &exit_code);
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    return exit_code == 0;
+}
+
+bool LooksLikeJavaWindow(HWND hwnd) {
+    const std::wstring class_name = WindowClassName(hwnd);
+    const std::wstring process_name = WindowProcessName(hwnd);
+    return class_name == L"SunAwtFrame" || class_name == L"SunAwtDialog" ||
+           class_name.find(L"SunAwt") != std::wstring::npos ||
+           class_name.find(L"Swing") != std::wstring::npos ||
+           process_name == L"java" || process_name == L"javaw";
+}
+
+JavaAccessBridgeApi& SharedJavaAccessBridgeApi() {
+    static JavaAccessBridgeApi api;
+    return api;
+}
+
+bool TryGetJavaAccessBridgeCaretAnchor(HWND target, RECT& avoid, TextAvoidSource& source, std::wstring& status) {
+    if (!target) {
+        status = L"java-access-bridge-unavailable";
+        return false;
+    }
+    JavaAccessBridgeApi& api = SharedJavaAccessBridgeApi();
+    if (!LoadJavaAccessBridgeApi(api)) {
+        status = L"java-access-bridge-unavailable";
+        return false;
+    }
+    if (!api.is_java_window(target)) {
+        if (LooksLikeJavaWindow(target) && !api.enable_attempted) {
+            api.enable_attempted = true;
+            status = TryEnableJavaAccessBridge() ? L"java-access-bridge-enabled-restart-required"
+                                                 : L"java-access-bridge-unavailable";
+        } else {
+            status = L"java-access-bridge-not-java-window";
+        }
+        return false;
+    }
+
+    long vm_id = 0;
+    JabObject context = 0;
+    if (!api.get_context_with_focus(target, &vm_id, &context) || vm_id == 0 || context == 0) {
+        if (!api.enable_attempted) {
+            api.enable_attempted = true;
+            if (TryEnableJavaAccessBridge()) {
+                status = L"java-access-bridge-enabled-restart-required";
+            } else {
+                status = L"java-access-bridge-no-focused-text";
+            }
+        } else {
+            status = L"java-access-bridge-no-focused-text";
+        }
+        return false;
+    }
+
+    auto release_context = [&]() {
+        if (context) {
+            api.release_java_object(vm_id, context);
+            context = 0;
+        }
+    };
+
+    JabAccessibleContextInfo context_info{};
+    if (!api.get_context_info(vm_id, context, &context_info) || !context_info.accessibleText) {
+        release_context();
+        status = L"java-access-bridge-no-focused-text";
+        return false;
+    }
+
+    JabAccessibleTextInfo text_info{};
+    if (!api.get_text_info(vm_id, context, &text_info, context_info.x, context_info.y) ||
+        text_info.caretIndex < 0) {
+        release_context();
+        status = L"java-access-bridge-no-focused-text";
+        return false;
+    }
+
+    JabAccessibleTextRectInfo caret{};
+    int caret_index = text_info.caretIndex;
+    if (text_info.charCount > 0) {
+        caret_index = std::clamp(caret_index, 0, text_info.charCount - 1);
+    }
+    bool have_rect = api.get_caret_location(vm_id, context, &caret, text_info.caretIndex) == TRUE;
+    if ((!have_rect || caret.width <= 0 || caret.height <= 0) && caret_index != text_info.caretIndex) {
+        have_rect = api.get_caret_location(vm_id, context, &caret, caret_index) == TRUE;
+    }
+    release_context();
+    if (!have_rect || caret.width <= 0 || caret.height <= 0) {
+        status = L"java-access-bridge-no-focused-text";
+        return false;
+    }
+
+    RECT window_rect{};
+    if (!GetWindowRect(target, &window_rect)) {
+        status = L"java-access-bridge-no-focused-text";
+        return false;
+    }
+    const UINT dpi = DpiForWindowHandle(target);
+    RECT rect{caret.x, caret.y, caret.x + caret.width, caret.y + caret.height};
+    if (!PopupJavaCaretRectUsable(rect, window_rect, dpi)) {
+        status = L"java-access-bridge-stale-caret";
+        return false;
+    }
+    avoid = rect;
+    source = TextAvoidSource::JavaAccessBridgeCaret;
+    status = L"java-access-bridge-caret";
+    return true;
+}
+
+struct WindowBitmapPixels {
+    int width = 0;
+    int height = 0;
+    std::vector<uint32_t> bgra;
+};
+
+bool CaptureWindowBitmap(HWND hwnd, WindowBitmapPixels& bitmap) {
+    RECT rect{};
+    if (!hwnd || !GetWindowRect(hwnd, &rect) || rect.right <= rect.left || rect.bottom <= rect.top) {
+        return false;
+    }
+    const int width = rect.right - rect.left;
+    const int height = rect.bottom - rect.top;
+    if (width <= 0 || height <= 0 || width > 10000 || height > 10000) {
+        return false;
+    }
+
+    HDC screen_dc = GetDC(nullptr);
+    if (!screen_dc) {
+        return false;
+    }
+    HDC memory_dc = CreateCompatibleDC(screen_dc);
+    HBITMAP dib = nullptr;
+    void* bits = nullptr;
+    bool ok = false;
+    if (memory_dc) {
+        BITMAPINFO info{};
+        info.bmiHeader.biSize = sizeof(info.bmiHeader);
+        info.bmiHeader.biWidth = width;
+        info.bmiHeader.biHeight = -height;
+        info.bmiHeader.biPlanes = 1;
+        info.bmiHeader.biBitCount = 32;
+        info.bmiHeader.biCompression = BI_RGB;
+        dib = CreateDIBSection(screen_dc, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+        if (dib && bits) {
+            HGDIOBJ old_bitmap = SelectObject(memory_dc, dib);
+            if (BitBlt(memory_dc, 0, 0, width, height, screen_dc, rect.left, rect.top, SRCCOPY | CAPTUREBLT)) {
+                bitmap.width = width;
+                bitmap.height = height;
+                bitmap.bgra.assign(static_cast<uint32_t*>(bits),
+                                   static_cast<uint32_t*>(bits) + static_cast<size_t>(width) * height);
+                ok = true;
+            }
+            SelectObject(memory_dc, old_bitmap);
+        }
+    }
+    if (dib) {
+        DeleteObject(dib);
+    }
+    if (memory_dc) {
+        DeleteDC(memory_dc);
+    }
+    ReleaseDC(nullptr, screen_dc);
+    return ok;
+}
+
+bool IsVisualCaretPixel(uint32_t bgra) {
+    const int blue = static_cast<int>(bgra & 0xFF);
+    const int green = static_cast<int>((bgra >> 8) & 0xFF);
+    const int red = static_cast<int>((bgra >> 16) & 0xFF);
+    const int max_channel = std::max({red, green, blue});
+    const int min_channel = std::min({red, green, blue});
+    const bool bright = max_channel >= 210 && min_channel >= 185;
+    const bool terminal_green = green >= 160 && green >= red + 35 && green >= blue + 35;
+    return bright || terminal_green;
+}
+
+bool IsDarkTerminalPixel(uint32_t bgra) {
+    const int blue = static_cast<int>(bgra & 0xFF);
+    const int green = static_cast<int>((bgra >> 8) & 0xFF);
+    const int red = static_cast<int>((bgra >> 16) & 0xFF);
+    return red <= 120 && green <= 150 && blue <= 170;
+}
+
+bool TryGetVisualTerminalCaretAnchor(HWND target, RECT& avoid, TextAvoidSource& source, std::wstring& status) {
+    if (!target || !LooksLikeJavaWindow(target)) {
+        status = L"visual-terminal-caret-not-java-window";
+        return false;
+    }
+    RECT window_rect{};
+    if (!GetWindowRect(target, &window_rect)) {
+        status = L"visual-terminal-caret-capture-failed";
+        return false;
+    }
+    WindowBitmapPixels bitmap;
+    if (!CaptureWindowBitmap(target, bitmap) || bitmap.bgra.empty()) {
+        status = L"visual-terminal-caret-capture-failed";
+        return false;
+    }
+
+    const UINT dpi = DpiForWindowHandle(target);
+    const int min_height = ScalePopupMetricForDpi(8, dpi);
+    const int max_height = ScalePopupMetricForDpi(48, dpi);
+    const int max_width = ScalePopupMetricForDpi(10, dpi);
+    const int left_margin = ScalePopupMetricForDpi(140, dpi);
+    const int top_margin = ScalePopupMetricForDpi(48, dpi);
+    const int bottom_margin = ScalePopupMetricForDpi(120, dpi);
+    int best_score = -1;
+    RECT best{};
+
+    for (int x = std::max(0, left_margin); x < bitmap.width; ++x) {
+        int y = std::max(0, top_margin);
+        const int y_end = std::max(y, bitmap.height - std::max(0, bottom_margin));
+        while (y < y_end) {
+            const uint32_t pixel = bitmap.bgra[static_cast<size_t>(y) * bitmap.width + x];
+            if (!IsVisualCaretPixel(pixel)) {
+                ++y;
+                continue;
+            }
+            const int start_y = y;
+            int end_y = y;
+            while (end_y < y_end &&
+                   IsVisualCaretPixel(bitmap.bgra[static_cast<size_t>(end_y) * bitmap.width + x])) {
+                ++end_y;
+            }
+            const int height = end_y - start_y;
+            if (height >= min_height && height <= max_height) {
+                int left = x;
+                int right = x + 1;
+                while (left > 0) {
+                    bool column_match = false;
+                    for (int yy = start_y; yy < end_y && !column_match; ++yy) {
+                        column_match =
+                            IsVisualCaretPixel(bitmap.bgra[static_cast<size_t>(yy) * bitmap.width + left - 1]);
+                    }
+                    if (!column_match) {
+                        break;
+                    }
+                    --left;
+                }
+                while (right < bitmap.width) {
+                    bool column_match = false;
+                    for (int yy = start_y; yy < end_y && !column_match; ++yy) {
+                        column_match =
+                            IsVisualCaretPixel(bitmap.bgra[static_cast<size_t>(yy) * bitmap.width + right]);
+                    }
+                    if (!column_match) {
+                        break;
+                    }
+                    ++right;
+                }
+                const int width = right - left;
+                int dark_neighbors = 0;
+                const int neighbor_left = std::max(0, left - ScalePopupMetricForDpi(12, dpi));
+                const int neighbor_right = std::min(bitmap.width - 1, right + ScalePopupMetricForDpi(12, dpi));
+                for (int yy = start_y; yy < end_y; yy += std::max(1, height / 4)) {
+                    if (IsDarkTerminalPixel(bitmap.bgra[static_cast<size_t>(yy) * bitmap.width + neighbor_left])) {
+                        ++dark_neighbors;
+                    }
+                    if (IsDarkTerminalPixel(bitmap.bgra[static_cast<size_t>(yy) * bitmap.width + neighbor_right])) {
+                        ++dark_neighbors;
+                    }
+                }
+                RECT candidate{window_rect.left + left, window_rect.top + start_y,
+                               window_rect.left + right, window_rect.top + end_y};
+                if (width <= max_width && dark_neighbors >= 2 &&
+                    PopupVisualCaretRectUsable(candidate, window_rect, dpi)) {
+                    const int score = candidate.bottom * 10000 - candidate.left;
+                    if (score > best_score) {
+                        best_score = score;
+                        best = candidate;
+                    }
+                }
+                x = std::max(x, right - 1);
+            }
+            y = std::max(end_y, y + 1);
+        }
+    }
+
+    if (best_score < 0) {
+        status = L"visual-terminal-caret-not-found";
+        return false;
+    }
+    avoid = best;
+    source = TextAvoidSource::VisualTerminalCaret;
+    status = L"visual-terminal-caret";
+    return true;
+}
+
+bool IsScreenPointNearWindow(POINT point, RECT window_rect, int tolerance) {
+    return point.x >= window_rect.left - tolerance && point.x <= window_rect.right + tolerance &&
+           point.y >= window_rect.top - tolerance && point.y <= window_rect.bottom + tolerance;
+}
+
+bool IsConsoleWindow(HWND hwnd) {
+    wchar_t class_name[64]{};
+    return hwnd && GetClassNameW(hwnd, class_name, static_cast<int>(std::size(class_name))) > 0 &&
+           PopupTargetCanUseConsoleAnchor(class_name);
+}
+
+void ResetAutomationRectangles(SAFEARRAY*& rectangles) {
+    if (rectangles) {
+        SafeArrayDestroy(rectangles);
+        rectangles = nullptr;
+    }
+}
+
+bool RawRectFromSafeArray(SAFEARRAY* rectangles, RECT& rect) {
     if (!rectangles || SafeArrayGetDim(rectangles) != 1) {
         return false;
     }
@@ -875,60 +1700,526 @@ bool RectFromSafeArray(SAFEARRAY* rectangles, RECT& rect) {
     }
     rect.left = static_cast<LONG>(std::lround(values[0]));
     rect.top = static_cast<LONG>(std::lround(values[1]));
-    rect.right = static_cast<LONG>(std::lround(values[0] + std::max(1.0, values[2])));
-    rect.bottom = static_cast<LONG>(std::lround(values[1] + std::max(1.0, values[3])));
-    return true;
+    rect.right = static_cast<LONG>(std::lround(values[0] + values[2]));
+    rect.bottom = static_cast<LONG>(std::lround(values[1] + values[3]));
+    return rect.right > rect.left && rect.bottom > rect.top && rect.bottom > 1 &&
+           (rect.left > 1 || rect.top > 1);
 }
 
-bool TryGetAutomationCaretAnchor(POINT& anchor) {
-    IUIAutomation* automation = nullptr;
-    IUIAutomationElement* focused = nullptr;
-    IUIAutomationTextPattern2* text2 = nullptr;
-    IUIAutomationTextPattern* text = nullptr;
-    IUIAutomationTextRange* range = nullptr;
-    IUIAutomationTextRangeArray* ranges = nullptr;
-    SAFEARRAY* rectangles = nullptr;
-    BOOL active = FALSE;
-    bool ok = false;
+bool RectFromSafeArray(SAFEARRAY* rectangles, RECT& rect) {
+    return RawRectFromSafeArray(rectangles, rect) && PopupTextRangeRectUsable(rect);
+}
 
-    if (SUCCEEDED(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&automation))) &&
-        SUCCEEDED(automation->GetFocusedElement(&focused)) && focused) {
-        if (SUCCEEDED(focused->GetCurrentPatternAs(UIA_TextPattern2Id, IID_PPV_ARGS(&text2))) && text2 &&
-            SUCCEEDED(text2->GetCaretRange(&active, &range)) && range &&
-            SUCCEEDED(range->GetBoundingRectangles(&rectangles))) {
-            RECT rect{};
-            if (RectFromSafeArray(rectangles, rect)) {
-                anchor = POINT{rect.left, rect.bottom};
-                ok = true;
-            }
+bool AvoidRectFromTextRange(IUIAutomationTextRange* range, RECT& avoid) {
+    if (!range) {
+        return false;
+    }
+    SAFEARRAY* rectangles = nullptr;
+    bool ok = false;
+    if (SUCCEEDED(range->GetBoundingRectangles(&rectangles))) {
+        RECT rect{};
+        if (RectFromSafeArray(rectangles, rect)) {
+            avoid = rect;
+            ok = true;
         }
-        if (!ok && SUCCEEDED(focused->GetCurrentPatternAs(UIA_TextPatternId, IID_PPV_ARGS(&text))) && text &&
-            SUCCEEDED(text->GetSelection(&ranges)) && ranges) {
-            int length = 0;
-            if (SUCCEEDED(ranges->get_Length(&length)) && length > 0 &&
-                SUCCEEDED(ranges->GetElement(0, &range)) && range &&
-                SUCCEEDED(range->GetBoundingRectangles(&rectangles))) {
-                RECT rect{};
-                if (RectFromSafeArray(rectangles, rect)) {
-                    anchor = POINT{rect.left, rect.bottom};
+    }
+    ResetAutomationRectangles(rectangles);
+    return ok;
+}
+
+bool CharacterRectFromTextRange(IUIAutomationTextRange* range, UINT dpi, RECT& rect) {
+    if (!range) {
+        return false;
+    }
+    SAFEARRAY* rectangles = nullptr;
+    bool ok = false;
+    if (SUCCEEDED(range->GetBoundingRectangles(&rectangles))) {
+        RECT candidate{};
+        if (RawRectFromSafeArray(rectangles, candidate) && PopupTextCharacterRectUsable(candidate, dpi)) {
+            rect = candidate;
+            ok = true;
+        }
+    }
+    ResetAutomationRectangles(rectangles);
+    return ok;
+}
+
+bool AvoidRectFromAdjacentTextRange(IUIAutomationTextRange* range, int count, bool after_character, UINT dpi,
+                                    RECT& avoid) {
+    if (!range) {
+        return false;
+    }
+    IUIAutomationTextRange* moved = nullptr;
+    if (FAILED(range->Clone(&moved)) || !moved) {
+        return false;
+    }
+
+    int actual_moved = 0;
+    RECT rect{};
+    const bool ok = SUCCEEDED(moved->Move(TextUnit_Character, count, &actual_moved)) && actual_moved != 0 &&
+                    SUCCEEDED(moved->ExpandToEnclosingUnit(TextUnit_Character)) &&
+                    CharacterRectFromTextRange(moved, dpi, rect);
+    if (ok) {
+        avoid = PopupTextCharacterCaretRect(rect, after_character);
+    }
+
+    ReleasePtr(moved);
+    return ok;
+}
+
+bool AvoidRectFromCollapsedTextRange(IUIAutomationTextRange* range, UINT dpi, RECT& avoid) {
+    if (!range) {
+        return false;
+    }
+    return AvoidRectFromAdjacentTextRange(range, 1, false, dpi, avoid) ||
+           AvoidRectFromAdjacentTextRange(range, -1, true, dpi, avoid);
+}
+
+bool AvoidRectFromTextRangeArray(IUIAutomationTextRangeArray* ranges, RECT& avoid) {
+    if (!ranges) {
+        return false;
+    }
+    int length = 0;
+    if (FAILED(ranges->get_Length(&length)) || length <= 0) {
+        return false;
+    }
+    for (int index = 0; index < length; ++index) {
+        IUIAutomationTextRange* range = nullptr;
+        const bool ok = SUCCEEDED(ranges->GetElement(index, &range)) && range &&
+                        AvoidRectFromTextRange(range, avoid);
+        ReleasePtr(range);
+        if (ok) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool AvoidRectFromCollapsedTextRangeArray(IUIAutomationTextRangeArray* ranges, UINT dpi, RECT& avoid) {
+    if (!ranges) {
+        return false;
+    }
+    int length = 0;
+    if (FAILED(ranges->get_Length(&length)) || length <= 0) {
+        return false;
+    }
+    for (int index = 0; index < length; ++index) {
+        IUIAutomationTextRange* range = nullptr;
+        const bool ok = SUCCEEDED(ranges->GetElement(index, &range)) && range &&
+                        AvoidRectFromCollapsedTextRange(range, dpi, avoid);
+        ReleasePtr(range);
+        if (ok) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool AvoidRectFromTextPatternSelection(IUIAutomationTextPattern* text, RECT& avoid) {
+    if (!text) {
+        return false;
+    }
+    IUIAutomationTextRangeArray* ranges = nullptr;
+    const bool ok = SUCCEEDED(text->GetSelection(&ranges)) && AvoidRectFromTextRangeArray(ranges, avoid);
+    ReleasePtr(ranges);
+    return ok;
+}
+
+bool AvoidRectFromTextPatternCollapsedSelection(IUIAutomationTextPattern* text, UINT dpi, RECT& avoid) {
+    if (!text) {
+        return false;
+    }
+    IUIAutomationTextRangeArray* ranges = nullptr;
+    const bool ok =
+        SUCCEEDED(text->GetSelection(&ranges)) && AvoidRectFromCollapsedTextRangeArray(ranges, dpi, avoid);
+    ReleasePtr(ranges);
+    return ok;
+}
+
+bool RectFromTextRangeVisibleLine(IUIAutomationTextRange* range, RECT& avoid) {
+    if (!range) {
+        return false;
+    }
+    SAFEARRAY* rectangles = nullptr;
+    bool ok = false;
+    if (SUCCEEDED(range->GetBoundingRectangles(&rectangles)) && rectangles && SafeArrayGetDim(rectangles) == 1) {
+        LONG lower = 0;
+        LONG upper = -1;
+        if (SUCCEEDED(SafeArrayGetLBound(rectangles, 1, &lower)) &&
+            SUCCEEDED(SafeArrayGetUBound(rectangles, 1, &upper)) &&
+            upper - lower + 1 >= 4) {
+            const LONG count = upper - lower + 1;
+            const LONG start = lower + ((count - 4) / 4) * 4;
+            double values[4]{};
+            bool have_rect = true;
+            for (LONG index = 0; index < 4; ++index) {
+                LONG safe_index = start + index;
+                if (FAILED(SafeArrayGetElement(rectangles, &safe_index, &values[index]))) {
+                    have_rect = false;
+                    break;
+                }
+            }
+            if (have_rect) {
+                RECT rect{
+                    static_cast<LONG>(std::lround(values[0])),
+                    static_cast<LONG>(std::lround(values[1])),
+                    static_cast<LONG>(std::lround(values[0] + values[2])),
+                    static_cast<LONG>(std::lround(values[1] + values[3])),
+                };
+                if (rect.right > rect.left && rect.bottom > rect.top) {
+                    avoid = rect;
                     ok = true;
                 }
             }
         }
     }
+    ResetAutomationRectangles(rectangles);
+    return ok;
+}
 
-    if (rectangles) SafeArrayDestroy(rectangles);
+bool AvoidRectFromTextPatternVisibleLine(IUIAutomationTextPattern* text, RECT& avoid) {
+    if (!text) {
+        return false;
+    }
+    IUIAutomationTextRangeArray* ranges = nullptr;
+    bool ok = false;
+    if (SUCCEEDED(text->GetVisibleRanges(&ranges)) && ranges) {
+        int length = 0;
+        if (SUCCEEDED(ranges->get_Length(&length)) && length > 0) {
+            for (int index = length - 1; index >= 0 && !ok; --index) {
+                IUIAutomationTextRange* range = nullptr;
+                ok = SUCCEEDED(ranges->GetElement(index, &range)) && range &&
+                     RectFromTextRangeVisibleLine(range, avoid);
+                ReleasePtr(range);
+            }
+        }
+    }
     ReleasePtr(ranges);
+    return ok;
+}
+
+bool IsTerminalAutomationElement(IUIAutomationElement* element) {
+    if (!element) {
+        return false;
+    }
+    CONTROLTYPEID control_type = 0;
+    if (FAILED(element->get_CurrentControlType(&control_type)) || control_type != UIA_TextControlTypeId) {
+        return false;
+    }
+    BSTR class_name = nullptr;
+    const bool terminal = SUCCEEDED(element->get_CurrentClassName(&class_name)) && class_name &&
+                          wcscmp(class_name, L"TermControl") == 0;
+    if (class_name) {
+        SysFreeString(class_name);
+    }
+    return terminal;
+}
+
+bool TryGetAutomationElementTextAvoidRect(IUIAutomationElement* element, UINT dpi, bool allow_rect_fallback,
+                                          RECT& avoid, TextAvoidSource& source);
+
+bool AvoidRectFromAutomationElementRect(IUIAutomationElement* element, RECT& avoid, TextAvoidSource& source) {
+    if (!element) {
+        return false;
+    }
+    RECT rect{};
+    if (FAILED(element->get_CurrentBoundingRectangle(&rect)) || !PopupTextInputRectUsable(rect)) {
+        return false;
+    }
+    avoid = rect;
+    source = TextAvoidSource::AutomationElementRect;
+    return true;
+}
+
+bool AutomationElementRectNearAvoidRect(IUIAutomationElement* element, RECT avoid, UINT dpi) {
+    if (!element) {
+        return true;
+    }
+    RECT rect{};
+    if (FAILED(element->get_CurrentBoundingRectangle(&rect)) || !PopupTextInputRectUsable(rect)) {
+        return true;
+    }
+    const int tolerance = ScalePopupMetricForDpi(96, dpi);
+    return rect.left - tolerance <= avoid.right && rect.right + tolerance >= avoid.left &&
+           rect.top - tolerance <= avoid.bottom && rect.bottom + tolerance >= avoid.top;
+}
+
+struct FocusedTextContext {
+    bool editable = false;
+    bool has_rect = false;
+    RECT rect{};
+};
+
+bool AutomationElementHasPattern(IUIAutomationElement* element, PATTERNID pattern_id) {
+    IUnknown* pattern = nullptr;
+    const bool ok = element && SUCCEEDED(element->GetCurrentPattern(pattern_id, &pattern)) && pattern;
+    ReleasePtr(pattern);
+    return ok;
+}
+
+bool AutomationElementValueIsReadOnly(IUIAutomationElement* element) {
+    IUIAutomationValuePattern* value = nullptr;
+    BOOL read_only = FALSE;
+    const bool ok = element &&
+                    SUCCEEDED(element->GetCurrentPatternAs(UIA_ValuePatternId, IID_PPV_ARGS(&value))) && value &&
+                    SUCCEEDED(value->get_CurrentIsReadOnly(&read_only));
+    ReleasePtr(value);
+    return ok && read_only;
+}
+
+FocusedTextContext GetFocusedTextContext() {
+    FocusedTextContext context{};
+    IUIAutomation* automation = nullptr;
+    IUIAutomationElement* focused = nullptr;
+
+    if (SUCCEEDED(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&automation))) &&
+        automation && SUCCEEDED(automation->GetFocusedElement(&focused)) && focused) {
+        RECT rect{};
+        if (SUCCEEDED(focused->get_CurrentBoundingRectangle(&rect)) && rect.right > rect.left &&
+            rect.bottom > rect.top) {
+            context.has_rect = true;
+            context.rect = rect;
+        }
+
+        CONTROLTYPEID control_type = 0;
+        const bool text_control =
+            SUCCEEDED(focused->get_CurrentControlType(&control_type)) &&
+            (control_type == UIA_EditControlTypeId || control_type == UIA_TextControlTypeId ||
+             control_type == UIA_DocumentControlTypeId);
+        const bool text_pattern = AutomationElementHasPattern(focused, UIA_TextPattern2Id) ||
+                                  AutomationElementHasPattern(focused, UIA_TextPatternId);
+        const bool value_pattern = AutomationElementHasPattern(focused, UIA_ValuePatternId);
+        context.editable = (text_control || text_pattern || value_pattern) &&
+                           !AutomationElementValueIsReadOnly(focused);
+    }
+
+    ReleasePtr(focused);
+    ReleasePtr(automation);
+    return context;
+}
+
+bool FocusedTextContextAllowsCaret(const FocusedTextContext& context, RECT avoid, UINT dpi) {
+    return PopupCaretAnchorAllowedByFocusedText(context.editable, context.rect, context.has_rect, avoid, dpi);
+}
+
+bool TryGetAutomationCaretAvoidRect(UINT dpi, RECT& avoid, TextAvoidSource& source) {
+    IUIAutomation* automation = nullptr;
+    IUIAutomationElement* focused = nullptr;
+    bool ok = false;
+
+    if (SUCCEEDED(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&automation))) &&
+        SUCCEEDED(automation->GetFocusedElement(&focused)) && focused) {
+        ok = TryGetAutomationElementTextAvoidRect(focused, dpi, true, avoid, source);
+    }
+
+    ReleasePtr(focused);
+    ReleasePtr(automation);
+    return ok;
+}
+
+std::wstring AutomationFocusedElementDebugInfo() {
+    IUIAutomation* automation = nullptr;
+    IUIAutomationElement* focused = nullptr;
+    std::wstring info = L"uia-focused unavailable";
+    if (SUCCEEDED(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&automation))) &&
+        automation && SUCCEEDED(automation->GetFocusedElement(&focused)) && focused) {
+        CONTROLTYPEID control_type = 0;
+        RECT rect{};
+        BSTR class_name = nullptr;
+        BSTR name = nullptr;
+        focused->get_CurrentControlType(&control_type);
+        focused->get_CurrentBoundingRectangle(&rect);
+        focused->get_CurrentClassName(&class_name);
+        focused->get_CurrentName(&name);
+        info = L"uia-focused control=";
+        info += std::to_wstring(control_type);
+        info += L" class=";
+        info += class_name ? class_name : L"";
+        info += L" name=";
+        info += name ? name : L"";
+        info += L" rect=";
+        info += RectToLogString(rect);
+        info += L" text2=";
+        info += AutomationElementHasPattern(focused, UIA_TextPattern2Id) ? L"1" : L"0";
+        info += L" text=";
+        info += AutomationElementHasPattern(focused, UIA_TextPatternId) ? L"1" : L"0";
+        info += L" value=";
+        info += AutomationElementHasPattern(focused, UIA_ValuePatternId) ? L"1" : L"0";
+        info += L" readonly=";
+        info += AutomationElementValueIsReadOnly(focused) ? L"1" : L"0";
+        if (class_name) {
+            SysFreeString(class_name);
+        }
+        if (name) {
+            SysFreeString(name);
+        }
+    }
+    ReleasePtr(focused);
+    ReleasePtr(automation);
+    return info;
+}
+
+bool TryGetExplicitAutomationTextCaretAvoidRect(UINT dpi, RECT& avoid, TextAvoidSource& source) {
+    IUIAutomation* automation = nullptr;
+    IUIAutomationElement* focused = nullptr;
+    IUIAutomationTextPattern2* text2 = nullptr;
+    IUIAutomationTextRange* range = nullptr;
+    BOOL active = FALSE;
+    bool ok = false;
+
+    if (SUCCEEDED(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&automation))) &&
+        SUCCEEDED(automation->GetFocusedElement(&focused)) && focused &&
+        SUCCEEDED(focused->GetCurrentPatternAs(UIA_TextPattern2Id, IID_PPV_ARGS(&text2))) && text2 &&
+        SUCCEEDED(text2->GetCaretRange(&active, &range)) && active && range) {
+        ok = AvoidRectFromTextRange(range, avoid);
+        if (!ok) {
+            ok = AvoidRectFromCollapsedTextRange(range, dpi, avoid);
+        }
+        if (ok && !AutomationElementRectNearAvoidRect(focused, avoid, dpi)) {
+            ok = false;
+        }
+        if (ok) {
+            source = TextAvoidSource::AutomationText2Caret;
+        }
+    }
+
     ReleasePtr(range);
-    ReleasePtr(text);
     ReleasePtr(text2);
     ReleasePtr(focused);
     ReleasePtr(automation);
     return ok;
 }
 
-bool TryGetTextInputAnchor(HWND target, POINT& anchor) {
-    return TryGetCaretAnchor(target, anchor) || TryGetAutomationCaretAnchor(anchor);
+bool TryGetAutomationElementTextAvoidRect(IUIAutomationElement* element, UINT dpi, bool allow_rect_fallback,
+                                          RECT& avoid, TextAvoidSource& source) {
+    if (!element) {
+        return false;
+    }
+    IUIAutomationTextPattern2* text2 = nullptr;
+    IUIAutomationTextPattern* text = nullptr;
+    IUIAutomationTextRange* range = nullptr;
+    BOOL active = FALSE;
+    bool ok = false;
+
+    if (SUCCEEDED(element->GetCurrentPatternAs(UIA_TextPattern2Id, IID_PPV_ARGS(&text2))) && text2 &&
+        SUCCEEDED(text2->GetCaretRange(&active, &range)) && active && range) {
+        ok = AvoidRectFromTextRange(range, avoid);
+        if (ok) {
+            source = TextAvoidSource::AutomationText2Caret;
+        }
+        if (!ok) {
+            ok = AvoidRectFromCollapsedTextRange(range, dpi, avoid);
+            if (ok) {
+                source = TextAvoidSource::AutomationText2Caret;
+            }
+        }
+    }
+    if (!ok && text2) {
+        ok = AvoidRectFromTextPatternSelection(text2, avoid);
+        if (ok) {
+            source = TextAvoidSource::AutomationText2Selection;
+        }
+        if (!ok) {
+            ok = AvoidRectFromTextPatternCollapsedSelection(text2, dpi, avoid);
+            if (ok) {
+                source = TextAvoidSource::AutomationText2Selection;
+            }
+        }
+    }
+    if (!ok && SUCCEEDED(element->GetCurrentPatternAs(UIA_TextPatternId, IID_PPV_ARGS(&text))) && text) {
+        ok = AvoidRectFromTextPatternSelection(text, avoid);
+        if (ok) {
+            source = TextAvoidSource::AutomationTextSelection;
+        }
+        if (!ok) {
+            ok = AvoidRectFromTextPatternCollapsedSelection(text, dpi, avoid);
+            if (ok) {
+                source = TextAvoidSource::AutomationTextSelection;
+            }
+        }
+    }
+    if (ok && !AutomationElementRectNearAvoidRect(element, avoid, dpi)) {
+        ok = false;
+    }
+    if (!ok && allow_rect_fallback) {
+        ok = AvoidRectFromAutomationElementRect(element, avoid, source);
+    }
+
+    ReleasePtr(range);
+    ReleasePtr(text);
+    ReleasePtr(text2);
+    return ok;
+}
+
+bool TryFindAutomationTextAvoidRectInSubtree(IUIAutomation* automation, IUIAutomationElement* root, UINT dpi,
+                                             RECT& avoid, TextAvoidSource& source) {
+    if (!automation || !root) {
+        return false;
+    }
+
+    IUIAutomationCondition* keyboard_focus_condition = nullptr;
+    IUIAutomationElement* candidate = nullptr;
+    bool ok = false;
+
+    VARIANT focus_value{};
+    focus_value.vt = VT_BOOL;
+    focus_value.boolVal = VARIANT_TRUE;
+    if (SUCCEEDED(automation->CreatePropertyCondition(UIA_HasKeyboardFocusPropertyId, focus_value,
+                                                      &keyboard_focus_condition)) &&
+        keyboard_focus_condition &&
+        SUCCEEDED(root->FindFirst(TreeScope_Subtree, keyboard_focus_condition, &candidate)) && candidate) {
+            ok = TryGetAutomationElementTextAvoidRect(candidate, dpi, true, avoid, source);
+    }
+
+    ReleasePtr(candidate);
+    ReleasePtr(keyboard_focus_condition);
+    return ok;
+}
+
+bool TryGetAutomationAvoidRectFromWindow(HWND target, UINT dpi, RECT& avoid, TextAvoidSource& source) {
+    if (!target) {
+        return false;
+    }
+    IUIAutomation* automation = nullptr;
+    IUIAutomationElement* root = nullptr;
+    IUIAutomationElement* focused = nullptr;
+    IUIAutomationCondition* keyboard_focus_condition = nullptr;
+    IUIAutomationElement* candidate = nullptr;
+    bool ok = false;
+
+    if (SUCCEEDED(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&automation))) &&
+        automation) {
+        if (SUCCEEDED(automation->GetFocusedElement(&focused)) && focused) {
+            ok = TryGetAutomationElementTextAvoidRect(focused, dpi, true, avoid, source);
+        }
+        if (SUCCEEDED(automation->ElementFromHandle(target, &root)) && root) {
+            VARIANT focus_value{};
+            focus_value.vt = VT_BOOL;
+            focus_value.boolVal = VARIANT_TRUE;
+            if (!ok &&
+                SUCCEEDED(automation->CreatePropertyCondition(UIA_HasKeyboardFocusPropertyId, focus_value,
+                                                              &keyboard_focus_condition)) &&
+                keyboard_focus_condition &&
+                SUCCEEDED(root->FindFirst(TreeScope_Subtree, keyboard_focus_condition, &candidate)) && candidate) {
+                ok = TryGetAutomationElementTextAvoidRect(candidate, dpi, true, avoid, source);
+            }
+            ReleasePtr(candidate);
+
+            if (!ok) {
+                ok = TryFindAutomationTextAvoidRectInSubtree(automation, root, dpi, avoid, source);
+            }
+            if (!ok) {
+                ok = TryGetAutomationElementTextAvoidRect(root, dpi, false, avoid, source);
+            }
+        }
+    }
+
+    ReleasePtr(candidate);
+    ReleasePtr(keyboard_focus_condition);
+    ReleasePtr(focused);
+    ReleasePtr(root);
+    ReleasePtr(automation);
+    return ok;
 }
 
 } // namespace
@@ -959,6 +2250,20 @@ PopupWindow::~PopupWindow() {
     ReleasePtr(d2d_factory_);
 }
 
+void PopupWindow::SetDebugLogger(std::function<void(std::wstring_view)> logger) {
+    debug_logger_ = std::move(logger);
+}
+
+void PopupWindow::SetKeyboardInvocation(bool keyboard_invocation) {
+    keyboard_invocation_ = keyboard_invocation;
+}
+
+void PopupWindow::DebugLog(std::wstring_view message) const {
+    if (debug_logger_) {
+        debug_logger_(message);
+    }
+}
+
 bool PopupWindow::Create(HWND owner) {
     WNDCLASSW wc{};
     wc.lpfnWndProc = PopupWindow::WindowProc;
@@ -970,21 +2275,33 @@ bool PopupWindow::Create(HWND owner) {
 
     const UINT dpi = DpiForWindowHandle(owner);
     const SIZE size = PhysicalPopupSize(dpi);
-    hwnd_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE, kPopupClass, L"ClipSoul",
-                            WS_POPUP | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, size.cx, size.cy, owner, nullptr,
-                            instance_, this);
+    const DWORD popup_ex_style = WS_EX_TOOLWINDOW | WS_EX_TOPMOST |
+                                 (PopupWindowShouldUseNoActivateStyle() ? WS_EX_NOACTIVATE : 0);
+    if (PopupShouldCreateInShellWindowBand()) {
+        if (const auto create_window_in_band = ResolveCreateWindowInBand()) {
+            hwnd_ = create_window_in_band(popup_ex_style, kPopupClass, L"ClipSoul", WS_POPUP | WS_CLIPCHILDREN,
+                                          CW_USEDEFAULT, CW_USEDEFAULT, size.cx, size.cy, owner, nullptr, instance_,
+                                          this, kPopupBandShellSurface);
+        }
+    }
+    if (!hwnd_) {
+        hwnd_ = CreateWindowExW(popup_ex_style, kPopupClass, L"ClipSoul",
+                                WS_POPUP | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, size.cx, size.cy, owner,
+                                nullptr, instance_, this);
+    }
     if (!hwnd_) {
         return false;
     }
-    search_edit_ = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_TABSTOP | WS_CLIPSIBLINGS | ES_AUTOHSCROLL,
+    search_edit_ = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_CLIPSIBLINGS |
+                                                    ES_AUTOHSCROLL | ES_LEFT,
                                    0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSearchEditId)),
                                    instance_, nullptr);
     if (search_edit_) {
-        auto font = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+                auto font = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
         SendMessageW(search_edit_, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
-        SendMessageW(search_edit_, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(6, 6));
-        SendMessageW(search_edit_, EM_SETCUEBANNER, FALSE, reinterpret_cast<LPARAM>(L"搜索历史记录"));
-        SendMessageW(search_edit_, EM_SETCUEBANNER, FALSE,
+        SendMessageW(search_edit_, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(8, 8));
+        const WPARAM show_when_focused = PopupNativeSearchCueBannerShowsWhenFocused() ? TRUE : FALSE;
+                SendMessageW(search_edit_, EM_SETCUEBANNER, show_when_focused,
                      reinterpret_cast<LPARAM>(L"\u641c\u7d22\u5386\u53f2\u8bb0\u5f55"));
         UpdateSearchEditBounds();
     }
@@ -993,6 +2310,7 @@ bool PopupWindow::Create(HWND owner) {
 }
 
 void PopupWindow::Show(HWND target) {
+    SetWindowLongPtrW(hwnd_, GWLP_HWNDPARENT, 0);
     paste_target_ = target;
     moving_window_ = false;
     resizing_window_ = false;
@@ -1002,28 +2320,97 @@ void PopupWindow::Show(HWND target) {
     suppress_inactive_hide_until_ = 0;
     left_button_was_down_ = false;
     KillTimer(hwnd_, kSuppressInactiveHideTimer);
+    KillTimer(hwnd_, kShellTopmostRaiseTimer);
+    const std::wstring target_class = WindowClassName(target);
+    const std::wstring target_title = WindowTitle(target);
+    const std::wstring target_process = WindowProcessName(target);
+    shell_topmost_raise_ = PopupTargetNeedsShellTopmostRaise(target_class, target_title, target_process);
+    shell_topmost_raise_until_ = shell_topmost_raise_ ? GetTickCount() + kShellTopmostRaiseMs : 0;
+    if (shell_topmost_raise_ && target && IsWindow(target)) {
+        SetWindowLongPtrW(hwnd_, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(target));
+    }
     ReloadItems();
     UpdatePopupLogicalSize();
     UpdateBehaviorFromSettings();
     RECT work{};
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
-    const UINT dpi = CurrentDpi();
+    HMONITOR target_monitor = MonitorForPopupTarget(target, hwnd_);
+    const RECT monitor_rect = MonitorRectForMonitor(target_monitor, work);
+    work = WorkAreaForMonitor(target_monitor, work);
+    const UINT dpi = DpiForMonitorHandle(target_monitor, CurrentDpi());
     const SIZE size = PhysicalPopupSize(dpi, static_cast<int>(items_.size()));
-    UINT flags = SWP_SHOWWINDOW | SWP_NOACTIVATE;
+    const bool activate_on_show = PopupShowShouldActivate(keyboard_invocation_, shell_topmost_raise_);
+    const bool use_no_activate = PopupWindowShouldUseNoActivateStyle(activate_on_show);
+    const LONG_PTR current_ex_style = GetWindowLongPtrW(hwnd_, GWL_EXSTYLE);
+    const bool has_no_activate = (current_ex_style & WS_EX_NOACTIVATE) != 0;
+    bool no_activate_style_changed = false;
+    if (has_no_activate != use_no_activate) {
+        LONG_PTR next_ex_style = current_ex_style;
+        if (use_no_activate) {
+            next_ex_style |= WS_EX_NOACTIVATE;
+        } else {
+            next_ex_style &= ~static_cast<LONG_PTR>(WS_EX_NOACTIVATE);
+        }
+        SetWindowLongPtrW(hwnd_, GWL_EXSTYLE, next_ex_style);
+        no_activate_style_changed = true;
+    }
+    UINT flags = SWP_SHOWWINDOW;
+    if (PopupSetWindowPosShouldUseNoActivate(activate_on_show)) {
+        flags |= SWP_NOACTIVATE;
+    }
+    if (no_activate_style_changed) {
+        flags |= SWP_FRAMECHANGED;
+    }
     int x = 0;
     int y = 0;
-    const POINT position = ResolvePopupPosition(target, size, work, dpi);
+    const POINT position = ResolvePopupPosition(target, size, monitor_rect, work, dpi);
     x = position.x;
     y = position.y;
     SetWindowPos(hwnd_, HWND_TOPMOST, x, y, size.cx, size.cy, flags);
+    UpdatePopupLogicalSize();
+    scroll_offset_ = PopupScrollOffsetAfterReopen(scroll_offset_, TotalScrollHeight(), ViewportScrollHeight());
+    RECT shown_rect{};
+    GetWindowRect(hwnd_, &shown_rect);
+    const LONG_PTR shown_ex_style = GetWindowLongPtrW(hwnd_, GWL_EXSTYLE);
+    std::wstring show_log = L"popup show shell_surface=";
+    show_log += shell_topmost_raise_ ? L"1" : L"0";
+    show_log += L" activate=";
+    show_log += activate_on_show ? L"1" : L"0";
+    show_log += L" no_activate=";
+    show_log += use_no_activate ? L"1" : L"0";
+    show_log += L" visible=";
+    show_log += IsWindowVisible(hwnd_) ? L"1" : L"0";
+    show_log += L" ex=";
+    show_log += std::to_wstring(shown_ex_style);
+    show_log += L" rect=";
+    show_log += RectToLogString(shown_rect);
+    show_log += L" class=";
+    show_log += target_class;
+    show_log += L" process=";
+    show_log += target_process;
+    DebugLog(show_log);
+    if (shell_topmost_raise_) {
+        SetTimer(hwnd_, kShellTopmostRaiseTimer, 50, nullptr);
+    }
+    if (activate_on_show) {
+        ActivatePopupWindow(hwnd_);
+        DebugLog(L"popup activate foreground=" + ForegroundWindowDebugInfo());
+    }
     UpdateSearchEditBounds();
     SyncSearchEdit();
-    open_progress_ = 0.0f;
-    SetTimer(hwnd_, kAnimationTimer, 16, nullptr);
     SetTimer(hwnd_, kOutsideClickTimer, 50, nullptr);
-    search_focused_ = false;
-    search_caret_on_ = false;
-    KillTimer(hwnd_, kSearchCaretTimer);
+    if (PopupShouldAutoFocusSearchOnShow(search_edit_ != nullptr)) {
+        search_focused_ = true;
+        search_caret_on_ = true;
+        SetFocus(search_edit_);
+        SetTimer(hwnd_, kSearchCaretTimer, GetCaretBlinkTime(), nullptr);
+    } else {
+        search_focused_ = false;
+        search_caret_on_ = false;
+        KillTimer(hwnd_, kSearchCaretTimer);
+    }
+    open_progress_ = 1.0f;
+    KillTimer(hwnd_, kAnimationTimer);
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
@@ -1054,8 +2441,22 @@ void PopupWindow::SetSelectedItemId(std::optional<int64_t> id) {
 }
 
 void PopupWindow::Hide() {
+    Hide(L"unspecified");
+}
+
+void PopupWindow::Hide(std::wstring_view reason) {
+    RECT rect{};
+    GetWindowRect(hwnd_, &rect);
+    std::wstring log = L"popup hide reason=";
+    log += reason;
+    log += L" rect=";
+    log += RectToLogString(rect);
+    log += L" foreground=";
+    log += ForegroundWindowDebugInfo();
+    DebugLog(log);
     KillTimer(hwnd_, kOutsideClickTimer);
     KillTimer(hwnd_, kSuppressInactiveHideTimer);
+    KillTimer(hwnd_, kShellTopmostRaiseTimer);
     CancelItemPress();
     if (moving_window_ || resizing_window_) {
         ReleaseCapture();
@@ -1067,6 +2468,13 @@ void PopupWindow::Hide() {
     suppress_inactive_hide_ = false;
     suppress_inactive_hide_until_ = 0;
     left_button_was_down_ = false;
+    shell_topmost_raise_ = false;
+    shell_topmost_raise_until_ = 0;
+    SetWindowLongPtrW(hwnd_, GWLP_HWNDPARENT, 0);
+    search_focused_ = false;
+    search_caret_on_ = false;
+    search_selecting_ = false;
+    KillTimer(hwnd_, kSearchCaretTimer);
     ShowWindow(hwnd_, SW_HIDE);
 }
 
@@ -1114,22 +2522,145 @@ void PopupWindow::ResizeToCurrentItems() {
 }
 
 void PopupWindow::SyncSearchEdit() {
-    if (search_edit_ && GetWindowTextLengthW(search_edit_) != static_cast<int>(query_.size())) {
+    if (!search_edit_) {
+        return;
+    }
+    if (GetFocus() == search_edit_) {
+        return;
+    }
+    const int length = GetWindowTextLengthW(search_edit_);
+    std::wstring value(static_cast<size_t>(length) + 1, L'\0');
+    if (length > 0) {
+        GetWindowTextW(search_edit_, value.data(), length + 1);
+    }
+    value.resize(static_cast<size_t>(length));
+    if (value != query_) {
         SetWindowTextW(search_edit_, query_.c_str());
+        SendMessageW(search_edit_, EM_SETSEL, query_.size(), query_.size());
     }
-    if (search_edit_) {
-        RedrawWindow(search_edit_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
-    }
+    SyncSearchSelectionFromEdit();
 }
 
 void PopupWindow::UpdateSearchEditBounds() {
     if (!search_edit_) {
         return;
     }
-    const auto& metrics = PopupMetrics();
     const UINT dpi = CurrentDpi();
-    const float search_top = PopupSearchTop();
-    SetWindowPos(search_edit_, nullptr, 0, 0, 1, 1, SWP_NOZORDER | SWP_NOACTIVATE);
+    const auto search = PopupNativeSearchEditRect(BuildPopupSearchLayoutForWidth(popup_logical_width_));
+    const int left = MulDiv(static_cast<int>(std::lround(search.left)), static_cast<int>(dpi), 96);
+    const int top = MulDiv(static_cast<int>(std::lround(search.top)), static_cast<int>(dpi), 96);
+    const int width = std::max(1, MulDiv(static_cast<int>(std::lround(search.Width())), static_cast<int>(dpi), 96));
+    const int height =
+        std::max(1, MulDiv(static_cast<int>(std::lround(search.Height())), static_cast<int>(dpi), 96));
+    SetWindowPos(search_edit_, nullptr, left, top, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+float PopupWindow::SearchTextOffsetDips(size_t text_index, bool trailing) const {
+    if (query_.empty() || !dwrite_factory_ || !small_format_) {
+        return 0.0f;
+    }
+
+    const auto search_layout = BuildPopupSearchLayoutForWidth(popup_logical_width_);
+    IDWriteTextLayout* text_layout = nullptr;
+    float offset = 0.0f;
+    const size_t clamped_index = std::min(text_index, query_.size());
+    if (SUCCEEDED(dwrite_factory_->CreateTextLayout(query_.c_str(), static_cast<UINT32>(query_.size()),
+                                                    small_format_, search_layout.text.Width(),
+                                                    search_layout.text.Height(), &text_layout)) &&
+        text_layout) {
+        FLOAT caret_offset = 0.0f;
+        FLOAT caret_y = 0.0f;
+        DWRITE_HIT_TEST_METRICS hit_metrics{};
+        const UINT32 text_position = static_cast<UINT32>(clamped_index);
+        if (SUCCEEDED(text_layout->HitTestTextPosition(text_position, trailing ? TRUE : FALSE,
+                                                       &caret_offset, &caret_y, &hit_metrics))) {
+            offset = caret_offset;
+        } else if (text_position > 0 &&
+                   SUCCEEDED(text_layout->HitTestTextPosition(text_position - 1, TRUE, &caret_offset, &caret_y,
+                                                              &hit_metrics))) {
+            offset = caret_offset;
+        } else {
+            DWRITE_TEXT_METRICS metrics_text{};
+            if (SUCCEEDED(text_layout->GetMetrics(&metrics_text))) {
+                offset = metrics_text.widthIncludingTrailingWhitespace;
+            }
+        }
+    }
+    ReleasePtr(text_layout);
+    return offset;
+}
+
+float PopupWindow::SearchCaretOffsetDips() const {
+    return SearchTextOffsetDips(search_selection_caret_, false);
+}
+
+size_t PopupWindow::SearchTextIndexFromPoint(POINT point) const {
+    if (query_.empty() || !dwrite_factory_ || !small_format_) {
+        return 0;
+    }
+
+    const auto search_layout = BuildPopupSearchLayoutForWidth(popup_logical_width_);
+    const float x = std::clamp(static_cast<float>(point.x) - search_layout.text.left, 0.0f,
+                               std::max(0.0f, search_layout.text.Width()));
+    const float y = std::clamp(static_cast<float>(point.y) - search_layout.text.top, 0.0f,
+                               std::max(0.0f, search_layout.text.Height()));
+    IDWriteTextLayout* text_layout = nullptr;
+    size_t index = query_.size();
+    if (SUCCEEDED(dwrite_factory_->CreateTextLayout(query_.c_str(), static_cast<UINT32>(query_.size()),
+                                                    small_format_, search_layout.text.Width(),
+                                                    search_layout.text.Height(), &text_layout)) &&
+        text_layout) {
+        BOOL trailing_hit = FALSE;
+        BOOL inside = FALSE;
+        DWRITE_HIT_TEST_METRICS hit_metrics{};
+        if (SUCCEEDED(text_layout->HitTestPoint(x, y, &trailing_hit, &inside, &hit_metrics))) {
+            index = static_cast<size_t>(hit_metrics.textPosition) + (trailing_hit ? 1u : 0u);
+        }
+    } else if (search_layout.text.Width() > 0.0f) {
+        index = static_cast<size_t>(std::lround((x / search_layout.text.Width()) * query_.size()));
+    }
+    ReleasePtr(text_layout);
+    return std::min(index, query_.size());
+}
+
+PopupSearchSelectionRange PopupWindow::CurrentSearchSelection() const {
+    return NormalizePopupSearchSelection(search_selection_anchor_, search_selection_caret_, query_.size());
+}
+
+void PopupWindow::SyncSearchSelectionFromEdit() {
+    if (!search_edit_) {
+        search_selection_anchor_ = std::min(search_selection_anchor_, query_.size());
+        search_selection_caret_ = std::min(search_selection_caret_, query_.size());
+        return;
+    }
+    DWORD start = 0;
+    DWORD end = 0;
+    SendMessageW(search_edit_, EM_GETSEL, reinterpret_cast<WPARAM>(&start), reinterpret_cast<LPARAM>(&end));
+    search_selection_anchor_ = std::min<size_t>(start, query_.size());
+    search_selection_caret_ = std::min<size_t>(end, query_.size());
+}
+
+void PopupWindow::SetSearchSelection(size_t anchor, size_t caret) {
+    search_selection_anchor_ = std::min(anchor, query_.size());
+    search_selection_caret_ = std::min(caret, query_.size());
+    if (search_edit_) {
+        const auto selection = CurrentSearchSelection();
+        SendMessageW(search_edit_, EM_SETSEL, static_cast<WPARAM>(selection.start),
+                     static_cast<LPARAM>(selection.end));
+    }
+    search_caret_on_ = true;
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void PopupWindow::EndSearchSelectionDrag() {
+    if (!search_selecting_) {
+        return;
+    }
+    search_selecting_ = false;
+    ReleaseCapture();
+    EndTransientHideSuppressionSoon();
+    SetTimer(hwnd_, kOutsideClickTimer, 50, nullptr);
+    InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
 void PopupWindow::UpdateThemeFromSettings() {
@@ -1183,74 +2714,6 @@ void PopupWindow::ResetManualSize() {
     }
 }
 
-float PopupWindow::SearchCaretOffsetDips() const {
-    if (query_.empty() || !dwrite_factory_ || !small_format_) {
-        return 0.0f;
-    }
-
-    const auto search_layout = BuildPopupSearchLayoutForWidth(popup_logical_width_);
-    IDWriteTextLayout* text_layout = nullptr;
-    float offset = 0.0f;
-    if (SUCCEEDED(dwrite_factory_->CreateTextLayout(query_.c_str(), static_cast<UINT32>(query_.size()),
-                                                    small_format_, search_layout.text.Width(),
-                                                    search_layout.text.Height(), &text_layout)) &&
-        text_layout) {
-        FLOAT caret_offset = 0.0f;
-        FLOAT caret_y = 0.0f;
-        DWRITE_HIT_TEST_METRICS hit_metrics{};
-        const UINT32 text_length = static_cast<UINT32>(query_.size());
-        if (SUCCEEDED(text_layout->HitTestTextPosition(text_length, FALSE, &caret_offset, &caret_y, &hit_metrics))) {
-            offset = caret_offset;
-        } else if (text_length > 0 &&
-                   SUCCEEDED(text_layout->HitTestTextPosition(text_length - 1, TRUE, &caret_offset, &caret_y,
-                                                              &hit_metrics))) {
-            offset = caret_offset;
-        } else {
-            DWRITE_TEXT_METRICS metrics_text{};
-            if (SUCCEEDED(text_layout->GetMetrics(&metrics_text))) {
-                offset = metrics_text.widthIncludingTrailingWhitespace;
-            }
-        }
-    }
-    ReleasePtr(text_layout);
-    return offset;
-}
-
-POINT PopupWindow::SearchImeAnchorClient() const {
-    const POINT anchor = PopupSearchImeAnchorDips(BuildPopupSearchLayoutForWidth(popup_logical_width_),
-                                                  SearchCaretOffsetDips());
-    const UINT dpi = CurrentDpi();
-    return POINT{
-        MulDiv(anchor.x, static_cast<int>(dpi), 96),
-        MulDiv(anchor.y, static_cast<int>(dpi), 96),
-    };
-}
-
-void PopupWindow::UpdateSearchImePosition() {
-    if (!hwnd_ || !PopupSearchShouldUpdateImePosition(search_focused_, updating_search_ime_)) {
-        return;
-    }
-
-    HIMC context = ImmGetContext(hwnd_);
-    if (!context) {
-        return;
-    }
-
-    updating_search_ime_ = true;
-    const POINT anchor = SearchImeAnchorClient();
-    COMPOSITIONFORM composition{};
-    composition.dwStyle = CFS_FORCE_POSITION;
-    composition.ptCurrentPos = anchor;
-    ImmSetCompositionWindow(context, &composition);
-
-    CANDIDATEFORM candidate{};
-    candidate.dwIndex = 0;
-    candidate.dwStyle = CFS_CANDIDATEPOS;
-    candidate.ptCurrentPos = anchor;
-    ImmSetCandidateWindow(context, &candidate);
-    ImmReleaseContext(hwnd_, context);
-    updating_search_ime_ = false;
-}
 
 HistoryQuery PopupWindow::BuildQuery() const {
     HistoryQuery query;
@@ -1284,7 +2747,7 @@ std::wstring PopupWindow::FavoriteGroupName(std::optional<int64_t> group_id) con
     const auto id = *group_id;
     const auto found = std::find_if(favorite_groups_.begin(), favorite_groups_.end(),
                                     [id](const FavoriteGroup& group) { return group.id == id; });
-    return found == favorite_groups_.end() ? L"收藏夹" : found->name;
+    return found == favorite_groups_.end() ? L"\u6536\u85cf\u5939" : found->name;
 }
 
 void PopupWindow::MoveSelection(int delta) {
@@ -1315,7 +2778,7 @@ bool PopupWindow::PasteSelectedForContinuousPaste() {
     paste_controller_.SendPaste(paste_target_);
     AdvanceSelectionAfterContinuousPaste();
     if (ShouldHidePopupAfterContinuousPaste(pinned_open_)) {
-        Hide();
+        Hide(L"continuous-paste");
     }
     return true;
 }
@@ -1389,7 +2852,7 @@ void PopupWindow::ActivateSelection() {
     }
     if (paste_controller_.RestoreToClipboard(item, hwnd_)) {
         if (ShouldHidePopupAfterPaste(pinned_open_)) {
-            Hide();
+            Hide(L"paste");
         }
         paste_controller_.SendPaste(paste_target_);
     }
@@ -1425,6 +2888,22 @@ void PopupWindow::DeleteItem(int64_t id) {
     store_.Delete(id);
     ReloadItems();
     InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void PopupWindow::MoveItemInCurrentList(int item_index, int delta) {
+    const int target_index = item_index + delta;
+    if (item_index < 0 || item_index >= static_cast<int>(items_.size()) || target_index < 0 ||
+        target_index >= static_cast<int>(items_.size())) {
+        return;
+    }
+
+    const auto moved_id = items_[item_index].id;
+    const auto neighbor_id = items_[target_index].id;
+    if (store_.SwapSortOrder(moved_id, neighbor_id)) {
+        ReloadItems();
+        SetSelectedItemId(moved_id);
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
 }
 
 void PopupWindow::SelectAllVisible() {
@@ -1474,7 +2953,7 @@ void PopupWindow::PasteSelected() {
         selection_.Clear();
         multi_select_ = false;
         if (ShouldHidePopupAfterPaste(pinned_open_)) {
-            Hide();
+            Hide(L"multi-paste");
         } else {
             InvalidateRect(hwnd_, nullptr, FALSE);
         }
@@ -1484,7 +2963,7 @@ void PopupWindow::PasteSelected() {
 void PopupWindow::PromptCreateFavoriteGroup() {
     prompt_open_ = true;
     BeginTransientHideSuppression();
-    if (const auto name = PromptText(hwnd_, instance_, L"新建收藏夹", L"输入分组名称")) {
+    if (const auto name = PromptText(hwnd_, instance_, L"\u65b0\u5efa\u6536\u85cf\u5939", L"\u8f93\u5165\u5206\u7ec4\u540d\u79f0")) {
         active_favorite_group_id_ = store_.EnsureFavoriteGroup(*name);
         view_mode_ = ViewMode::Favorites;
         filter_open_ = false;
@@ -1570,12 +3049,128 @@ SIZE PopupWindow::PhysicalPopupSize(UINT dpi, int visible_items) const {
     return SIZE{ScalePopupMetricForDpi(metrics.width, dpi), ScalePopupMetricForDpi(height, dpi)};
 }
 
-POINT PopupWindow::ResolvePopupPosition(HWND target, SIZE size, RECT work, UINT dpi) const {
-    POINT anchor{};
-    if (!TryGetTextInputAnchor(target, anchor)) {
-        return PopupBottomRightFallback(size, work, dpi);
+POINT PopupWindow::ResolvePopupPosition(HWND target, SIZE size, RECT monitor, RECT work, UINT dpi) const {
+    const std::wstring target_class = WindowClassName(target);
+    const std::wstring target_title = WindowTitle(target);
+    const std::wstring target_process = WindowProcessName(target);
+    std::wstring log = L"popup position target=";
+    log += HexWindow(target);
+    log += L" class=";
+    log += target_class;
+    log += L" process=";
+    log += target_process;
+    log += L" keyboard=";
+    log += keyboard_invocation_ ? L"1" : L"0";
+    DebugLog(log);
+    RECT avoid{};
+    TextAvoidSource avoid_source = TextAvoidSource::None;
+    const auto text_position = [&](const wchar_t* path, TextAvoidSource source, RECT resolved_avoid) {
+        HMONITOR avoid_monitor = MonitorFromRect(&resolved_avoid, MONITOR_DEFAULTTONEAREST);
+        const RECT avoid_work = WorkAreaForMonitor(avoid_monitor, work);
+        const RECT avoid_monitor_rect = MonitorRectForMonitor(avoid_monitor, monitor);
+        const UINT avoid_dpi = DpiForMonitorHandle(avoid_monitor, dpi);
+        const POINT position =
+            PopupKeyboardInvocationPosition(true, resolved_avoid, size, avoid_monitor_rect, avoid_work, avoid_dpi);
+        std::wstring position_log = L"popup position: ";
+        position_log += path;
+        position_log += L" source=";
+        position_log += TextAvoidSourceName(source);
+        position_log += L" avoid=(";
+        position_log += std::to_wstring(resolved_avoid.left);
+        position_log += L",";
+        position_log += std::to_wstring(resolved_avoid.top);
+        position_log += L",";
+        position_log += std::to_wstring(resolved_avoid.right);
+        position_log += L",";
+        position_log += std::to_wstring(resolved_avoid.bottom);
+        position_log += L") pos=(";
+        position_log += std::to_wstring(position.x);
+        position_log += L",";
+        position_log += std::to_wstring(position.y);
+        position_log += L") work=(";
+        position_log += std::to_wstring(avoid_work.left);
+        position_log += L",";
+        position_log += std::to_wstring(avoid_work.top);
+        position_log += L",";
+        position_log += std::to_wstring(avoid_work.right);
+        position_log += L",";
+        position_log += std::to_wstring(avoid_work.bottom);
+        position_log += L")";
+        DebugLog(position_log);
+        return position;
+    };
+    const FocusedTextContext focused_text = GetFocusedTextContext();
+    const auto trusted_text_position = [&](const wchar_t* path, TextAvoidSource source, RECT resolved_avoid,
+                                           bool require_focused_text_gate) -> std::optional<POINT> {
+        if (require_focused_text_gate && !FocusedTextContextAllowsCaret(focused_text, resolved_avoid, dpi)) {
+            std::wstring reject_log = L"popup position: caret rejected source=";
+            reject_log += TextAvoidSourceName(source);
+            reject_log += focused_text.editable ? L" reason=stale-caret" : L" reason=focused element is not editable text";
+            reject_log += L" avoid=";
+            reject_log += RectToLogString(resolved_avoid);
+            DebugLog(reject_log);
+            return std::nullopt;
+        }
+        if (PopupShouldUseTextAvoidForTarget(true, target_class, target_title)) {
+            return text_position(path, source, resolved_avoid);
+        }
+        return std::nullopt;
+    };
+    if (TryGetCaretAnchor(target, avoid, avoid_source)) {
+        if (const auto position = trusted_text_position(L"caret avoid", avoid_source, avoid, true)) {
+            return *position;
+        }
     }
-    return ClampPopupToWorkArea(anchor, size, work, dpi);
+    if (TryGetMsaaCaretAnchor(target, avoid, avoid_source)) {
+        if (const auto position = trusted_text_position(L"msaa caret avoid", avoid_source, avoid, true)) {
+            return *position;
+        }
+    }
+    if (PopupTargetCanUseConsoleAnchor(target_class) &&
+        TryGetConsoleAnchor(target, avoid, avoid_source) &&
+        PopupShouldUseTextAvoidForTarget(true, target_class, target_title)) {
+        return text_position(L"console avoid", avoid_source, avoid);
+    }
+    std::wstring java_access_bridge_status;
+    if (TryGetJavaAccessBridgeCaretAnchor(target, avoid, avoid_source, java_access_bridge_status) &&
+        PopupShouldUseTextAvoidForTarget(true, target_class, target_title)) {
+        return text_position(L"java access bridge avoid", avoid_source, avoid);
+    }
+    if (!java_access_bridge_status.empty() &&
+        java_access_bridge_status != L"java-access-bridge-not-java-window") {
+        DebugLog(L"popup position: " + java_access_bridge_status);
+    }
+    std::wstring visual_caret_status;
+    if (TryGetVisualTerminalCaretAnchor(target, avoid, avoid_source, visual_caret_status) &&
+        PopupShouldUseTextAvoidForTarget(true, target_class, target_title)) {
+        return text_position(L"visual terminal caret avoid", avoid_source, avoid);
+    }
+    if (!visual_caret_status.empty() &&
+        visual_caret_status != L"visual-terminal-caret-not-java-window") {
+        DebugLog(L"popup position: " + visual_caret_status);
+    }
+    if (TryGetAutomationCaretAvoidRect(dpi, avoid, avoid_source) &&
+        PopupShouldUseTextAvoidForTarget(true, target_class, target_title)) {
+        return text_position(L"automation focus avoid", avoid_source, avoid);
+    }
+    if (TryGetAutomationAvoidRectFromWindow(target, dpi, avoid, avoid_source) &&
+        PopupShouldUseTextAvoidForTarget(true, target_class, target_title)) {
+        return text_position(L"automation window avoid", avoid_source, avoid);
+    }
+    if (PopupTargetNeedsShellTopmostRaise(target_class, target_title, target_process)) {
+        DebugLog(L"popup position: automation unavailable " + AutomationFocusedElementDebugInfo());
+    }
+    const POINT fallback = keyboard_invocation_ ? PopupKeyboardInvocationPosition(false, RECT{}, size, monitor, work, dpi)
+                                                : PopupBottomRightFallback(size, work, dpi);
+    std::wstring fallback_log =
+        keyboard_invocation_ ? L"popup position: windows clipboard dock fallback pos=("
+                             : L"popup position: bottom right fallback pos=(";
+    fallback_log += std::to_wstring(fallback.x);
+    fallback_log += L",";
+    fallback_log += std::to_wstring(fallback.y);
+    fallback_log += L")";
+    DebugLog(fallback_log);
+    return fallback;
 }
 
 void PopupWindow::HideIfInactive(HWND next_active) {
@@ -1587,8 +3182,42 @@ void PopupWindow::HideIfInactive(HWND next_active) {
     }
     if (ShouldHidePopupAfterInactive(pinned_open_, prompt_open_, pointer_interaction,
                                      IsTransientHideSuppressed(), IsVisible(),
-                                     ContainsWindow(hwnd_, next_active))) {
-        Hide();
+                                     ContainsWindow(hwnd_, next_active), shell_topmost_raise_)) {
+        DebugLog(L"popup inactive hide next=" + HexWindow(next_active) + L" next_class=" +
+                 WindowClassName(next_active) + L" next_process=" + WindowProcessName(next_active));
+        Hide(L"inactive");
+    }
+}
+
+void PopupWindow::RaiseAboveShellSurface() {
+    if (!shell_topmost_raise_ || !IsVisible()) {
+        KillTimer(hwnd_, kShellTopmostRaiseTimer);
+        return;
+    }
+    const bool activate_on_raise = PopupShowShouldActivate(keyboard_invocation_, shell_topmost_raise_);
+    UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW;
+    if (PopupSetWindowPosShouldUseNoActivate(activate_on_raise)) {
+        flags |= SWP_NOACTIVATE;
+    }
+    SetWindowPos(hwnd_, HWND_TOPMOST, 0, 0, 0, 0, flags);
+    RECT popup_rect{};
+    GetWindowRect(hwnd_, &popup_rect);
+    const LONG_PTR ex_style = GetWindowLongPtrW(hwnd_, GWL_EXSTYLE);
+    std::wstring log = L"popup shell raise rect=";
+    log += RectToLogString(popup_rect);
+    log += L" visible=";
+    log += IsWindowVisible(hwnd_) ? L"1" : L"0";
+    log += L" topmost=";
+    log += (ex_style & WS_EX_TOPMOST) ? L"1" : L"0";
+    DebugLog(log);
+    if (activate_on_raise) {
+        ActivatePopupWindow(hwnd_);
+    }
+    const LONG remaining_ms = static_cast<LONG>(shell_topmost_raise_until_ - GetTickCount());
+    if (PopupShellTopmostRaiseShouldExpire(shell_topmost_raise_, remaining_ms)) {
+        shell_topmost_raise_ = false;
+        shell_topmost_raise_until_ = 0;
+        KillTimer(hwnd_, kShellTopmostRaiseTimer);
     }
 }
 
@@ -1624,7 +3253,8 @@ void PopupWindow::UpdatePopupLogicalSize() {
                                       kMinPopupWidth, kMaxPopupWidth);
     popup_logical_height_ = std::clamp(MulDiv(client.bottom - client.top, 96, static_cast<int>(dpi)),
                                        kMinPopupHeight, kMaxPopupHeight);
-    if (!manual_popup_size_) {
+    if (!PopupShouldUseCurrentWindowWidthForLayout(popup_resizable_, manual_popup_size_,
+                                                   popup_logical_width_, metrics.width)) {
         popup_logical_width_ = metrics.width;
         popup_logical_height_ = metrics.height;
     }
@@ -1657,7 +3287,10 @@ float PopupWindow::ExpandedExtraHeightForItem(const HistoryItem& item) const {
     if (measured_height <= 0.0f) {
         return PopupExpandedCardExtraHeightForText(detail, detail_width);
     }
-    if (item.kind == ClipboardKind::Image && !item.payload_path.empty()) {
+    const bool image_item = item.kind == ClipboardKind::Image && !item.payload_path.empty();
+    const bool image_file_item =
+        item.kind == ClipboardKind::Files && !item.files.empty() && PopupFileCanUseImagePreview(item.files.front());
+    if (image_item || image_file_item) {
         return PopupExpandedImageCardExtraHeightForMeasuredDetail(measured_height);
     }
     return PopupExpandedCardExtraHeightForMeasuredDetail(measured_height);
@@ -1804,12 +3437,15 @@ void PopupWindow::BeginWindowResize(int edges) {
     resizing_window_ = true;
     moving_window_ = false;
     resize_edges_ = edges;
+    hover_progress_ = 1.0f;
     mouse_down_started_inside_popup_ = true;
     left_button_was_down_ = true;
     GetCursorPos(&drag_start_screen_);
     GetWindowRect(hwnd_, &drag_start_rect_);
     SetCapture(hwnd_);
     BeginTransientHideSuppression();
+    KillTimer(hwnd_, kAnimationTimer);
+    KillTimer(hwnd_, kHoverTimer);
     KillTimer(hwnd_, kOutsideClickTimer);
 }
 
@@ -1817,6 +3453,8 @@ void PopupWindow::UpdateWindowMoveOrResize() {
     if (!hwnd_ || (!moving_window_ && !resizing_window_)) {
         return;
     }
+    RECT current{};
+    GetWindowRect(hwnd_, &current);
     POINT cursor{};
     GetCursorPos(&cursor);
     const int dx = cursor.x - drag_start_screen_.x;
@@ -1825,10 +3463,11 @@ void PopupWindow::UpdateWindowMoveOrResize() {
     if (moving_window_) {
         OffsetRect(&next, dx, dy);
     } else {
-        const int min_width = ScalePopupMetricForDpi(kMinPopupWidth, CurrentDpi());
-        const int min_height = ScalePopupMetricForDpi(kMinPopupHeight, CurrentDpi());
-        const int max_width = ScalePopupMetricForDpi(kMaxPopupWidth, CurrentDpi());
-        const int max_height = ScalePopupMetricForDpi(kMaxPopupHeight, CurrentDpi());
+        const UINT dpi = CurrentDpi();
+        const int min_width = ScalePopupMetricForDpi(kMinPopupWidth, dpi);
+        const int min_height = ScalePopupMetricForDpi(kMinPopupHeight, dpi);
+        const int max_width = ScalePopupMetricForDpi(kMaxPopupWidth, dpi);
+        const int max_height = ScalePopupMetricForDpi(kMaxPopupHeight, dpi);
         if (resize_edges_ & kPopupResizeLeft) {
             next.left = std::clamp(next.left + dx, next.right - max_width, next.right - min_width);
         }
@@ -1843,11 +3482,13 @@ void PopupWindow::UpdateWindowMoveOrResize() {
         }
         manual_popup_size_ = true;
     }
-    SetWindowPos(hwnd_, nullptr, next.left, next.top, next.right - next.left, next.bottom - next.top,
-                 SWP_NOZORDER | SWP_NOACTIVATE);
-    UpdatePopupLogicalSize();
-    ClampScrollToCurrentPopupHeight();
-    InvalidateRect(hwnd_, nullptr, FALSE);
+    if (PopupShouldApplyWindowRect(current, next)) {
+        SetWindowPos(hwnd_, nullptr, next.left, next.top, next.right - next.left, next.bottom - next.top,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+        if (PopupShouldFlushPaintDuringLiveResize(resizing_window_, true)) {
+            UpdateWindow(hwnd_);
+        }
+    }
 }
 
 void PopupWindow::EndWindowMoveOrResize() {
@@ -1860,8 +3501,12 @@ void PopupWindow::EndWindowMoveOrResize() {
     custom_position_ = true;
     left_button_was_down_ = false;
     mouse_down_started_inside_popup_ = false;
+    UpdatePopupLogicalSize();
+    ClampScrollToCurrentPopupHeight();
+    UpdateSearchEditBounds();
     EndTransientHideSuppressionSoon();
     SetTimer(hwnd_, kOutsideClickTimer, 50, nullptr);
+    InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
 void PopupWindow::UpdateScrollDrag(POINT point) {
@@ -2106,16 +3751,25 @@ ID2D1Bitmap* PopupWindow::LoadImagePreviewBitmap(const std::filesystem::path& pa
         return nullptr;
     }
 
-    std::vector<uint32_t> pixels(static_cast<size_t>(width) * static_cast<size_t>(height));
+    const SIZE target = PopupPreviewDecodeSize(static_cast<unsigned>(width), static_cast<unsigned>(height),
+                                               PopupImagePreviewDecodePixelLimit());
+    if (target.cx <= 0 || target.cy <= 0) {
+        image_preview_cache_[key] = nullptr;
+        return nullptr;
+    }
+
+    std::vector<uint32_t> pixels(static_cast<size_t>(target.cx) * static_cast<size_t>(target.cy));
     const auto* src_base = reinterpret_cast<const uint8_t*>(dib.data() + pixel_offset);
-    for (int y = 0; y < height; ++y) {
-        const int src_y = top_down ? y : height - 1 - y;
+    for (int y = 0; y < target.cy; ++y) {
+        const int sampled_y = std::min(height - 1, static_cast<int>((static_cast<int64_t>(y) * height) / target.cy));
+        const int src_y = top_down ? sampled_y : height - 1 - sampled_y;
         const auto* src = src_base + row_stride * static_cast<size_t>(src_y);
-        auto* dst = pixels.data() + static_cast<size_t>(y) * static_cast<size_t>(width);
-        for (int x = 0; x < width; ++x) {
-            const uint8_t b = src[x * (header->biBitCount / 8) + 0];
-            const uint8_t g = src[x * (header->biBitCount / 8) + 1];
-            const uint8_t r = src[x * (header->biBitCount / 8) + 2];
+        auto* dst = pixels.data() + static_cast<size_t>(y) * static_cast<size_t>(target.cx);
+        for (int x = 0; x < target.cx; ++x) {
+            const int sampled_x = std::min(width - 1, static_cast<int>((static_cast<int64_t>(x) * width) / target.cx));
+            const uint8_t b = src[sampled_x * (header->biBitCount / 8) + 0];
+            const uint8_t g = src[sampled_x * (header->biBitCount / 8) + 1];
+            const uint8_t r = src[sampled_x * (header->biBitCount / 8) + 2];
             dst[x] = 0xFF000000u | (static_cast<uint32_t>(r) << 16u) | (static_cast<uint32_t>(g) << 8u) |
                      static_cast<uint32_t>(b);
         }
@@ -2123,8 +3777,37 @@ ID2D1Bitmap* PopupWindow::LoadImagePreviewBitmap(const std::filesystem::path& pa
 
     const auto props = D2D1::BitmapProperties(
         D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE));
-    render_target_->CreateBitmap(D2D1::SizeU(static_cast<UINT32>(width), static_cast<UINT32>(height)),
-                                 pixels.data(), static_cast<UINT32>(width * sizeof(uint32_t)), props, &bitmap);
+    render_target_->CreateBitmap(D2D1::SizeU(static_cast<UINT32>(target.cx), static_cast<UINT32>(target.cy)),
+                                 pixels.data(), static_cast<UINT32>(target.cx * sizeof(uint32_t)), props, &bitmap);
+    image_preview_cache_[key] = bitmap;
+    return bitmap;
+}
+
+ID2D1Bitmap* PopupWindow::LoadImageFilePreviewBitmap(const std::filesystem::path& path) {
+    if (path.empty() || !wic_factory_ || !render_target_) {
+        return nullptr;
+    }
+    const std::wstring key = path.wstring();
+    if (const auto found = image_preview_cache_.find(key); found != image_preview_cache_.end()) {
+        return found->second;
+    }
+
+    IWICBitmapDecoder* decoder = nullptr;
+    IWICBitmapFrameDecode* frame = nullptr;
+    IWICBitmapSource* preview_source = nullptr;
+    IWICFormatConverter* converter = nullptr;
+    ID2D1Bitmap* bitmap = nullptr;
+    if (LoadWicFrameFromFile(wic_factory_, path, &decoder, &frame) &&
+        (preview_source = CreateScaledPreviewSource(wic_factory_, frame)) != nullptr &&
+        SUCCEEDED(wic_factory_->CreateFormatConverter(&converter)) &&
+        SUCCEEDED(converter->Initialize(preview_source, GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, nullptr, 0.0,
+                                        WICBitmapPaletteTypeMedianCut))) {
+        render_target_->CreateBitmapFromWicBitmap(converter, nullptr, &bitmap);
+    }
+    ReleasePtr(converter);
+    ReleasePtr(preview_source);
+    ReleasePtr(frame);
+    ReleasePtr(decoder);
     image_preview_cache_[key] = bitmap;
     return bitmap;
 }
@@ -2163,6 +3846,55 @@ ID2D1Bitmap* PopupWindow::LoadFileIconBitmap(const std::wstring& path) {
     return bitmap;
 }
 
+ID2D1Bitmap* PopupWindow::CachedIconBitmap(IconId icon) const {
+    switch (icon) {
+    case IconId::Pin:
+        return pin_icon_;
+    case IconId::PinActive:
+        return pin_active_icon_;
+    case IconId::Close:
+        return close_icon_;
+    case IconId::Filter:
+        return filter_icon_;
+    case IconId::FilterActive:
+        return filter_active_icon_;
+    case IconId::MultiSelect:
+        return multi_select_icon_;
+    case IconId::MultiSelectActive:
+        return multi_select_active_icon_;
+    case IconId::Trash:
+        return trash_icon_;
+    case IconId::TextKind:
+        return text_kind_icon_;
+    case IconId::LinkKind:
+        return link_kind_icon_;
+    case IconId::AddFavoriteFolderOutline:
+        return add_favorite_folder_outline_icon_;
+    case IconId::AddFavoriteFolderFilled:
+        return add_favorite_folder_filled_icon_;
+    }
+    return nullptr;
+}
+
+ID2D1Bitmap* PopupWindow::CachedImagePreviewBitmap(const std::filesystem::path& path) const {
+    if (path.empty()) {
+        return nullptr;
+    }
+    if (const auto found = image_preview_cache_.find(path.wstring()); found != image_preview_cache_.end()) {
+        return found->second;
+    }
+    return nullptr;
+}
+
+ID2D1Bitmap* PopupWindow::CachedFileIconBitmap(const std::wstring& path) const {
+    const std::wstring extension = std::filesystem::path(path).extension().wstring();
+    const std::wstring key = extension.empty() ? path : extension;
+    if (const auto found = file_icon_cache_.find(key); found != file_icon_cache_.end()) {
+        return found->second;
+    }
+    return nullptr;
+}
+
 PopupWindow::IconId PopupWindow::ToWindowIcon(PopupIconAssetSlot slot) const {
     switch (slot) {
     case PopupIconAssetSlot::Pin:
@@ -2186,19 +3918,29 @@ PopupWindow::IconId PopupWindow::ToWindowIcon(PopupIconAssetSlot slot) const {
 }
 
 void PopupWindow::DrawIcon(IconId icon, const UiRect& rect, float opacity) {
-    if (ID2D1Bitmap* bitmap = LoadIconBitmap(icon)) {
+    const bool fast_interaction = moving_window_ || resizing_window_;
+    ID2D1Bitmap* bitmap = PopupShouldLoadUiIcon(fast_interaction) ? LoadIconBitmap(icon) : CachedIconBitmap(icon);
+    if (!PopupShouldDrawCachedMediaDuringFastInteraction(fast_interaction, bitmap != nullptr)) {
+        return;
+    }
+    if (bitmap) {
         render_target_->DrawBitmap(bitmap, Rect(rect), opacity, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
     }
 }
 
 void PopupWindow::DrawCardMedia(const HistoryItem& item, const PopupCardLayout& card, ID2D1SolidColorBrush* brush) {
+    const bool fast_interaction = moving_window_ || resizing_window_;
+    const bool load_previews = PopupShouldLoadImagePreview(fast_interaction);
     const auto kind_color = KindColor(item.kind);
     if (item.kind == ClipboardKind::Image) {
         brush->SetColor(D2D1::ColorF(0xFFFFFF, 0.46f));
         render_target_->FillRoundedRectangle(RoundRect(card.image_preview, 10), brush);
-        if (ID2D1Bitmap* bitmap = LoadImagePreviewBitmap(item.payload_path)) {
+        ID2D1Bitmap* bitmap =
+            load_previews ? LoadImagePreviewBitmap(item.payload_path) : CachedImagePreviewBitmap(item.payload_path);
+        if (PopupShouldDrawCachedMediaDuringFastInteraction(fast_interaction, bitmap != nullptr) && bitmap) {
             const auto size = bitmap->GetSize();
-            const auto fitted = FitImageRectToBounds(size.width, size.height, ShrinkRect(card.image_preview, 2.0f, 2.0f));
+            const auto fitted =
+                FitImageRectToBounds(size.width, size.height, ShrinkRect(card.image_preview, 2.0f, 2.0f));
             render_target_->DrawBitmap(bitmap, Rect(fitted), 0.96f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
             brush->SetColor(D2D1::ColorF(0xFFFFFF, 0.62f));
             render_target_->DrawRoundedRectangle(RoundRect(card.image_preview, 8), brush, 1.0f);
@@ -2207,8 +3949,26 @@ void PopupWindow::DrawCardMedia(const HistoryItem& item, const PopupCardLayout& 
     }
 
     if (item.kind == ClipboardKind::Files && !item.files.empty()) {
-        if (ID2D1Bitmap* bitmap = LoadFileIconBitmap(item.files.front())) {
-            render_target_->DrawBitmap(bitmap, Rect(card.file_icon), 0.96f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+        const auto& first_file = item.files.front();
+        if (PopupFileCanUseImagePreview(first_file)) {
+            brush->SetColor(D2D1::ColorF(0xFFFFFF, 0.46f));
+            render_target_->FillRoundedRectangle(RoundRect(card.image_preview, 10), brush);
+            ID2D1Bitmap* bitmap =
+                load_previews ? LoadImageFilePreviewBitmap(first_file) : CachedImagePreviewBitmap(first_file);
+            if (PopupShouldDrawCachedMediaDuringFastInteraction(fast_interaction, bitmap != nullptr) && bitmap) {
+                const auto size = bitmap->GetSize();
+                const auto fitted =
+                    FitImageRectToBounds(size.width, size.height, ShrinkRect(card.image_preview, 2.0f, 2.0f));
+                render_target_->DrawBitmap(bitmap, Rect(fitted), 0.96f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+                brush->SetColor(D2D1::ColorF(0xFFFFFF, 0.62f));
+                render_target_->DrawRoundedRectangle(RoundRect(card.image_preview, 8), brush, 1.0f);
+                return;
+            }
+        }
+        ID2D1Bitmap* file_icon =
+            PopupShouldLoadFileIcon(fast_interaction) ? LoadFileIconBitmap(first_file) : CachedFileIconBitmap(first_file);
+        if (PopupShouldDrawCachedMediaDuringFastInteraction(fast_interaction, file_icon != nullptr) && file_icon) {
+            render_target_->DrawBitmap(file_icon, Rect(card.file_icon), 0.96f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
             return;
         }
     }
@@ -2235,15 +3995,21 @@ void PopupWindow::DrawCardMedia(const HistoryItem& item, const PopupCardLayout& 
 void PopupWindow::Paint() {
     EnsureDeviceResources();
     const auto& metrics = PopupMetrics();
-    UpdatePopupLogicalSize();
-    ClampScrollToCurrentPopupHeight();
+    if (PopupPaintShouldUpdateLayout()) {
+        UpdatePopupLogicalSize();
+        ClampScrollToCurrentPopupHeight();
+    }
     const auto palette = ResolvePopupThemePalette(theme_mode_, IsSystemDarkTheme());
     render_target_->BeginDraw();
     render_target_->Clear(D2D1::ColorF(0x000000, 0.0f));
 
     ID2D1SolidColorBrush* brush = nullptr;
     render_target_->CreateSolidColorBrush(ColorWithAlpha(palette.window_tint, palette.window_opacity), &brush);
+    const bool drawing_fast_interaction = moving_window_ || resizing_window_;
     auto drawEdgeShadow = [&](const UiRect& rect, float radius, float strength = 1.0f, float y_offset = 2.0f) {
+        if (!PopupShouldDrawDecorativeShadows(drawing_fast_interaction)) {
+            return;
+        }
         const uint32_t color = palette.dark ? 0x000000 : 0x8FA0B6;
         for (int i = 2; i >= 1; --i) {
             const float t = static_cast<float>(i);
@@ -2305,7 +4071,7 @@ void PopupWindow::Paint() {
     const float search_top = PopupSearchTop();
     const auto search_layout = BuildPopupSearchLayoutForWidth(popup_logical_width_);
     const bool search_hovered = hover_action_ == UiAction::Search || Contains(search_layout.box, hover_point_);
-    const bool search_active = search_focused_ && GetFocus() == hwnd_;
+    const bool search_active = search_focused_ && GetFocus() == search_edit_;
     const float search_focus = PopupSearchFocusProgress(search_active, search_hovered, hover_progress_);
     if (search_hovered || search_active) {
         brush->SetColor(D2D1::ColorF(palette.accent, search_active ? 0.11f : 0.05f + 0.05f * search_focus));
@@ -2334,10 +4100,25 @@ void PopupWindow::Paint() {
     render_target_->DrawLine(D2D1::Point2F(search_icon_x + 3.8f, search_icon_y + 3.0f),
                              D2D1::Point2F(search_icon_x + 8.0f, search_icon_y + 7.0f), brush, 1.45f);
     const auto search_text = PopupSearchDisplayText(query_);
+    const auto search_selection = CurrentSearchSelection();
+    if (PopupSearchShouldDrawSelection(search_active, !query_.empty(), search_selection)) {
+        const float selection_left =
+            ClampPopupSearchCaretX(search_layout, SearchTextOffsetDips(search_selection.start, false));
+        const float selection_right =
+            ClampPopupSearchCaretX(search_layout, SearchTextOffsetDips(search_selection.end, false));
+        if (selection_right > selection_left) {
+            brush->SetColor(D2D1::ColorF(palette.accent, palette.dark ? 0.34f : 0.22f));
+            render_target_->FillRoundedRectangle(
+                RoundRect(selection_left, search_layout.text.top + 3.0f, selection_right,
+                          search_layout.text.bottom - 3.0f, 3.0f),
+                brush);
+        }
+    }
     brush->SetColor(query_.empty() ? D2D1::ColorF(palette.muted, 0.46f) : D2D1::ColorF(palette.text, 0.94f));
     render_target_->DrawTextW(search_text.data(), static_cast<UINT32>(search_text.size()), small_format_,
                               Rect(search_layout.text), brush);
-    if (PopupSearchCaretVisible(search_focused_ && GetFocus() == hwnd_, search_caret_on_)) {
+    if (PopupSearchCaretVisible(search_active, search_caret_on_) &&
+        !PopupSearchHasSelection(search_selection)) {
         const float measured_text_width = SearchCaretOffsetDips();
         const float caret_x = ClampPopupSearchCaretX(search_layout, measured_text_width);
         brush->SetColor(D2D1::ColorF(palette.accent, 0.82f));
@@ -2402,8 +4183,8 @@ void PopupWindow::Paint() {
         drawButton(toolbar.delete_selected, L"选中删除", L'D', UiAction::DeleteSelected);
         drawButton(toolbar.paste_selected, L"选中粘贴", L'P', UiAction::PasteSelected, true);
     } else {
-        drawButton(toolbar.filter, L"筛选", L'F', UiAction::Filter, filter_open_, true);
-        drawButton(toolbar.multi_select, L"多选", L'M', UiAction::MultiSelect);
+        drawButton(toolbar.filter, L"\u7b5b\u9009", L'F', UiAction::Filter, filter_open_, true);
+        drawButton(toolbar.multi_select, L"\u591a\u9009", L'M', UiAction::MultiSelect);
         drawButton(toolbar.clear_all, L"全部清除", L'D', UiAction::ClearAll);
     }
 
@@ -2432,7 +4213,7 @@ void PopupWindow::Paint() {
     }
     render_target_->DrawTextW(L"历史", 2, centered_small_format_, Rect(tabs.history),
                               view_mode_ == ViewMode::History ? accent_brush_ : text_brush_);
-    render_target_->DrawTextW(L"收藏夹", 3, centered_small_format_, Rect(tabs.favorites),
+    render_target_->DrawTextW(L"\u6536\u85cf\u5939", 3, centered_small_format_, Rect(tabs.favorites),
                               view_mode_ == ViewMode::Favorites ? accent_brush_ : text_brush_);
     if (view_mode_ == ViewMode::Favorites) {
         const bool group_hovered = hover_action_ == UiAction::FavoriteGroupMenu;
@@ -2474,9 +4255,10 @@ void PopupWindow::Paint() {
     const auto list_clip = PopupListClipRectForHeight(popup_logical_width_, popup_logical_height_);
     render_target_->PushAxisAlignedClip(Rect(list_clip), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
-    float y = PopupListTop() - (scroll_offset_ - ItemScrollTop(FirstVisibleItemIndex()));
-    for (int item_index = FirstVisibleItemIndex(); item_index < static_cast<int>(items_.size()) &&
-                                                y <= static_cast<float>(popup_logical_height_) - 4.0f;
+    const int first_visible_index = FirstVisibleItemIndex();
+    float y = PopupListTop() - (scroll_offset_ - ItemScrollTop(first_visible_index));
+    for (int item_index = first_visible_index; item_index < static_cast<int>(items_.size()) &&
+                                           y <= static_cast<float>(popup_logical_height_) - 4.0f;
          ++item_index) {
         const auto& item = items_[item_index];
         const bool selected = item_index == selected_index_;
@@ -2553,14 +4335,28 @@ void PopupWindow::Paint() {
         if (expanded) {
             const UiRect detail_rect{card.title.left, card.meta.bottom + 6.0f, card.card.right - 16.0f,
                                      card.card.bottom - 12.0f};
-            if (item.kind == ClipboardKind::Image && !item.payload_path.empty()) {
+            const bool image_item = item.kind == ClipboardKind::Image && !item.payload_path.empty();
+            const bool image_file_item =
+                item.kind == ClipboardKind::Files && !item.files.empty() && PopupFileCanUseImagePreview(item.files.front());
+            if (image_item || image_file_item) {
                 const UiRect image_rect{detail_rect.left, detail_rect.top, detail_rect.left + 116.0f,
                                         std::min(detail_rect.top + 116.0f, detail_rect.bottom)};
                 brush->SetColor(D2D1::ColorF(0xFFFFFF, 0.54f));
                 render_target_->FillRoundedRectangle(RoundRect(image_rect, 10), brush);
-                if (ID2D1Bitmap* bitmap = LoadImagePreviewBitmap(item.payload_path)) {
+                const bool fast_interaction = moving_window_ || resizing_window_;
+                const bool load_preview = PopupShouldLoadImagePreview(fast_interaction);
+                ID2D1Bitmap* bitmap = nullptr;
+                if (image_item) {
+                    bitmap = load_preview ? LoadImagePreviewBitmap(item.payload_path)
+                                          : CachedImagePreviewBitmap(item.payload_path);
+                } else {
+                    bitmap = load_preview ? LoadImageFilePreviewBitmap(item.files.front())
+                                          : CachedImagePreviewBitmap(item.files.front());
+                }
+                if (PopupShouldDrawCachedMediaDuringFastInteraction(fast_interaction, bitmap != nullptr) && bitmap) {
                     const auto size = bitmap->GetSize();
-                    const auto fitted = FitImageRectToBounds(size.width, size.height, ShrinkRect(image_rect, 2.0f, 2.0f));
+                    const auto fitted =
+                        FitImageRectToBounds(size.width, size.height, ShrinkRect(image_rect, 2.0f, 2.0f));
                     render_target_->DrawBitmap(bitmap, Rect(fitted), 0.98f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
                 }
                 const std::wstring path = ItemDetailText(item);
@@ -2591,10 +4387,10 @@ void PopupWindow::Paint() {
 
     render_target_->PopAxisAlignedClip();
 
-    if (TotalScrollHeight() > ViewportScrollHeight()) {
+    const float content_height = TotalScrollHeight();
+    const float viewport_height = ViewportScrollHeight();
+    if (content_height > viewport_height) {
         const auto track = PopupScrollbarTrackRectForSize(popup_logical_width_, popup_logical_height_);
-        const float content_height = TotalScrollHeight();
-        const float viewport_height = ViewportScrollHeight();
         const float thumb_height = std::max(32.0f, track.Height() * viewport_height / content_height);
         const float max_offset = std::max(1.0f, content_height - viewport_height);
         const float thumb_top =
@@ -2683,7 +4479,7 @@ void PopupWindow::Paint() {
 
         brush->SetColor(D2D1::ColorF(palette.border, 0.70f));
         render_target_->FillRectangle(Rect(menu.second_divider), brush);
-        drawMenuRow(menu.new_group, L"新建收藏夹...", false,
+        drawMenuRow(menu.new_group, L"\u65b0\u5efa\u6536\u85cf\u5939...", false,
                     isMenuHovered(PopupFavoriteGroupMenuTarget::NewGroup));
     }
 
@@ -2703,16 +4499,16 @@ void PopupWindow::Paint() {
         brush->SetColor(ColorWithAlpha(palette.border, 0.82f));
         render_target_->DrawRoundedRectangle(RoundRect(confirm, 16), brush, 1.0f);
 
-        render_target_->DrawTextW(L"删除收藏夹", 5, body_format_,
+        render_target_->DrawTextW(L"\u5220\u9664\u6536\u85cf\u5939", 5, body_format_,
                                   Rect(confirm.left + 16.0f, confirm.top + 14.0f,
                                        confirm.right - 16.0f, confirm.top + 38.0f),
                                   text_brush_);
-        const std::wstring message = L"删除 \"" + pending_favorite_group_delete_->name + L"\"？";
+        const std::wstring message = L"\u5220\u9664 \"" + pending_favorite_group_delete_->name + L"\"\uff1f";
         render_target_->DrawTextW(message.c_str(), static_cast<UINT32>(message.size()), small_format_,
                                   Rect(confirm.left + 16.0f, confirm.top + 46.0f,
                                        confirm.right - 16.0f, confirm.top + 66.0f),
                                   text_brush_);
-        render_target_->DrawTextW(L"收藏夹里的内容也会被删除。", 13, small_format_,
+        render_target_->DrawTextW(L"\u6536\u85cf\u5939\u91cc\u7684\u5185\u5bb9\u4e5f\u4f1a\u88ab\u5220\u9664\u3002", 13, small_format_,
                                   Rect(confirm.left + 16.0f, confirm.top + 68.0f,
                                        confirm.right - 16.0f, confirm.top + 90.0f),
                                   muted_brush_);
@@ -2787,7 +4583,7 @@ void PopupWindow::Paint() {
         render_target_->FillRoundedRectangle(RoundRect(filter.panel, 18), brush);
         brush->SetColor(ColorWithAlpha(palette.border, 0.78f));
         render_target_->DrawRoundedRectangle(RoundRect(filter.panel, 18), brush, 1.0f);
-        render_target_->DrawTextW(L"筛选", 2, body_format_, Rect(fx + 16, fy + 12, fx + 128, fy + 34), text_brush_);
+        render_target_->DrawTextW(L"\u7b5b\u9009", 2, body_format_, Rect(fx + 16, fy + 12, fx + 128, fy + 34), text_brush_);
         fillCircleHover(filter.close, PopupFilterTarget::Close, 10.0f, true);
         brush->SetColor(hover_filter_target_ == PopupFilterTarget::Close
                             ? D2D1::ColorF(0xFFF1F2, 0.94f)
@@ -2852,7 +4648,7 @@ void PopupWindow::Paint() {
                                   Rect(filter.date_card.left + 12.0f, filter.date_card.top + 10.0f,
                                        filter.date_card.left + 92.0f, filter.date_card.top + 28.0f),
                                   muted_brush_);
-        const wchar_t* active_hint = selecting_start ? L"选择开始" : L"选择结束";
+        const wchar_t* active_hint = selecting_start ? L"\u9009\u62e9\u5f00\u59cb" : L"\u9009\u62e9\u7ed3\u675f";
         render_target_->DrawTextW(active_hint, static_cast<UINT32>(wcslen(active_hint)), small_format_,
                                   Rect(filter.date_card.right - 88.0f, filter.date_card.top + 10.0f,
                                        filter.date_card.right - 12.0f, filter.date_card.top + 28.0f),
@@ -2875,7 +4671,7 @@ void PopupWindow::Paint() {
                                       Rect(rect.left + 10.0f, rect.top + 17.0f, rect.right - 8.0f, rect.bottom - 3.0f),
                                       text_brush_);
         };
-        drawDateBox(filter.start_date, L"开始日期", FormatDateValue(date_filter_.start),
+        drawDateBox(filter.start_date, L"\u5f00\u59cb\u65e5\u671f", FormatDateValue(date_filter_.start),
                     date_filter_.active_field == PopupDateRangeField::Start, PopupFilterTarget::StartDate);
         drawDateBox(filter.end_date, L"结束日期", FormatDateValue(date_filter_.end),
                     date_filter_.active_field == PopupDateRangeField::End, PopupFilterTarget::EndDate);
@@ -2906,11 +4702,11 @@ void PopupWindow::Paint() {
                                                                 (filter.calendar_next.top + filter.calendar_next.bottom) * 0.5f),
                                                   10.0f, 10.0f),
                                     brush);
-        render_target_->DrawTextW(L"‹", 1, small_format_, Rect(filter.calendar_prev), muted_brush_);
+        render_target_->DrawTextW(L"\u2039", 1, small_format_, Rect(filter.calendar_prev), muted_brush_);
         const auto month_title = FormatMonthTitle(calendar_year_, calendar_month_);
         render_target_->DrawTextW(month_title.c_str(), static_cast<UINT32>(month_title.size()), small_format_,
                                   Rect(filter.calendar_title), text_brush_);
-        render_target_->DrawTextW(L"›", 1, small_format_, Rect(filter.calendar_next), muted_brush_);
+        render_target_->DrawTextW(L"\u203a", 1, small_format_, Rect(filter.calendar_next), muted_brush_);
         brush->SetColor(ColorWithAlpha(palette.dark ? 0x334155 : 0xF8FAFC, 0.74f));
         render_target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F((filter.calendar_prev.left + filter.calendar_prev.right) * 0.5f,
                                                                 (filter.calendar_prev.top + filter.calendar_prev.bottom) * 0.5f),
@@ -3306,14 +5102,18 @@ void PopupWindow::ShowContextMenu(POINT point, int item_index) {
                     favorite_groups_[i].name.c_str());
     }
     AppendMenuW(group_menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(group_menu, MF_STRING, kContextFavoriteGroupMax, L"新建收藏夹...");
+    AppendMenuW(group_menu, MF_STRING, kContextFavoriteGroupMax, L"\u65b0\u5efa\u6536\u85cf\u5939...");
     AppendMenuW(menu, MF_STRING, kContextDelete, L"删除");
     const auto pin_label = PopupPinMenuLabel(item.is_pinned);
     const auto favorite_label = PopupFavoriteMenuLabel(item.is_favorite);
     AppendMenuW(menu, MF_STRING, kContextPin, std::wstring(pin_label).c_str());
     AppendMenuW(menu, MF_STRING, kContextFavorite, std::wstring(favorite_label).c_str());
     AppendMenuW(menu, MF_STRING, kContextSetNote, L"设置备注");
-    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(group_menu), L"加入收藏夹");
+    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(group_menu), L"\u52a0\u5165\u6536\u85cf\u5939");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, item_index > 0 ? MF_STRING : MF_STRING | MF_GRAYED, kContextMoveUp, L"\u4e0a\u79fb");
+    AppendMenuW(menu, item_index + 1 < static_cast<int>(items_.size()) ? MF_STRING : MF_STRING | MF_GRAYED,
+                kContextMoveDown, L"\u4e0b\u79fb");
     ClientToScreen(hwnd_, &point);
     const int command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, point.x, point.y, 0, hwnd_, nullptr);
     DestroyMenu(menu);
@@ -3323,6 +5123,8 @@ void PopupWindow::ShowContextMenu(POINT point, int item_index) {
     if (command == kContextPin) TogglePinned(id);
     if (command == kContextFavorite) ToggleFavorite(id);
     if (command == kContextSetNote) PromptEditNote(id);
+    if (command == kContextMoveUp) MoveItemInCurrentList(item_index, -1);
+    if (command == kContextMoveDown) MoveItemInCurrentList(item_index, 1);
     if (command > kContextFavoriteGroupBase && command < kContextFavoriteGroupMax) {
         const size_t index = static_cast<size_t>(command - kContextFavoriteGroupBase - 1);
         if (index < favorite_groups_.size()) {
@@ -3338,7 +5140,7 @@ void PopupWindow::ShowContextMenu(POINT point, int item_index) {
     if (command == kContextFavoriteGroupMax) {
         prompt_open_ = true;
         BeginTransientHideSuppression();
-        if (const auto name = PromptText(hwnd_, instance_, L"新建收藏夹", L"输入分组名称")) {
+        if (const auto name = PromptText(hwnd_, instance_, L"\u65b0\u5efa\u6536\u85cf\u5939", L"\u8f93\u5165\u5206\u7ec4\u540d\u79f0")) {
             const auto group_id = store_.EnsureFavoriteGroup(*name);
             store_.SetFavoriteGroup(id, group_id);
             active_favorite_group_id_ = group_id;
@@ -3361,35 +5163,51 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
         BeginPaint(hwnd_, &ps);
         Paint();
         EndPaint(hwnd_, &ps);
+        if (PopupShouldRedrawNativeSearchAfterParentPaint(search_edit_ != nullptr, moving_window_ || resizing_window_)) {
+            RedrawWindow(search_edit_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
+        }
         return 0;
     }
-    case WM_SIZE:
+    case WM_SIZE: {
+        const RECT logical_before{0, 0, popup_logical_width_, popup_logical_height_};
         UpdatePopupLogicalSize();
         ClampScrollToCurrentPopupHeight();
-        UpdateSearchEditBounds();
-        DiscardDeviceResources();
+        const RECT logical_after{0, 0, popup_logical_width_, popup_logical_height_};
+        const bool logical_size_changed = PopupShouldApplyWindowRect(logical_before, logical_after);
+        if (PopupShouldResizeNativeSearchDuringLiveResize(resizing_window_, logical_size_changed)) {
+            UpdateSearchEditBounds();
+        }
+        if (render_target_) {
+            RECT rc{};
+            GetClientRect(hwnd_, &rc);
+            const auto size = D2D1::SizeU(static_cast<UINT32>(std::max(1L, rc.right - rc.left)),
+                                         static_cast<UINT32>(std::max(1L, rc.bottom - rc.top)));
+            if (FAILED(render_target_->Resize(size)) && PopupResizeShouldDiscardDeviceResources()) {
+                DiscardDeviceResources();
+            }
+        }
+        if (PopupShouldInvalidateDuringLiveResize(resizing_window_, logical_size_changed)) {
+            InvalidateRect(hwnd_, nullptr, FALSE);
+        }
         return 0;
+    }
     case WM_ERASEBKGND:
         return 1;
+    case WM_MOUSEACTIVATE:
+        return PopupMouseActivateResult();
     case WM_CTLCOLOREDIT:
         if (reinterpret_cast<HWND>(lparam) == search_edit_) {
             const auto palette = ResolvePopupThemePalette(theme_mode_, IsSystemDarkTheme());
-            SetBkMode(reinterpret_cast<HDC>(wparam), OPAQUE);
+            SetBkMode(reinterpret_cast<HDC>(wparam), TRANSPARENT);
             SetBkColor(reinterpret_cast<HDC>(wparam), palette.dark ? RGB(34, 48, 68) : RGB(255, 255, 255));
-            SetTextColor(reinterpret_cast<HDC>(wparam), palette.dark ? RGB(248, 250, 252) : RGB(23, 32, 51));
+            const COLORREF hidden_text = palette.dark ? RGB(34, 48, 68) : RGB(255, 255, 255);
+            SetTextColor(reinterpret_cast<HDC>(wparam), hidden_text);
             if (!search_edit_brush_) {
                 search_edit_brush_ = CreateSolidBrush(palette.dark ? RGB(34, 48, 68) : RGB(255, 255, 255));
             }
             return reinterpret_cast<LRESULT>(search_edit_brush_);
         }
         break;
-    case WM_SETFOCUS:
-        if (search_focused_) {
-            search_caret_on_ = true;
-            SetTimer(hwnd_, kSearchCaretTimer, GetCaretBlinkTime(), nullptr);
-            InvalidateRect(hwnd_, nullptr, FALSE);
-        }
-        return 0;
     case WM_ACTIVATE:
         if (LOWORD(wparam) == WA_INACTIVE) {
             HideIfInactive(reinterpret_cast<HWND>(lparam));
@@ -3406,7 +5224,9 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
             SetWindowPos(hwnd_, nullptr, suggested->left, suggested->top, suggested->right - suggested->left,
                          suggested->bottom - suggested->top, SWP_NOZORDER | SWP_NOACTIVATE);
         }
-        DiscardDeviceResources();
+        if (PopupDpiChangeShouldDiscardDeviceResources()) {
+            DiscardDeviceResources();
+        }
         InvalidateRect(hwnd_, nullptr, FALSE);
         return 0;
     }
@@ -3453,30 +5273,6 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
         }
         break;
     case WM_TIMER:
-        if (wparam == kAnimationTimer) {
-            open_progress_ = std::min(1.0f, open_progress_ + 0.18f);
-            if (open_progress_ >= 1.0f) KillTimer(hwnd_, kAnimationTimer);
-            InvalidateRect(hwnd_, nullptr, FALSE);
-            return 0;
-        }
-        if (wparam == kHoverTimer) {
-            hover_progress_ = std::min(1.0f, hover_progress_ + 0.18f);
-            if (hover_progress_ >= 1.0f) {
-                KillTimer(hwnd_, kHoverTimer);
-            }
-            InvalidateRect(hwnd_, nullptr, FALSE);
-            return 0;
-        }
-        if (wparam == kSearchCaretTimer) {
-            if (search_focused_ && GetFocus() == hwnd_) {
-                search_caret_on_ = !search_caret_on_;
-                InvalidateRect(hwnd_, nullptr, FALSE);
-            } else {
-                KillTimer(hwnd_, kSearchCaretTimer);
-                search_caret_on_ = false;
-            }
-            return 0;
-        }
         if (wparam == kOutsideClickTimer) {
             const bool left_button_down = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
             if (left_button_down) {
@@ -3491,7 +5287,7 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
                 if (ShouldHidePopupAfterOutsideClick(pinned_open_, prompt_open_, moving_window_,
                                                      mouse_down_started_inside_popup_, IsTransientHideSuppressed(),
                                                      IsVisible(), new_mouse_press, inside_popup)) {
-                    Hide();
+                    Hide(L"outside-click");
                 }
             } else {
                 mouse_down_started_inside_popup_ = false;
@@ -3507,35 +5303,40 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
             }
             return 0;
         }
+        if (wparam == kShellTopmostRaiseTimer) {
+            RaiseAboveShellSurface();
+            return 0;
+        }
         if (wparam == kItemLongPressTimer) {
             HandleLongPressTimer();
             return 0;
         }
-        break;
-    case WM_GETDLGCODE:
-        return DLGC_WANTCHARS | DLGC_WANTARROWS;
-    case WM_IME_STARTCOMPOSITION:
-        UpdateSearchImePosition();
-        break;
-    case WM_CHAR:
-        if (pending_favorite_group_delete_) {
+        if (wparam == kSearchCaretTimer) {
+            if (search_focused_ && GetFocus() == search_edit_) {
+                search_caret_on_ = !search_caret_on_;
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            } else {
+                search_caret_on_ = false;
+                KillTimer(hwnd_, kSearchCaretTimer);
+            }
             return 0;
         }
-        if (!PopupSearchAcceptsTextInput(search_focused_ && GetFocus() == hwnd_)) {
-            return 0;
-        }
-        if (PopupSearchDeletesOnChar(static_cast<wchar_t>(wparam))) {
-            if (!query_.empty()) query_.pop_back();
-        } else if (PopupSearchAppendsChar(static_cast<wchar_t>(wparam))) {
-            query_.push_back(static_cast<wchar_t>(wparam));
-        }
-        scroll_offset_ = 0;
-        ReloadItems();
-        ResizeToCurrentItems();
-        UpdateSearchImePosition();
-        InvalidateRect(hwnd_, nullptr, FALSE);
-        return 0;
+        break;
     case WM_COMMAND:
+        if (LOWORD(wparam) == kSearchEditId && HIWORD(wparam) == EN_SETFOCUS && search_edit_) {
+            search_focused_ = true;
+            search_caret_on_ = true;
+            SetTimer(hwnd_, kSearchCaretTimer, GetCaretBlinkTime(), nullptr);
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return 0;
+        }
+        if (LOWORD(wparam) == kSearchEditId && HIWORD(wparam) == EN_KILLFOCUS && search_edit_) {
+            search_focused_ = false;
+            search_caret_on_ = false;
+            KillTimer(hwnd_, kSearchCaretTimer);
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return 0;
+        }
         if (LOWORD(wparam) == kSearchEditId && HIWORD(wparam) == EN_CHANGE && search_edit_) {
             const int length = GetWindowTextLengthW(search_edit_);
             std::wstring value(static_cast<size_t>(length) + 1, L'\0');
@@ -3545,8 +5346,13 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
             value.resize(static_cast<size_t>(length));
             if (value != query_) {
                 query_ = std::move(value);
+                SyncSearchSelectionFromEdit();
+                search_caret_on_ = true;
                 ReloadItems();
                 ResizeToCurrentItems();
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            } else {
+                SyncSearchSelectionFromEdit();
                 InvalidateRect(hwnd_, nullptr, FALSE);
             }
             return 0;
@@ -3582,6 +5388,10 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
         }
         if (dragging_scrollbar_) {
             UpdateScrollDrag(point);
+            return 0;
+        }
+        if (search_selecting_) {
+            SetSearchSelection(search_selection_anchor_, SearchTextIndexFromPoint(point));
             return 0;
         }
         if (Contains(BuildPopupSearchLayoutForWidth(popup_logical_width_).box, point)) {
@@ -3637,8 +5447,13 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
             hover_item_index_ = action == UiAction::None && !popover_hovered ? item : -1;
             hover_point_ = point;
             if (hover_target_changed) {
-                hover_progress_ = 0.0f;
-                SetTimer(hwnd_, kHoverTimer, 16, nullptr);
+                if (PopupShouldAnimateHoverWhileResizing(resizing_window_)) {
+                    hover_progress_ = 0.0f;
+                    SetTimer(hwnd_, kHoverTimer, 16, nullptr);
+                } else {
+                    hover_progress_ = 1.0f;
+                    KillTimer(hwnd_, kHoverTimer);
+                }
                 InvalidateRect(hwnd_, nullptr, FALSE);
             }
         } else if (point.x != hover_point_.x || point.y != hover_point_.y) {
@@ -3667,6 +5482,12 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
         const bool was_left_interaction = window_drag || mouse_down_started_inside_popup_ || left_button_was_down_;
         if (window_drag) {
             EndWindowMoveOrResize();
+            return 0;
+        }
+        if (search_selecting_) {
+            EndSearchSelectionDrag();
+            mouse_down_started_inside_popup_ = false;
+            left_button_was_down_ = false;
             return 0;
         }
         mouse_down_started_inside_popup_ = false;
@@ -3698,6 +5519,7 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
             pressed_item_index_ = -1;
             long_press_selected_ = false;
             dragging_scrollbar_ = false;
+            search_selecting_ = false;
             if (left_button_down && (moving_window_ || resizing_window_ ||
                                      mouse_down_started_inside_popup_ || left_button_was_down_)) {
                 mouse_down_started_inside_popup_ = true;
@@ -3730,32 +5552,7 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
                 InvalidateRect(hwnd_, nullptr, FALSE);
                 return 0;
             }
-            Hide();
-            return 0;
-        }
-        if (pending_favorite_group_delete_) {
-            if (wparam == VK_RETURN) {
-                const auto confirm = FavoriteGroupDeleteConfirmPanelRect();
-                const auto delete_button = FavoriteGroupDeleteConfirmDeleteRect(confirm);
-                const POINT point{
-                    static_cast<LONG>((delete_button.left + delete_button.right) * 0.5f),
-                    static_cast<LONG>((delete_button.top + delete_button.bottom) * 0.5f),
-                };
-                HandleFavoriteGroupDeleteConfirmClick(point);
-            }
-            return 0;
-        }
-        if (PopupSearchDeletesOnKeyDown(static_cast<unsigned>(wparam))) {
-            if (!PopupSearchAcceptsTextInput(search_focused_ && GetFocus() == hwnd_)) {
-                return 0;
-            }
-            if (!query_.empty()) {
-                query_.pop_back();
-                scroll_offset_ = 0;
-                ReloadItems();
-                ResizeToCurrentItems();
-                InvalidateRect(hwnd_, nullptr, FALSE);
-            }
+            Hide(L"escape");
             return 0;
         }
         if (wparam == VK_DOWN) {
@@ -3809,18 +5606,28 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
                 InvalidateRect(hwnd_, nullptr, FALSE);
                 return 0;
             }
+            if (PopupShouldActivateForSearchFocus(true, search_edit_ != nullptr)) {
+                ActivatePopupWindow(hwnd_);
+            }
+            FocusSearchEdit(search_edit_);
             search_focused_ = true;
             search_caret_on_ = true;
-            SetFocus(hwnd_);
+            search_selecting_ = true;
+            const size_t hit_index = SearchTextIndexFromPoint(point);
+            SetSearchSelection(hit_index, hit_index);
+            SetCapture(hwnd_);
+            BeginTransientHideSuppression();
+            KillTimer(hwnd_, kOutsideClickTimer);
             SetTimer(hwnd_, kSearchCaretTimer, GetCaretBlinkTime(), nullptr);
-            UpdateSearchImePosition();
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
         }
         search_focused_ = false;
         search_caret_on_ = false;
+        search_selecting_ = false;
         KillTimer(hwnd_, kSearchCaretTimer);
-        if (reinterpret_cast<HWND>(GetFocus()) != hwnd_) {
+        if (PopupShouldFocusWindowForPointerPress(false) && reinterpret_cast<HWND>(GetFocus()) != hwnd_ &&
+            reinterpret_cast<HWND>(GetFocus()) != search_edit_) {
             SetFocus(hwnd_);
         }
         if (HandleFavoriteGroupDeleteConfirmClick(point)) {
@@ -3847,7 +5654,7 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
             return 0;
         }
         case UiAction::Close:
-            Hide();
+            Hide(L"close-button");
             return 0;
         case UiAction::Pin:
             pinned_open_ = !pinned_open_;
@@ -3944,17 +5751,6 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
         }
         return 0;
     }
-    case WM_KILLFOCUS:
-        if (reinterpret_cast<HWND>(wparam) == search_edit_ || IsChild(hwnd_, reinterpret_cast<HWND>(wparam))) {
-            return 0;
-        }
-        search_focused_ = false;
-        search_caret_on_ = false;
-        KillTimer(hwnd_, kSearchCaretTimer);
-        if (!prompt_open_) {
-            HideIfInactive(reinterpret_cast<HWND>(wparam));
-        }
-        return 0;
     }
     return DefWindowProcW(hwnd_, message, wparam, lparam);
 }

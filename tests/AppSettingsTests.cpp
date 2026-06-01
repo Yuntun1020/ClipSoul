@@ -20,7 +20,16 @@ TEST_CASE(AppSettingsDefaultsUseAltC) {
 }
 
 TEST_CASE(AppVersionLabelIsCurrentRelease) {
-    REQUIRE_EQ(std::wstring(ClipSoul::kClipSoulVersion), std::wstring(L"v1.1.3"));
+    REQUIRE_EQ(std::wstring(ClipSoul::kClipSoulVersion), std::wstring(L"v1.2.0"));
+}
+
+TEST_CASE(AppProjectUrlPointsToOpenSourceRepository) {
+    REQUIRE_EQ(std::wstring(ClipSoul::kClipSoulProjectUrl), std::wstring(L"https://github.com/Yuntun1020/ClipSoul"));
+}
+
+TEST_CASE(AppProjectDisplayUrlShowsFullRepositoryPath) {
+    REQUIRE_EQ(std::wstring(ClipSoul::kClipSoulProjectDisplayUrl), std::wstring(L"github.com/Yuntun1020/ClipSoul"));
+    REQUIRE_EQ(ClipSoul::kClipSoulProjectDisplayUrl.size(), std::wstring_view(L"github.com/Yuntun1020/ClipSoul").size());
 }
 
 TEST_CASE(AppSettingsDefaultsMigrateLegacyCtrlShiftV) {

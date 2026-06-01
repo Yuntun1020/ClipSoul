@@ -43,6 +43,36 @@ TEST_CASE(HistoryStoreDeduplicatesConsecutiveCopies) {
     REQUIRE_EQ(items.front().text, std::wstring(L"alpha"));
 }
 
+TEST_CASE(HistoryStoreDeduplicatesRepeatedCopiesAcrossHistory) {
+    ClipSoul::HistoryStore store;
+    store.Open(TempDbPath(L"dedupe-across-history.db"));
+
+    REQUIRE(store.Add(TextContent(L"alpha")));
+    REQUIRE(store.Add(TextContent(L"beta")));
+    REQUIRE(store.Add(TextContent(L"alpha")));
+
+    const auto items = store.Recent(10, L"");
+    REQUIRE_EQ(items.size(), static_cast<size_t>(2));
+    REQUIRE_EQ(items[0].text, std::wstring(L"beta"));
+    REQUIRE_EQ(items[1].text, std::wstring(L"alpha"));
+}
+
+TEST_CASE(HistoryStoreAllowsSameHashWhenClipboardKindDiffers) {
+    ClipSoul::HistoryStore store;
+    store.Open(TempDbPath(L"dedupe-kind.db"));
+
+    auto link = TextContent(L"https://example.com");
+    link.kind = ClipSoul::ClipboardKind::Link;
+
+    REQUIRE(store.Add(TextContent(L"https://example.com")));
+    REQUIRE(store.Add(link));
+
+    const auto items = store.Recent(10, L"");
+    REQUIRE_EQ(items.size(), static_cast<size_t>(2));
+    REQUIRE_EQ(items[0].kind, ClipSoul::ClipboardKind::Link);
+    REQUIRE_EQ(items[1].kind, ClipSoul::ClipboardKind::Text);
+}
+
 TEST_CASE(HistoryStoreEnforcesConfiguredLimit) {
     ClipSoul::HistoryStore store;
     store.Open(TempDbPath(L"limit.db"));
@@ -77,6 +107,23 @@ TEST_CASE(HistoryStoreSearchesTextAndFileNames) {
     const auto items = store.Recent(10, L"proposal");
     REQUIRE_EQ(items.size(), static_cast<size_t>(1));
     REQUIRE_EQ(items.front().kind, ClipSoul::ClipboardKind::Files);
+}
+
+TEST_CASE(HistoryStoreSearchesNotes) {
+    ClipSoul::HistoryStore store;
+    store.Open(TempDbPath(L"search-notes.db"));
+
+    REQUIRE(store.Add(TextContent(L"invoice alpha")));
+    REQUIRE(store.Add(TextContent(L"plain beta")));
+
+    const auto items = store.Query(ClipSoul::HistoryQuery{});
+    REQUIRE_EQ(items.size(), static_cast<size_t>(2));
+    REQUIRE(store.SetNote(items.front().id, L"客户报价模板"));
+
+    const auto note_matches = store.Recent(10, L"报价");
+    REQUIRE_EQ(note_matches.size(), static_cast<size_t>(1));
+    REQUIRE_EQ(note_matches.front().text, std::wstring(L"plain beta"));
+    REQUIRE_EQ(note_matches.front().note, std::wstring(L"客户报价模板"));
 }
 
 TEST_CASE(HistoryStoreClearRemovesAllEntries) {
@@ -378,6 +425,32 @@ TEST_CASE(HistoryStorePinnedItemsSortBeforeRecentItems) {
     const auto after = store.Query(ClipSoul::HistoryQuery{});
     REQUIRE_EQ(after.front().text, std::wstring(L"older"));
     REQUIRE(after.front().is_pinned);
+}
+
+TEST_CASE(HistoryStoreSwapsSortOrderForAdjacentHistoryItems) {
+    ClipSoul::HistoryStore store;
+    store.Open(TempDbPath(L"sort-swap.db"));
+
+    REQUIRE(store.Add(TextContent(L"one")));
+    REQUIRE(store.Add(TextContent(L"two")));
+    REQUIRE(store.Add(TextContent(L"three")));
+
+    auto before = store.Query(ClipSoul::HistoryQuery{});
+    REQUIRE_EQ(before[0].text, std::wstring(L"three"));
+    REQUIRE_EQ(before[1].text, std::wstring(L"two"));
+    REQUIRE_EQ(before[2].text, std::wstring(L"one"));
+
+    REQUIRE(store.SwapSortOrder(before[1].id, before[0].id));
+    auto moved_up = store.Query(ClipSoul::HistoryQuery{});
+    REQUIRE_EQ(moved_up[0].text, std::wstring(L"two"));
+    REQUIRE_EQ(moved_up[1].text, std::wstring(L"three"));
+    REQUIRE_EQ(moved_up[2].text, std::wstring(L"one"));
+
+    REQUIRE(store.SwapSortOrder(moved_up[1].id, moved_up[2].id));
+    const auto moved_down = store.Query(ClipSoul::HistoryQuery{});
+    REQUIRE_EQ(moved_down[0].text, std::wstring(L"two"));
+    REQUIRE_EQ(moved_down[1].text, std::wstring(L"one"));
+    REQUIRE_EQ(moved_down[2].text, std::wstring(L"three"));
 }
 
 TEST_CASE(HistoryStoreFiltersByDateRange) {

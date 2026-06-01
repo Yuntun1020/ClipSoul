@@ -107,6 +107,7 @@ public:
     bool SetFavoriteGroup(int64_t id, std::optional<int64_t> group_id);
     bool DeleteFavoriteGroup(int64_t group_id);
     bool SetNote(int64_t id, std::wstring_view note);
+    bool SwapSortOrder(int64_t first_id, int64_t second_id);
     bool Delete(int64_t id);
     void Clear();
     void EnforceLimit();
