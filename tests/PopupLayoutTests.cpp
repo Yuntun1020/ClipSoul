@@ -243,8 +243,69 @@ TEST_CASE(PopupHeaderAndSearchControlsAdaptToCurrentWindowWidth) {
     REQUIRE_EQ(header.close.right, static_cast<float>(resized_width - 16));
     REQUIRE_EQ(header.pin.right, static_cast<float>(resized_width - 48));
     REQUIRE_EQ(search.box.right, static_cast<float>(resized_width - metrics.margin));
-    REQUIRE_EQ(search.text.right, static_cast<float>(resized_width - metrics.margin - 12));
+    REQUIRE_EQ(search.text.right, static_cast<float>(resized_width - metrics.margin - 32));
     REQUIRE(!ClipSoul::RectsOverlap(header.pin, header.close));
+}
+
+TEST_CASE(PopupSearchClearButtonLayoutAndHitTest) {
+    const auto metrics = ClipSoul::PopupMetrics();
+    const auto layout = ClipSoul::BuildPopupSearchLayout();
+
+    // clear_button 在 box 内部
+    REQUIRE(layout.clear_button.left >= layout.box.left);
+    REQUIRE(layout.clear_button.right <= layout.box.right);
+    REQUIRE(layout.clear_button.top >= layout.box.top);
+    REQUIRE(layout.clear_button.bottom <= layout.box.bottom);
+
+    // clear_button 尺寸合理
+    REQUIRE_EQ(layout.clear_button.Width(), 16.0f);
+    REQUIRE_EQ(layout.clear_button.Height(), 16.0f);
+
+    // clear_button 在 text 右侧
+    REQUIRE(layout.clear_button.left >= layout.text.right);
+
+    // 不与 icon 重叠
+    REQUIRE(layout.clear_button.left > layout.icon.right);
+
+    // HitTest: 有 query 时点击 clear_button 返回 true
+    POINT inside{static_cast<LONG>(layout.clear_button.left + 5.0f),
+                 static_cast<LONG>(layout.clear_button.top + 5.0f)};
+    REQUIRE(ClipSoul::PopupSearchClearButtonHitTest(layout, true, inside));
+
+    // HitTest: 无 query 时点击 clear_button 返回 false
+    REQUIRE(!ClipSoul::PopupSearchClearButtonHitTest(layout, false, inside));
+
+    // HitTest: 点击 box 内但 clear_button 外的位置返回 false
+    POINT outside_box{static_cast<LONG>(layout.box.left + 5.0f),
+                      static_cast<LONG>(layout.box.top + 5.0f)};
+    REQUIRE(!ClipSoul::PopupSearchClearButtonHitTest(layout, true, outside_box));
+
+    // CenterDips 返回正确中心点
+    POINT center = ClipSoul::PopupSearchClearButtonCenterDips(layout);
+    REQUIRE_EQ(center.x, static_cast<LONG>(std::lround((layout.clear_button.left + layout.clear_button.right) * 0.5f)));
+    REQUIRE_EQ(center.y, static_cast<LONG>(std::lround((layout.clear_button.top + layout.clear_button.bottom) * 0.5f)));
+
+    // Opacity
+    REQUIRE_EQ(ClipSoul::PopupSearchClearButtonOpacity(true), 0.95f);
+    REQUIRE_EQ(ClipSoul::PopupSearchClearButtonOpacity(false), 0.7f);
+}
+
+TEST_CASE(PopupSearchClearButtonAdaptsToWindowWidth) {
+    const auto metrics = ClipSoul::PopupMetrics();
+
+    // 默认宽度
+    const auto default_layout = ClipSoul::BuildPopupSearchLayout();
+    REQUIRE(default_layout.clear_button.right <= default_layout.box.right);
+
+    // 加宽
+    const int wider = metrics.width + 100;
+    const auto wider_layout = ClipSoul::BuildPopupSearchLayoutForWidth(wider);
+    REQUIRE(wider_layout.clear_button.right <= wider_layout.box.right);
+    REQUIRE_EQ(wider_layout.clear_button.Width(), 16.0f);
+
+    // 最小宽度
+    const auto min_layout = ClipSoul::BuildPopupSearchLayoutForWidth(1);
+    REQUIRE(min_layout.clear_button.right <= min_layout.box.right);
 }
 
 TEST_CASE(PopupSearchDisplayTextShowsQueryOrPlaceholder) {

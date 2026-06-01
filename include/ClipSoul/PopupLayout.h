@@ -107,6 +107,7 @@ struct PopupSearchLayout {
     UiRect box;
     UiRect icon;
     UiRect text;
+    UiRect clear_button;
 };
 
 struct PopupSearchSelectionRange {
@@ -315,6 +316,9 @@ SIZE PopupPreviewDecodeSize(unsigned source_width, unsigned source_height, unsig
 float PopupSearchFocusProgress(bool focused, bool hovered, float hover_progress);
 float ClampPopupSearchCaretX(const PopupSearchLayout& layout, float measured_text_width);
 POINT PopupSearchImeAnchorDips(const PopupSearchLayout& layout, float measured_text_width);
+bool PopupSearchClearButtonHitTest(const PopupSearchLayout& layout, bool has_query, POINT point);
+POINT PopupSearchClearButtonCenterDips(const PopupSearchLayout& layout);
+float PopupSearchClearButtonOpacity(bool hovered);
 float PopupSearchTop();
 float PopupToolbarTop();
 float PopupTabsTop();

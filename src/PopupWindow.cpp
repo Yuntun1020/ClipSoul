@@ -4126,6 +4126,17 @@ void PopupWindow::Paint() {
                                  D2D1::Point2F(caret_x, search_layout.text.bottom - 3.0f),
                                  brush, 1.0f);
     }
+    if (!query_.empty()) {
+        const bool clear_hovered = hover_action_ == UiAction::ClearSearch ||
+                                   PopupSearchClearButtonHitTest(search_layout, true, hover_point_);
+        const float clear_opacity = clear_hovered ? 0.95f : 0.82f;
+        brush->SetColor(D2D1::ColorF(palette.muted, clear_opacity));
+        const auto center = PopupSearchClearButtonCenterDips(search_layout);
+        render_target_->DrawLine(D2D1::Point2F(static_cast<float>(center.x) - 4.0f, static_cast<float>(center.y) - 4.0f),
+                                 D2D1::Point2F(static_cast<float>(center.x) + 4.0f, static_cast<float>(center.y) + 4.0f), brush, 1.8f);
+        render_target_->DrawLine(D2D1::Point2F(static_cast<float>(center.x) + 4.0f, static_cast<float>(center.y) - 4.0f),
+                                 D2D1::Point2F(static_cast<float>(center.x) - 4.0f, static_cast<float>(center.y) + 4.0f), brush, 1.8f);
+    }
     auto drawToolbarIcon = [&](const UiRect& rect, wchar_t icon, bool active = false, bool has_chevron = false) {
         IconId icon_id = IconId::Filter;
         if (icon == L'F') icon_id = ToWindowIcon(PopupFilterIconSlot(active));
@@ -5061,7 +5072,13 @@ PopupWindow::UiAction PopupWindow::HitTestAction(POINT point) const {
     if (HitTestExpandItem(point) >= 0) {
         return UiAction::ExpandItem;
     }
-    if (Contains(BuildPopupSearchLayoutForWidth(popup_logical_width_).box, point)) return UiAction::Search;
+    if (Contains(BuildPopupSearchLayoutForWidth(popup_logical_width_).box, point)) {
+        const auto search_layout = BuildPopupSearchLayoutForWidth(popup_logical_width_);
+        if (PopupSearchClearButtonHitTest(search_layout, !query_.empty(), point)) {
+            return UiAction::ClearSearch;
+        }
+        return UiAction::Search;
+    }
     const auto header = BuildPopupHeaderLayoutForWidth(popup_logical_width_);
     if (Contains(header.close, point)) return UiAction::Close;
     if (Contains(header.pin, point)) return UiAction::Pin;
@@ -5267,7 +5284,12 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
                 return TRUE;
             }
             if (Contains(BuildPopupSearchLayoutForWidth(popup_logical_width_).box, logical_point)) {
-                SetCursor(LoadCursorW(nullptr, IDC_IBEAM));
+                const auto search_layout = BuildPopupSearchLayoutForWidth(popup_logical_width_);
+                if (PopupSearchClearButtonHitTest(search_layout, !query_.empty(), logical_point)) {
+                    SetCursor(LoadCursorW(nullptr, IDC_HAND));
+                } else {
+                    SetCursor(LoadCursorW(nullptr, IDC_IBEAM));
+                }
                 return TRUE;
             }
         }
@@ -5395,7 +5417,12 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
             return 0;
         }
         if (Contains(BuildPopupSearchLayoutForWidth(popup_logical_width_).box, point)) {
-            SetCursor(LoadCursorW(nullptr, IDC_IBEAM));
+            const auto search_layout = BuildPopupSearchLayoutForWidth(popup_logical_width_);
+            if (PopupSearchClearButtonHitTest(search_layout, !query_.empty(), point)) {
+                SetCursor(LoadCursorW(nullptr, IDC_HAND));
+            } else {
+                SetCursor(LoadCursorW(nullptr, IDC_IBEAM));
+            }
         }
         if (!tracking_mouse_) {
             TRACKMOUSEEVENT track{sizeof(track), TME_LEAVE, hwnd_, 0};
@@ -5600,6 +5627,15 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
                                  static_cast<float>(popup_logical_width_ - metrics.margin),
                                  search_top + static_cast<float>(metrics.search_height)};
         if (Contains(search_rect, point)) {
+            const auto search_layout = BuildPopupSearchLayoutForWidth(popup_logical_width_);
+            if (PopupSearchClearButtonHitTest(search_layout, !query_.empty(), point)) {
+                query_.clear();
+                SetWindowTextW(search_edit_, L"");
+                ReloadItems();
+                ResizeToCurrentItems();
+                InvalidateRect(hwnd_, nullptr, FALSE);
+                return 0;
+            }
             if (pending_favorite_group_delete_) {
                 pending_favorite_group_delete_.reset();
                 hover_delete_confirm_target_ = PopupFavoriteGroupDeleteConfirmTarget::None;
@@ -5724,6 +5760,13 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
             PromptAddFavoritePhrase();
             return 0;
         case UiAction::Search:
+            return 0;
+        case UiAction::ClearSearch:
+            query_.clear();
+            SetWindowTextW(search_edit_, L"");
+            ReloadItems();
+            ResizeToCurrentItems();
+            InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
         case UiAction::None:
             break;
