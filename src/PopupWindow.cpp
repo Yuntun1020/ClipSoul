@@ -2303,6 +2303,8 @@ bool PopupWindow::Create(HWND owner) {
         const WPARAM show_when_focused = PopupNativeSearchCueBannerShowsWhenFocused() ? TRUE : FALSE;
                 SendMessageW(search_edit_, EM_SETCUEBANNER, show_when_focused,
                      reinterpret_cast<LPARAM>(L"\u641c\u7d22\u5386\u53f2\u8bb0\u5f55"));
+        SetWindowSubclass(search_edit_, SearchEditSubclassProc, 0,
+                          reinterpret_cast<DWORD_PTR>(this));
         UpdateSearchEditBounds();
     }
     ApplyBackdrop();
@@ -4099,7 +4101,8 @@ void PopupWindow::Paint() {
                                 brush, 1.45f);
     render_target_->DrawLine(D2D1::Point2F(search_icon_x + 3.8f, search_icon_y + 3.0f),
                              D2D1::Point2F(search_icon_x + 8.0f, search_icon_y + 7.0f), brush, 1.45f);
-    const auto search_text = PopupSearchDisplayText(query_);
+    const bool has_composition = PopupSearchHasComposition(composing_, composition_text_);
+    const auto search_text = PopupSearchCompositionDisplayText(query_, composing_, composition_text_);
     const auto search_selection = CurrentSearchSelection();
     if (PopupSearchShouldDrawSelection(search_active, !query_.empty(), search_selection)) {
         const float selection_left =
@@ -4114,11 +4117,31 @@ void PopupWindow::Paint() {
                 brush);
         }
     }
-    brush->SetColor(query_.empty() ? D2D1::ColorF(palette.muted, 0.46f) : D2D1::ColorF(palette.text, 0.94f));
-    render_target_->DrawTextW(search_text.data(), static_cast<UINT32>(search_text.size()), small_format_,
-                              Rect(search_layout.text), brush);
+    brush->SetColor(PopupSearchCompositionTextColor(has_composition, query_)
+        ? D2D1::ColorF(palette.text, 0.94f)
+        : D2D1::ColorF(palette.muted, 0.46f));
+    if (has_composition && dwrite_factory_ && small_format_) {
+        const auto committed_text = std::wstring(query_);
+        IDWriteTextLayout* text_layout = nullptr;
+        if (SUCCEEDED(dwrite_factory_->CreateTextLayout(
+                search_text.data(), static_cast<UINT32>(search_text.size()),
+                small_format_, search_layout.text.Width(), search_layout.text.Height(),
+                &text_layout))) {
+            DWRITE_TEXT_RANGE range{static_cast<UINT32>(committed_text.size()),
+                                   static_cast<UINT32>(composition_text_.size())};
+            text_layout->SetUnderline(TRUE, range);
+            render_target_->DrawTextLayout(
+                D2D1::Point2F(search_layout.text.left, search_layout.text.top),
+                text_layout, brush);
+            text_layout->Release();
+        }
+    } else {
+        render_target_->DrawTextW(search_text.data(), static_cast<UINT32>(search_text.size()),
+                                  small_format_, Rect(search_layout.text), brush);
+    }
     if (PopupSearchCaretVisible(search_active, search_caret_on_) &&
-        !PopupSearchHasSelection(search_selection)) {
+        !PopupSearchHasSelection(search_selection) &&
+        PopupSearchCaretVisibleDuringComposition(has_composition)) {
         const float measured_text_width = SearchCaretOffsetDips();
         const float caret_x = ClampPopupSearchCaretX(search_layout, measured_text_width);
         brush->SetColor(D2D1::ColorF(palette.accent, 0.82f));
@@ -5796,6 +5819,47 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
     }
     }
     return DefWindowProcW(hwnd_, message, wparam, lparam);
+}
+
+LRESULT CALLBACK PopupWindow::SearchEditSubclassProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam, UINT_PTR, DWORD_PTR ref_data) {
+    auto* self = reinterpret_cast<PopupWindow*>(ref_data);
+    switch (message) {
+    case WM_IME_STARTCOMPOSITION: {
+        self->composing_ = true;
+        self->composition_text_.clear();
+        InvalidateRect(self->hwnd_, nullptr, FALSE);
+        break;
+    }
+    case WM_IME_COMPOSITION: {
+        HIMC himc = ImmGetContext(hwnd);
+        if (himc) {
+            if (lparam & GCS_COMPSTR) {
+                const int len = ImmGetCompositionStringW(himc, GCS_COMPSTR, nullptr, 0);
+                if (len > 0) {
+                    self->composition_text_.resize(static_cast<size_t>(len));
+                    ImmGetCompositionStringW(himc, GCS_COMPSTR,
+                        self->composition_text_.data(), static_cast<DWORD>(len) * sizeof(wchar_t));
+                } else {
+                    self->composition_text_.clear();
+                }
+            }
+            if (lparam & GCS_RESULTSTR) {
+                self->composition_text_.clear();
+                self->composing_ = false;
+            }
+            ImmReleaseContext(hwnd, himc);
+        }
+        InvalidateRect(self->hwnd_, nullptr, FALSE);
+        break;
+    }
+    case WM_IME_ENDCOMPOSITION: {
+        self->composing_ = false;
+        self->composition_text_.clear();
+        InvalidateRect(self->hwnd_, nullptr, FALSE);
+        break;
+    }
+    }
+    return DefSubclassProc(hwnd, message, wparam, lparam);
 }
 
 LRESULT CALLBACK PopupWindow::WindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {

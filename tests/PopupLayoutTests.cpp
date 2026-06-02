@@ -320,6 +320,22 @@ TEST_CASE(PopupSearchDisplayTextShowsQueryOrPlaceholder) {
     REQUIRE(ClipSoul::PopupSearchShouldUpdateImePosition(true, false));
     REQUIRE(!ClipSoul::PopupSearchShouldUpdateImePosition(false, false));
     REQUIRE(!ClipSoul::PopupSearchShouldUpdateImePosition(true, true));
+    REQUIRE(ClipSoul::PopupSearchHasComposition(true, L"abc"));
+    REQUIRE(!ClipSoul::PopupSearchHasComposition(true, L""));
+    REQUIRE(!ClipSoul::PopupSearchHasComposition(false, L"abc"));
+    REQUIRE(!ClipSoul::PopupSearchHasComposition(false, L""));
+    REQUIRE_EQ(ClipSoul::PopupSearchCompositionDisplayText(L"", true, L"abc"), std::wstring(L"abc"));
+    REQUIRE_EQ(ClipSoul::PopupSearchCompositionDisplayText(L"hi", true, L"bc"), std::wstring(L"hibc"));
+    REQUIRE_EQ(std::wstring(ClipSoul::PopupSearchCompositionDisplayText(L"", false, L"")),
+               std::wstring(L"搜索历史记录..."));
+    REQUIRE_EQ(std::wstring(ClipSoul::PopupSearchCompositionDisplayText(L"test", false, L"")),
+               std::wstring(L"test"));
+    REQUIRE(ClipSoul::PopupSearchCompositionTextColor(true, L""));
+    REQUIRE(ClipSoul::PopupSearchCompositionTextColor(true, L"abc"));
+    REQUIRE(ClipSoul::PopupSearchCompositionTextColor(false, L"abc"));
+    REQUIRE(!ClipSoul::PopupSearchCompositionTextColor(false, L""));
+    REQUIRE(ClipSoul::PopupSearchCaretVisibleDuringComposition(false));
+    REQUIRE(!ClipSoul::PopupSearchCaretVisibleDuringComposition(true));
     REQUIRE(ClipSoul::PopupSearchDeletesOnChar(L'\b'));
     REQUIRE(!ClipSoul::PopupSearchDeletesOnKeyDown(VK_BACK));
     REQUIRE(ClipSoul::PopupSearchAppendsChar(L'a'));

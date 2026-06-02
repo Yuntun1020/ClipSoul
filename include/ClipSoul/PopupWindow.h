@@ -53,6 +53,7 @@ private:
     enum class UiAction {
         None,
         Search,
+        ClearSearch,
         Filter,
         MultiSelect,
         ClearAll,
@@ -175,10 +176,12 @@ private:
     void DebugLog(std::wstring_view message) const;
 
     static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam);
+    static LRESULT CALLBACK SearchEditSubclassProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam, UINT_PTR id_ptr, DWORD_PTR ref_data);
 
     HINSTANCE instance_;
     HWND hwnd_ = nullptr;
     HWND search_edit_ = nullptr;
+    WNDPROC search_edit_prev_proc_ = nullptr;
     HWND paste_target_ = nullptr;
     HistoryStore& store_;
     PasteController& paste_controller_;
@@ -199,6 +202,8 @@ private:
     bool search_selecting_ = false;
     size_t search_selection_anchor_ = 0;
     size_t search_selection_caret_ = 0;
+    std::wstring composition_text_;
+    bool composing_ = false;
     bool moving_window_ = false;
     bool resizing_window_ = false;
     int resize_edges_ = 0;

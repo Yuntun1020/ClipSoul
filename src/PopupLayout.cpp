@@ -461,6 +461,25 @@ bool PopupSearchShouldUpdateImePosition(bool focused, bool updating_ime) {
     return focused && !updating_ime;
 }
 
+bool PopupSearchHasComposition(bool composing, const std::wstring& composition_text) {
+    return composing && !composition_text.empty();
+}
+
+std::wstring PopupSearchCompositionDisplayText(std::wstring_view query, bool composing, const std::wstring& composition_text) {
+    if (composing && !composition_text.empty()) {
+        return std::wstring(query) + composition_text;
+    }
+    return std::wstring(PopupSearchDisplayText(query));
+}
+
+bool PopupSearchCompositionTextColor(bool has_composition, std::wstring_view query) {
+    return has_composition || !query.empty();
+}
+
+bool PopupSearchCaretVisibleDuringComposition(bool has_composition) {
+    return !has_composition;
+}
+
 bool PopupSearchDeletesOnChar(wchar_t value) {
     return value == L'\b';
 }
