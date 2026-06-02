@@ -107,6 +107,7 @@ struct PopupSearchLayout {
     UiRect box;
     UiRect icon;
     UiRect text;
+    UiRect clear_button;
 };
 
 struct PopupSearchSelectionRange {
@@ -272,6 +273,10 @@ bool PopupFileCanUseImagePreview(std::wstring_view path);
 bool PopupSearchCaretVisible(bool focused, bool blink_on);
 bool PopupSearchAcceptsTextInput(bool focused);
 bool PopupSearchShouldUpdateImePosition(bool focused, bool updating_ime);
+bool PopupSearchHasComposition(bool composing, const std::wstring& composition_text);
+std::wstring PopupSearchCompositionDisplayText(std::wstring_view query, bool composing, const std::wstring& composition_text);
+bool PopupSearchCompositionTextColor(bool has_composition, std::wstring_view query);
+bool PopupSearchCaretVisibleDuringComposition(bool has_composition);
 bool PopupSearchDeletesOnChar(wchar_t value);
 bool PopupSearchDeletesOnKeyDown(unsigned virtual_key);
 bool PopupSearchAppendsChar(wchar_t value);
@@ -315,6 +320,9 @@ SIZE PopupPreviewDecodeSize(unsigned source_width, unsigned source_height, unsig
 float PopupSearchFocusProgress(bool focused, bool hovered, float hover_progress);
 float ClampPopupSearchCaretX(const PopupSearchLayout& layout, float measured_text_width);
 POINT PopupSearchImeAnchorDips(const PopupSearchLayout& layout, float measured_text_width);
+bool PopupSearchClearButtonHitTest(const PopupSearchLayout& layout, bool has_query, POINT point);
+POINT PopupSearchClearButtonCenterDips(const PopupSearchLayout& layout);
+float PopupSearchClearButtonOpacity(bool hovered);
 float PopupSearchTop();
 float PopupToolbarTop();
 float PopupTabsTop();

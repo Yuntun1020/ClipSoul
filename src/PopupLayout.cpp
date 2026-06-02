@@ -461,6 +461,25 @@ bool PopupSearchShouldUpdateImePosition(bool focused, bool updating_ime) {
     return focused && !updating_ime;
 }
 
+bool PopupSearchHasComposition(bool composing, const std::wstring& composition_text) {
+    return composing && !composition_text.empty();
+}
+
+std::wstring PopupSearchCompositionDisplayText(std::wstring_view query, bool composing, const std::wstring& composition_text) {
+    if (composing && !composition_text.empty()) {
+        return std::wstring(query) + composition_text;
+    }
+    return std::wstring(PopupSearchDisplayText(query));
+}
+
+bool PopupSearchCompositionTextColor(bool has_composition, std::wstring_view query) {
+    return has_composition || !query.empty();
+}
+
+bool PopupSearchCaretVisibleDuringComposition(bool has_composition) {
+    return !has_composition;
+}
+
 bool PopupSearchDeletesOnChar(wchar_t value) {
     return value == L'\b';
 }
@@ -648,6 +667,23 @@ POINT PopupSearchImeAnchorDips(const PopupSearchLayout& layout, float measured_t
     };
 }
 
+bool PopupSearchClearButtonHitTest(const PopupSearchLayout& layout, bool has_query, POINT point) {
+    if (!has_query) return false;
+    return point.x >= layout.clear_button.left && point.x <= layout.clear_button.right &&
+           point.y >= layout.clear_button.top && point.y <= layout.clear_button.bottom;
+}
+
+POINT PopupSearchClearButtonCenterDips(const PopupSearchLayout& layout) {
+    return POINT{
+        static_cast<LONG>(std::lround((layout.clear_button.left + layout.clear_button.right) * 0.5f)),
+        static_cast<LONG>(std::lround((layout.clear_button.top + layout.clear_button.bottom) * 0.5f)),
+    };
+}
+
+float PopupSearchClearButtonOpacity(bool hovered) {
+    return hovered ? 0.95f : 0.7f;
+}
+
 float PopupSearchTop() {
     return static_cast<float>(kMetrics.header_height + 8);
 }
@@ -693,7 +729,9 @@ PopupSearchLayout BuildPopupSearchLayoutForWidth(int logical_width) {
     layout.icon = Rect(static_cast<float>(kMetrics.margin + 14), top + 11.0f,
                        static_cast<float>(kMetrics.margin + 30), top + 27.0f);
     layout.text = Rect(static_cast<float>(kMetrics.margin + 42), top + 8.0f,
-                       static_cast<float>(logical_width - kMetrics.margin - 12), top + 31.0f);
+                       static_cast<float>(logical_width - kMetrics.margin - 32), top + 31.0f);
+    layout.clear_button = Rect(static_cast<float>(logical_width - kMetrics.margin - 24), top + 11.0f,
+                               static_cast<float>(logical_width - kMetrics.margin - 8), top + 27.0f);
     return layout;
 }
 
