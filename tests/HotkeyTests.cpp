@@ -107,7 +107,7 @@ TEST_CASE(HotkeyClassifiesBareAltChords) {
     REQUIRE(!ClipSoul::HotkeyHookShouldSuppressRegisteredHotkeyEcho(false));
 
     REQUIRE(ClipSoul::HotkeyOpenPopupShouldHandleKey(VK_ESCAPE));
-    REQUIRE(ClipSoul::HotkeyOpenPopupShouldHandleKey(VK_RETURN));
+    REQUIRE(!ClipSoul::HotkeyOpenPopupShouldHandleKey(VK_RETURN));
     REQUIRE(ClipSoul::HotkeyOpenPopupShouldHandleKey(VK_UP));
     REQUIRE(ClipSoul::HotkeyOpenPopupShouldHandleKey(VK_DOWN));
     REQUIRE(!ClipSoul::HotkeyOpenPopupShouldHandleKey('A'));

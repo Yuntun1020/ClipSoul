@@ -41,6 +41,15 @@ constexpr int kProjectButtonLeft = 54;
 constexpr int kProjectButtonTop = 500;
 constexpr int kProjectButtonRight = 222;
 constexpr int kProjectButtonBottom = 544;
+constexpr int kLimitEditId = 6101;
+constexpr int kLimitBoxLeft = 162;
+constexpr int kLimitBoxTop = 78;
+constexpr int kLimitBoxRight = 276;
+constexpr int kLimitBoxBottom = 108;
+constexpr int kLimitEditLeft = 170;
+constexpr int kLimitEditTop = 82;
+constexpr int kLimitEditWidth = 98;
+constexpr int kLimitEditHeight = 22;
 constexpr int kTargetLimit = 9;
 constexpr int kTargetHotkeyReset = 10;
 constexpr int kTargetStorageBrowse = 11;
@@ -153,7 +162,7 @@ std::vector<std::wstring> WrapPathText(HDC dc, std::wstring_view value, int max_
 int HitTarget(int x, int y) {
     if (InRect(x, y, kCloseBoxLeft, kCloseBoxTop, kCloseBoxLeft + kCloseBoxSize, kCloseBoxTop + kCloseBoxSize)) return 1;
     if (InRect(x, y, kSaveLeft, kSaveTop, kSaveRight, kSaveBottom)) return 2;
-    if (InRect(x, y, 162, 78, 276, 108)) return kTargetLimit;
+    if (InRect(x, y, kLimitBoxLeft, kLimitBoxTop, kLimitBoxRight, kLimitBoxBottom)) return kTargetLimit;
     if (InRect(x, y, 222, 116, 288, 146)) return 3;
     if (InRect(x, y, 222, 150, 288, 180)) return 4;
     if (InRect(x, y, 150, 184, 276, 214)) return 5;
@@ -180,6 +189,13 @@ SettingsWindow::SettingsWindow(HINSTANCE instance, App& app)
     : instance_(instance),
       app_(app) {}
 
+SettingsWindow::~SettingsWindow() {
+    if (limit_edit_brush_) {
+        DeleteObject(limit_edit_brush_);
+        limit_edit_brush_ = nullptr;
+    }
+}
+
 bool SettingsWindow::Create(HWND owner) {
     WNDCLASSW wc{};
     wc.lpfnWndProc = SettingsWindow::WindowProc;
@@ -189,11 +205,22 @@ bool SettingsWindow::Create(HWND owner) {
     RegisterClassW(&wc);
 
     hwnd_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, kSettingsClass, L"ClipSoul 设置",
-                            WS_POPUP, CW_USEDEFAULT, CW_USEDEFAULT, kSettingsWidth, kSettingsHeight,
+                            WS_POPUP | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, kSettingsWidth, kSettingsHeight,
                             owner, nullptr, instance_, this);
     if (!hwnd_) {
         return false;
     }
+
+    limit_edit_ = CreateWindowExW(0, L"EDIT", L"",
+                                  WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_NUMBER | ES_CENTER | ES_AUTOHSCROLL,
+                                  kLimitEditLeft, kLimitEditTop, kLimitEditWidth, kLimitEditHeight,
+                                  hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kLimitEditId)),
+                                  instance_, nullptr);
+    if (!limit_edit_) {
+        return false;
+    }
+    SendMessageW(limit_edit_, EM_SETLIMITTEXT, 4, 0);
+    SendMessageW(limit_edit_, WM_SETFONT, reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)), TRUE);
 
     ApplyBackdrop();
     LoadToControls();
@@ -213,6 +240,10 @@ void SettingsWindow::Show() {
 void SettingsWindow::LoadToControls() {
     const auto settings = app_.Settings();
     limit_text_ = std::to_wstring(settings.history_limit);
+    if (limit_edit_) {
+        SetWindowTextW(limit_edit_, limit_text_.c_str());
+        SendMessageW(limit_edit_, EM_SETSEL, 0, -1);
+    }
     storage_path_ = app_.StorageDirectory().wstring();
     storage_save_failed_ = false;
     paused_ = settings.paused;
@@ -225,13 +256,20 @@ void SettingsWindow::LoadToControls() {
     popup_resizable_ = settings.popup_resizable;
     capturing_hotkey_ = false;
     capturing_continuous_paste_hotkey_ = false;
-    editing_limit_ = false;
-    replace_limit_on_next_digit_ = false;
     hotkey_conflict_ = false;
     continuous_paste_hotkey_conflict_ = false;
 }
 
 bool SettingsWindow::SaveFromControls() {
+    if (limit_edit_) {
+        const int length = GetWindowTextLengthW(limit_edit_);
+        std::wstring value(static_cast<size_t>(length) + 1, L'\0');
+        if (length > 0) {
+            GetWindowTextW(limit_edit_, value.data(), length + 1);
+        }
+        value.resize(static_cast<size_t>(length));
+        limit_text_ = value;
+    }
     auto settings = app_.Settings();
     hotkey_conflict_ = !HotkeyAvailableForSelection(hotkey_modifiers_, hotkey_vk_, false);
     continuous_paste_hotkey_conflict_ =
@@ -428,16 +466,17 @@ void SettingsWindow::Paint() {
                       Mix(border_color, accent_color, hover * 0.38f));
     };
 
-    DrawRoundRect(dc, 162, 78, 276, 108, 10,
-                  editing_limit_ ? Mix(search_fill, dark ? RGB(54, 63, 77) : RGB(244, 255, 253), 0.65f)
-                                 : (hover_target_ == kTargetLimit
-                                        ? Mix(search_fill, dark ? RGB(54, 63, 77) : RGB(244, 255, 253),
-                                              hover_progress_ * 0.45f)
-                                        : search_fill),
-                  editing_limit_ ? accent_color
-                                 : (hover_target_ == kTargetLimit
-                                        ? Mix(border_color, accent_color, hover_progress_ * 0.38f)
-                                        : border_color));
+    const bool limit_focused = limit_edit_ && GetFocus() == limit_edit_;
+    DrawRoundRect(dc, kLimitBoxLeft, kLimitBoxTop, kLimitBoxRight, kLimitBoxBottom, 10,
+                  limit_focused ? Mix(search_fill, dark ? RGB(54, 63, 77) : RGB(244, 255, 253), 0.65f)
+                                : (hover_target_ == kTargetLimit
+                                       ? Mix(search_fill, dark ? RGB(54, 63, 77) : RGB(244, 255, 253),
+                                             hover_progress_ * 0.45f)
+                                       : search_fill),
+                  limit_focused ? accent_color
+                                : (hover_target_ == kTargetLimit
+                                       ? Mix(border_color, accent_color, hover_progress_ * 0.38f)
+                                       : border_color));
     hover_rect(3, 222, 116, 288, 146, 15);
     hover_rect(4, 222, 150, 288, 180, 15);
     hover_rect(kTargetPopupResizable, 222, 390, 266, 420, 15);
@@ -495,7 +534,6 @@ void SettingsWindow::Paint() {
     TextOutW(dc, 38, 264, L"\u5b58\u50a8\u4f4d\u7f6e", 4);
     TextOutW(dc, 38, 334, L"主题颜色", 4);
     TextOutW(dc, 38, 394, L"窗口缩放", 4);
-    TextOutW(dc, 188, 85, limit_text_.c_str(), static_cast<int>(limit_text_.size()));
     const auto hotkey = capturing_hotkey_ && !capturing_continuous_paste_hotkey_
                             ? std::wstring(L"按下新热键")
                             : FormatHotkey(hotkey_modifiers_, hotkey_vk_);
@@ -592,26 +630,6 @@ LRESULT SettingsWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam
         return 0;
     case WM_ERASEBKGND:
         return 1;
-    case WM_CHAR:
-        if (capturing_hotkey_) {
-            return 0;
-        }
-        if (!editing_limit_) {
-            return 0;
-        }
-        if (wparam == VK_BACK) {
-            if (!limit_text_.empty()) {
-                limit_text_.pop_back();
-            }
-        } else if (wparam >= L'0' && wparam <= L'9' && limit_text_.size() < 4) {
-            if (replace_limit_on_next_digit_) {
-                limit_text_.clear();
-                replace_limit_on_next_digit_ = false;
-            }
-            limit_text_.push_back(static_cast<wchar_t>(wparam));
-        }
-        InvalidateRect(hwnd_, nullptr, FALSE);
-        return 0;
     case WM_KEYDOWN:
         if (capturing_hotkey_) {
             SetCapturedHotkey(wparam);
@@ -630,6 +648,41 @@ LRESULT SettingsWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam
             if (hover_progress_ >= 1.0f) KillTimer(hwnd_, kSettingsHoverTimer);
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
+        }
+        break;
+    case WM_CTLCOLOREDIT:
+        if (reinterpret_cast<HWND>(lparam) == limit_edit_) {
+            const auto palette = ResolvePopupThemePalette(theme_mode_, IsSystemDarkTheme());
+            const COLORREF edit_fill = palette.dark ? RGB(38, 46, 60) : RGB(247, 251, 255);
+            SetBkMode(reinterpret_cast<HDC>(wparam), TRANSPARENT);
+            SetBkColor(reinterpret_cast<HDC>(wparam), edit_fill);
+            SetTextColor(reinterpret_cast<HDC>(wparam), palette.dark ? RGB(238, 242, 247) : RgbFromHex(palette.text));
+            if (!limit_edit_brush_ || limit_edit_brush_color_ != edit_fill) {
+                if (limit_edit_brush_) {
+                    DeleteObject(limit_edit_brush_);
+                }
+                limit_edit_brush_ = CreateSolidBrush(edit_fill);
+                limit_edit_brush_color_ = edit_fill;
+            }
+            return reinterpret_cast<LRESULT>(limit_edit_brush_);
+        }
+        break;
+    case WM_COMMAND:
+        if (LOWORD(wparam) == kLimitEditId && reinterpret_cast<HWND>(lparam) == limit_edit_) {
+            if (HIWORD(wparam) == EN_SETFOCUS || HIWORD(wparam) == EN_KILLFOCUS) {
+                InvalidateRect(hwnd_, nullptr, FALSE);
+                return 0;
+            }
+            if (HIWORD(wparam) == EN_CHANGE) {
+                const int length = GetWindowTextLengthW(limit_edit_);
+                std::wstring value(static_cast<size_t>(length) + 1, L'\0');
+                if (length > 0) {
+                    GetWindowTextW(limit_edit_, value.data(), length + 1);
+                }
+                value.resize(static_cast<size_t>(length));
+                limit_text_ = value;
+                return 0;
+            }
         }
         break;
     case WM_MOUSEMOVE: {
@@ -655,17 +708,18 @@ LRESULT SettingsWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam
         InvalidateRect(hwnd_, nullptr, FALSE);
         return 0;
     case WM_LBUTTONDOWN: {
-        SetFocus(hwnd_);
         const int x = GET_X_LPARAM(lparam);
         const int y = GET_Y_LPARAM(lparam);
         const int target = HitTarget(x, y);
+        if (target == kTargetLimit) {
+            SetFocus(limit_edit_);
+            SendMessageW(limit_edit_, EM_SETSEL, 0, -1);
+            return 0;
+        }
+        SetFocus(hwnd_);
         if (target == 1) {
             ShowWindow(hwnd_, SW_HIDE);
             return 0;
-        }
-        editing_limit_ = target == kTargetLimit;
-        if (editing_limit_) {
-            replace_limit_on_next_digit_ = true;
         }
         if (target == 2) {
             if (SaveFromControls()) {

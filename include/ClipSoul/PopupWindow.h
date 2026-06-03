@@ -240,7 +240,6 @@ private:
     PopupDateRangeState date_filter_;
     int calendar_year_ = 0;
     int calendar_month_ = 0;
-    float open_progress_ = 1.0f;
     float hover_progress_ = 0.0f;
     int theme_mode_ = 0;
 

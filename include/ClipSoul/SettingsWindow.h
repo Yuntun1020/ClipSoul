@@ -11,6 +11,7 @@ class App;
 class SettingsWindow {
 public:
     SettingsWindow(HINSTANCE instance, App& app);
+    ~SettingsWindow();
     bool Create(HWND owner);
     void Show();
     HWND hwnd() const { return hwnd_; }
@@ -36,6 +37,9 @@ private:
 
     HINSTANCE instance_;
     HWND hwnd_ = nullptr;
+    HWND limit_edit_ = nullptr;
+    HBRUSH limit_edit_brush_ = nullptr;
+    COLORREF limit_edit_brush_color_ = CLR_INVALID;
     std::wstring limit_text_;
     std::wstring storage_path_;
     bool storage_save_failed_ = false;
@@ -44,8 +48,6 @@ private:
     bool popup_resizable_ = false;
     bool capturing_hotkey_ = false;
     bool capturing_continuous_paste_hotkey_ = false;
-    bool editing_limit_ = false;
-    bool replace_limit_on_next_digit_ = false;
     unsigned hotkey_modifiers_ = 0;
     unsigned hotkey_vk_ = 0;
     unsigned continuous_paste_hotkey_modifiers_ = 0;

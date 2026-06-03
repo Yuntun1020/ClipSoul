@@ -125,7 +125,7 @@ bool HotkeyMatchesState(unsigned configured_modifiers, unsigned configured_vk, b
 }
 
 bool HotkeyOpenPopupShouldHandleKey(unsigned vk) {
-    return vk == VK_ESCAPE || vk == VK_RETURN || vk == VK_UP || vk == VK_DOWN;
+    return vk == VK_ESCAPE || vk == VK_UP || vk == VK_DOWN;
 }
 
 bool HotkeyOpenPopupShouldToggle(bool popup_visible, bool matched_popup_hotkey) {

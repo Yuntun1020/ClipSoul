@@ -1,4 +1,4 @@
-#include "ClipSoul/Win32Util.h"
+﻿#include "ClipSoul/Win32Util.h"
 
 #include "ClipSoul/HistoryStore.h"
 #include "ClipSoul/StorageConfig.h"
@@ -59,20 +59,11 @@ void EnableAcrylicBlur(HWND hwnd, bool dark) {
     data.size_of_data = sizeof(accent);
     set_window_composition_attribute(hwnd, &data);
 }
+std::filesystem::path StorageConfigPath() {
+    return ExecutableDir() / L"clipsoul.storage";
+}
 } // namespace
 
-std::filesystem::path AppDataDir() {
-    PWSTR path = nullptr;
-    std::filesystem::path result;
-    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_CREATE, nullptr, &path))) {
-        result = std::filesystem::path(path) / L"ClipSoul";
-        CoTaskMemFree(path);
-    } else {
-        result = std::filesystem::temp_directory_path() / L"ClipSoul";
-    }
-    std::filesystem::create_directories(result);
-    return result;
-}
 
 std::filesystem::path ExecutableDir() {
     std::vector<wchar_t> buffer(MAX_PATH);
@@ -94,9 +85,6 @@ std::filesystem::path DefaultStorageDir() {
     return ExecutableDir();
 }
 
-std::filesystem::path StorageConfigPath() {
-    return ExecutableDir() / L"clipsoul.storage";
-}
 
 std::filesystem::path LoadStorageDir() {
     std::string bytes;

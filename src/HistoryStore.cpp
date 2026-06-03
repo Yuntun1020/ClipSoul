@@ -4,7 +4,9 @@
 
 #include <winsqlite/winsqlite3.h>
 
+#include <algorithm>
 #include <chrono>
+#include <cwctype>
 #include <filesystem>
 #include <memory>
 #include <sstream>
@@ -132,6 +134,51 @@ int64_t NextSortOrder(sqlite3* db) {
         return sqlite3_column_int64(stmt.get(), 0);
     }
     return 1;
+}
+
+std::wstring NormalizeSearchNeedle(std::wstring_view input) {
+    std::wstring result;
+    result.reserve(input.size());
+    for (const wchar_t ch : NormalizeWhitespace(input)) {
+        if (std::iswspace(ch) != 0) {
+            continue;
+        }
+        result.push_back(static_cast<wchar_t>(std::towlower(ch)));
+    }
+    return result;
+}
+
+bool FuzzySubsequenceMatches(std::wstring_view needle, std::wstring_view haystack) {
+    if (needle.empty()) {
+        return true;
+    }
+    size_t needle_index = 0;
+    for (const wchar_t ch : haystack) {
+        if (ch == needle[needle_index]) {
+            ++needle_index;
+            if (needle_index == needle.size()) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool SearchFieldMatches(std::wstring_view field, std::wstring_view normalized_query) {
+    if (normalized_query.empty()) {
+        return true;
+    }
+    const auto normalized_field = NormalizeSearchNeedle(field);
+    if (normalized_field.empty()) {
+        return false;
+    }
+    return normalized_field.find(normalized_query) != std::wstring::npos ||
+           FuzzySubsequenceMatches(normalized_query, normalized_field);
+}
+
+bool HistoryItemMatchesSearch(const HistoryItem& item, std::wstring_view normalized_query) {
+    return SearchFieldMatches(item.search_text, normalized_query) || SearchFieldMatches(item.text, normalized_query) ||
+           SearchFieldMatches(item.note, normalized_query);
 }
 
 } // namespace
@@ -335,6 +382,18 @@ bool HistoryStore::Add(const CapturedContent& content) {
             return true;
         }
     }
+    // Secondary deduplication: same text within 3 seconds (handles different hashes from rapid clipboard events)
+    if (!content.text.empty()) {
+        const auto content_time = content.created_at_unix.value_or(NowUnixSeconds());
+        const auto cutoff = content_time - 3;
+        Statement text_dup(impl_->db,
+                           "SELECT 1 FROM history_items WHERE text = ? AND created_at >= ? LIMIT 1;");
+        BindText(text_dup.get(), 1, content.text);
+        sqlite3_bind_int64(text_dup.get(), 2, cutoff);
+        if (sqlite3_step(text_dup.get()) == SQLITE_ROW) {
+            return true;
+        }
+    }
 
     Statement stmt(impl_->db,
                    "INSERT INTO history_items(kind, created_at, text, html, files, payload_path, preview, "
@@ -473,10 +532,8 @@ std::vector<HistoryItem> HistoryStore::Query(const HistoryQuery& query) const {
     sql << "SELECT id, kind, created_at, text, html, files, payload_path, preview, search_text, content_hash, "
            "is_pinned, is_favorite, is_phrase, favorite_group_id, note FROM history_items WHERE 1=1";
 
-    const bool has_query = !NormalizeWhitespace(query.text).empty();
-    if (has_query) {
-        sql << " AND (search_text LIKE ? OR note LIKE ?)";
-    }
+    const auto normalized_query = NormalizeSearchNeedle(query.text);
+    const bool has_query = !normalized_query.empty();
     if (!query.kinds.empty()) {
         sql << " AND kind IN (";
         for (size_t i = 0; i < query.kinds.size(); ++i) {
@@ -499,15 +556,14 @@ std::vector<HistoryItem> HistoryStore::Query(const HistoryQuery& query) const {
     } else {
         sql << " AND is_phrase = 0 AND is_favorite = 0";
     }
-    sql << " ORDER BY is_pinned DESC, sort_order DESC, id DESC LIMIT ?;";
+    sql << " ORDER BY is_pinned DESC, sort_order DESC, id DESC";
+    if (!has_query) {
+        sql << " LIMIT ?";
+    }
+    sql << ";";
 
     Statement stmt(impl_->db, sql.str().c_str());
     int bind_index = 1;
-    if (has_query) {
-        const auto search_pattern = L"%" + NormalizeWhitespace(query.text) + L"%";
-        BindText(stmt.get(), bind_index++, search_pattern);
-        BindText(stmt.get(), bind_index++, search_pattern);
-    }
     for (const auto kind : query.kinds) {
         sqlite3_bind_int(stmt.get(), bind_index++, static_cast<int>(kind));
     }
@@ -520,7 +576,10 @@ std::vector<HistoryItem> HistoryStore::Query(const HistoryQuery& query) const {
     if (query.favorites_only && query.favorite_group_id) {
         sqlite3_bind_int64(stmt.get(), bind_index++, *query.favorite_group_id);
     }
-    sqlite3_bind_int(stmt.get(), bind_index, std::max(1, query.limit));
+    const int limit = std::max(1, query.limit);
+    if (!has_query) {
+        sqlite3_bind_int(stmt.get(), bind_index, limit);
+    }
 
     std::vector<HistoryItem> items;
     while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
@@ -542,7 +601,13 @@ std::vector<HistoryItem> HistoryStore::Query(const HistoryQuery& query) const {
             item.favorite_group_id = sqlite3_column_int64(stmt.get(), 13);
         }
         item.note = DbText(stmt.get(), 14);
+        if (has_query && !HistoryItemMatchesSearch(item, normalized_query)) {
+            continue;
+        }
         items.push_back(std::move(item));
+        if (has_query && static_cast<int>(items.size()) >= limit) {
+            break;
+        }
     }
     return items;
 }

@@ -154,7 +154,7 @@ std::optional<CapturedContent> ClipboardCapture::CaptureHtml(UINT html_format) c
     content.html = ReadGlobalBytesAsString(html_format);
     content.text = ReadGlobalWideText(CF_UNICODETEXT);
     const auto html_text = HtmlClipboardToPlainText(content.html);
-    content.search_text = NormalizeWhitespace(content.text.empty() ? html_text : content.text + L" " + html_text);
+    content.search_text = NormalizeWhitespace(content.text.empty() ? html_text : content.text);
     const auto visible_text = NormalizeWhitespace(content.text.empty() ? html_text : content.text);
     if (LooksLikeUrl(visible_text)) {
         content.kind = ClipboardKind::Link;

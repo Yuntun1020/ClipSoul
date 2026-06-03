@@ -1,6 +1,5 @@
 #include "ClipSoul/SingleInstance.h"
 
-#include <utility>
 
 namespace ClipSoul {
 

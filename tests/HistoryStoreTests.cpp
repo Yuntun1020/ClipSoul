@@ -61,10 +61,13 @@ TEST_CASE(HistoryStoreAllowsSameHashWhenClipboardKindDiffers) {
     ClipSoul::HistoryStore store;
     store.Open(TempDbPath(L"dedupe-kind.db"));
 
+    auto text_entry = TextContent(L"https://example.com");
+    text_entry.created_at_unix = 1000;
     auto link = TextContent(L"https://example.com");
     link.kind = ClipSoul::ClipboardKind::Link;
+    link.created_at_unix = 1010;
 
-    REQUIRE(store.Add(TextContent(L"https://example.com")));
+    REQUIRE(store.Add(text_entry));
     REQUIRE(store.Add(link));
 
     const auto items = store.Recent(10, L"");
@@ -124,6 +127,35 @@ TEST_CASE(HistoryStoreSearchesNotes) {
     REQUIRE_EQ(note_matches.size(), static_cast<size_t>(1));
     REQUIRE_EQ(note_matches.front().text, std::wstring(L"plain beta"));
     REQUIRE_EQ(note_matches.front().note, std::wstring(L"客户报价模板"));
+}
+
+TEST_CASE(HistoryStoreFuzzySearchesHistoryText) {
+    ClipSoul::HistoryStore store;
+    store.Open(TempDbPath(L"search-fuzzy-text.db"));
+
+    REQUIRE(store.Add(TextContent(L"camera settings")));
+    REQUIRE(store.Add(TextContent(L"daily ClipSoul backup")));
+
+    const auto matches = store.Recent(10, L"csb");
+    REQUIRE_EQ(matches.size(), static_cast<size_t>(1));
+    REQUIRE_EQ(matches.front().text, std::wstring(L"daily ClipSoul backup"));
+}
+
+TEST_CASE(HistoryStoreFuzzySearchesNotes) {
+    ClipSoul::HistoryStore store;
+    store.Open(TempDbPath(L"search-fuzzy-notes.db"));
+
+    REQUIRE(store.Add(TextContent(L"invoice alpha")));
+    REQUIRE(store.Add(TextContent(L"plain beta")));
+
+    const auto items = store.Query(ClipSoul::HistoryQuery{});
+    REQUIRE_EQ(items.size(), static_cast<size_t>(2));
+    REQUIRE(store.SetNote(items.front().id, L"release checklist"));
+
+    const auto note_matches = store.Recent(10, L"rck");
+    REQUIRE_EQ(note_matches.size(), static_cast<size_t>(1));
+    REQUIRE_EQ(note_matches.front().text, std::wstring(L"plain beta"));
+    REQUIRE_EQ(note_matches.front().note, std::wstring(L"release checklist"));
 }
 
 TEST_CASE(HistoryStoreClearRemovesAllEntries) {
@@ -481,4 +513,38 @@ TEST_CASE(HistorySelectionTracksMultiSelectActions) {
     REQUIRE_EQ(selection.SelectedIds().size(), static_cast<size_t>(2));
     selection.Clear();
     REQUIRE_EQ(selection.SelectedIds().size(), static_cast<size_t>(0));
+}
+
+TEST_CASE(HistoryStoreDeduplicatesSameTextWithinThreeSeconds) {
+    auto db_path = std::filesystem::temp_directory_path() / L"clipsoul_test_dedup_text.db";
+    std::filesystem::remove(db_path);
+    {
+        ClipSoul::HistoryStore store;
+        store.Open(db_path);
+
+        ClipSoul::CapturedContent a;
+        a.kind = ClipSoul::ClipboardKind::Text;
+        a.text = L"hello";
+        a.preview = L"hello";
+        a.search_text = L"hello";
+        a.content_hash = L"hash_a";
+        a.created_at_unix = 1000;
+        REQUIRE(store.Add(a));
+
+        ClipSoul::CapturedContent b;
+        b.kind = ClipSoul::ClipboardKind::Html;
+        b.text = L"hello";
+        b.preview = L"hello";
+        b.search_text = L"hello";
+        b.content_hash = L"hash_b";
+        b.created_at_unix = 1001;
+        store.Add(b);
+
+        ClipSoul::HistoryQuery query;
+        query.limit = 10;
+        const auto items = store.Query(query);
+        REQUIRE_EQ(items.size(), static_cast<size_t>(1));
+        REQUIRE_EQ(items.front().text, std::wstring(L"hello"));
+    }
+    std::filesystem::remove(db_path);
 }

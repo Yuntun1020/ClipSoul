@@ -7,10 +7,8 @@
 
 namespace ClipSoul {
 
-std::filesystem::path AppDataDir();
 std::filesystem::path ExecutableDir();
 std::filesystem::path DefaultStorageDir();
-std::filesystem::path StorageConfigPath();
 std::filesystem::path LoadStorageDir();
 bool SaveStorageDir(const std::filesystem::path& storage_dir);
 std::wstring FormatWin32Error(DWORD error);

@@ -453,13 +453,6 @@ bool PopupSearchCaretVisible(bool focused, bool blink_on) {
     return focused && blink_on;
 }
 
-bool PopupSearchAcceptsTextInput(bool focused) {
-    return focused;
-}
-
-bool PopupSearchShouldUpdateImePosition(bool focused, bool updating_ime) {
-    return focused && !updating_ime;
-}
 
 bool PopupSearchHasComposition(bool composing, const std::wstring& composition_text) {
     return composing && !composition_text.empty();
@@ -480,17 +473,6 @@ bool PopupSearchCaretVisibleDuringComposition(bool has_composition) {
     return !has_composition;
 }
 
-bool PopupSearchDeletesOnChar(wchar_t value) {
-    return value == L'\b';
-}
-
-bool PopupSearchDeletesOnKeyDown(unsigned) {
-    return false;
-}
-
-bool PopupSearchAppendsChar(wchar_t value) {
-    return value >= 32;
-}
 
 bool PopupResizeShouldDiscardDeviceResources() {
     return false;
@@ -536,9 +518,6 @@ bool PopupShouldActivateForSearchFocus(bool search_clicked, bool has_native_edit
     return search_clicked && has_native_edit;
 }
 
-bool PopupShouldFocusNativeSearchEdit(bool search_clicked, bool has_native_edit) {
-    return search_clicked && has_native_edit;
-}
 
 bool PopupShouldAutoFocusSearchOnShow(bool has_native_edit) {
     return false;
@@ -556,9 +535,6 @@ bool PopupNativeSearchCueBannerShowsWhenFocused() {
     return true;
 }
 
-bool PopupSearchShouldStayFocusedAfterNativeBlur(bool next_focus_inside_popup) {
-    return next_focus_inside_popup;
-}
 
 bool PopupShouldRedrawNativeSearchAfterParentPaint(bool has_native_edit, bool moving_or_resizing_window) {
     return has_native_edit && !moving_or_resizing_window;
@@ -591,10 +567,6 @@ bool PopupShouldDrawCachedMediaDuringFastInteraction(bool moving_or_resizing_win
 bool PopupShouldUseCurrentWindowWidthForLayout(bool popup_resizable, bool manual_popup_size,
                                                int current_logical_width, int default_logical_width) {
     return manual_popup_size || (popup_resizable && current_logical_width != default_logical_width);
-}
-
-bool PopupNativeSearchKeyHandledByPopup(unsigned virtual_key) {
-    return virtual_key == VK_ESCAPE || virtual_key == VK_RETURN || virtual_key == VK_UP || virtual_key == VK_DOWN;
 }
 
 UiRect PopupNativeSearchEditRect(const PopupSearchLayout& layout) {
@@ -660,12 +632,6 @@ float ClampPopupSearchCaretX(const PopupSearchLayout& layout, float measured_tex
     return std::clamp(layout.text.left + measured_text_width, layout.text.left, layout.text.right - 2.0f);
 }
 
-POINT PopupSearchImeAnchorDips(const PopupSearchLayout& layout, float measured_text_width) {
-    return POINT{
-        static_cast<LONG>(std::lround(ClampPopupSearchCaretX(layout, measured_text_width))),
-        static_cast<LONG>(std::lround(layout.text.bottom)),
-    };
-}
 
 bool PopupSearchClearButtonHitTest(const PopupSearchLayout& layout, bool has_query, POINT point) {
     if (!has_query) return false;

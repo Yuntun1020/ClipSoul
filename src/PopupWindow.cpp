@@ -2411,7 +2411,6 @@ void PopupWindow::Show(HWND target) {
         search_caret_on_ = false;
         KillTimer(hwnd_, kSearchCaretTimer);
     }
-    open_progress_ = 1.0f;
     KillTimer(hwnd_, kAnimationTimer);
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
