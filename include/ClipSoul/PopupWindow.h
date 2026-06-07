@@ -42,6 +42,7 @@ public:
     std::optional<int64_t> SelectedItemId() const;
     HWND PasteTarget() const { return paste_target_; }
     bool PasteSelectedForContinuousPaste();
+    void AdvanceSelectionAfterContinuousPaste();
     void UpdateBehaviorFromSettings();
     void ResetManualSize();
     void SetDebugLogger(std::function<void(std::wstring_view)> logger);
@@ -66,6 +67,7 @@ private:
         AddFavoritePhrase,
         ExpandItem,
         Scrollbar,
+        ScrollToTop,
         Pin,
         Close,
     };
@@ -106,7 +108,6 @@ private:
     void ToggleFavoriteGroupMenu();
     void ToggleExpanded(int64_t id);
     void SetSelectedItemId(std::optional<int64_t> id);
-    void AdvanceSelectionAfterContinuousPaste();
     void BeginItemPress(int item_index, POINT point);
     void CancelItemPress();
     void CompleteItemPress(POINT point);

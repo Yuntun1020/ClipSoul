@@ -2370,7 +2370,7 @@ void PopupWindow::Show(HWND target) {
     y = position.y;
     SetWindowPos(hwnd_, HWND_TOPMOST, x, y, size.cx, size.cy, flags);
     UpdatePopupLogicalSize();
-    scroll_offset_ = PopupScrollOffsetAfterReopen(scroll_offset_, TotalScrollHeight(), ViewportScrollHeight());
+    scroll_offset_ = ScrollOffsetToRevealSelection(scroll_offset_, selected_index_);
     RECT shown_rect{};
     GetWindowRect(hwnd_, &shown_rect);
     const LONG_PTR shown_ex_style = GetWindowLongPtrW(hwnd_, GWL_EXSTYLE);
@@ -2762,7 +2762,8 @@ void PopupWindow::AdvanceSelectionAfterContinuousPaste() {
     if (items_.empty()) {
         return;
     }
-    selected_index_ = PopupNextSelectedIndex(static_cast<int>(items_.size()), selected_index_);
+    selected_index_ =
+        PopupContinuousPasteSelectionStep(static_cast<int>(items_.size()), selected_index_).next_selected_index;
     scroll_offset_ = ScrollOffsetToRevealSelection(scroll_offset_, selected_index_);
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
@@ -2771,12 +2772,15 @@ bool PopupWindow::PasteSelectedForContinuousPaste() {
     if (items_.empty()) {
         return false;
     }
-    selected_index_ = ClampPopupSelectedIndex(static_cast<int>(items_.size()), selected_index_);
-    const auto item = items_[selected_index_];
+    const auto step = PopupContinuousPasteSelectionStep(static_cast<int>(items_.size()), selected_index_);
+    selected_index_ = step.paste_index;
+    const auto item = items_[step.paste_index];
     if (!paste_controller_.RestoreToClipboard(item, hwnd_)) {
         return false;
     }
-    paste_controller_.SendPaste(paste_target_);
+    BeginTransientHideSuppression();
+    paste_controller_.SendPaste(paste_target_, PasteShortcutOptions{false});
+    EndTransientHideSuppressionSoon();
     AdvanceSelectionAfterContinuousPaste();
     if (ShouldHidePopupAfterContinuousPaste(pinned_open_)) {
         Hide(L"continuous-paste");
@@ -3374,15 +3378,8 @@ float PopupWindow::ScrollOffsetToRevealSelection(float requested_offset, int sel
     const int clamped_selection = ClampPopupSelectedIndex(static_cast<int>(items_.size()), selected_index);
     const float selected_top = ItemScrollTop(clamped_selection);
     const float selected_bottom = selected_top + ItemScrollHeight(clamped_selection);
-    const float viewport_height = ViewportScrollHeight();
-    float offset = ClampSmoothScrollOffset(requested_offset);
-    if (selected_top < offset) {
-        offset = selected_top;
-    }
-    if (selected_bottom > offset + viewport_height) {
-        offset = selected_bottom - viewport_height;
-    }
-    return ClampSmoothScrollOffset(offset);
+    return PopupScrollOffsetToRevealRange(requested_offset, selected_top, selected_bottom,
+                                          TotalScrollHeight(), ViewportScrollHeight());
 }
 
 int PopupWindow::FirstVisibleItemIndex() const {
@@ -4436,7 +4433,30 @@ void PopupWindow::Paint() {
         brush->SetColor(D2D1::ColorF(palette.border, 0.34f));
         render_target_->FillRoundedRectangle(RoundRect(track, 2), brush);
         brush->SetColor(D2D1::ColorF(palette.accent, thumb_opacity));
-            render_target_->FillRoundedRectangle(RoundRect(thumb, 2), brush);
+        render_target_->FillRoundedRectangle(RoundRect(thumb, 2), brush);
+
+        if (PopupScrollToTopButtonVisible(scroll_offset_)) {
+            const auto button = PopupScrollToTopButtonRectForSize(popup_logical_width_, popup_logical_height_);
+            const bool button_hovered =
+                hover_action_ == UiAction::ScrollToTop || Contains(button, hover_point_);
+            const float button_hover = button_hovered ? hover_progress_ : 0.0f;
+            drawEdgeShadow(button, 20.0f, button_hovered ? 0.38f + 0.12f * button_hover : 0.24f, 2.0f);
+            brush->SetColor(ColorWithAlpha(palette.dark ? 0x1E293B : 0xFFFFFF,
+                                           palette.dark ? 0.82f + 0.08f * button_hover
+                                                        : 0.84f + 0.10f * button_hover));
+            render_target_->FillRoundedRectangle(RoundRect(button, 20), brush);
+            brush->SetColor(D2D1::ColorF(button_hovered ? palette.accent : palette.border,
+                                         button_hovered ? 0.70f : 0.76f));
+            render_target_->DrawRoundedRectangle(RoundRect(button, 20), brush, 1.0f + 0.2f * button_hover);
+
+            brush->SetColor(D2D1::ColorF(button_hovered ? palette.accent : palette.muted,
+                                         button_hovered ? 0.96f : 0.82f));
+            const float cx = (button.left + button.right) * 0.5f;
+            const float cy = (button.top + button.bottom) * 0.5f;
+            render_target_->DrawLine(D2D1::Point2F(cx, cy + 8.0f), D2D1::Point2F(cx, cy - 7.0f), brush, 1.8f);
+            render_target_->DrawLine(D2D1::Point2F(cx - 6.0f, cy - 1.0f), D2D1::Point2F(cx, cy - 7.0f), brush, 1.8f);
+            render_target_->DrawLine(D2D1::Point2F(cx + 6.0f, cy - 1.0f), D2D1::Point2F(cx, cy - 7.0f), brush, 1.8f);
+        }
     }
 
     if (favorite_group_menu_open_) {
@@ -5087,9 +5107,14 @@ int PopupWindow::HitTestExpandItem(POINT point) const {
 }
 
 PopupWindow::UiAction PopupWindow::HitTestAction(POINT point) const {
-    if (TotalScrollHeight() > ViewportScrollHeight() &&
+    const bool has_scrollable_content = TotalScrollHeight() > ViewportScrollHeight();
+    if (has_scrollable_content &&
         Contains(PopupScrollbarHitRectForSize(popup_logical_width_, popup_logical_height_), point)) {
         return UiAction::Scrollbar;
+    }
+    if (has_scrollable_content && PopupScrollToTopButtonVisible(scroll_offset_) &&
+        Contains(PopupScrollToTopButtonRectForSize(popup_logical_width_, popup_logical_height_), point)) {
+        return UiAction::ScrollToTop;
     }
     if (HitTestExpandItem(point) >= 0) {
         return UiAction::ExpandItem;
@@ -5702,6 +5727,12 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
             dragging_scrollbar_ = true;
             SetCapture(hwnd_);
             UpdateScrollDrag(point);
+            return 0;
+        case UiAction::ScrollToTop:
+            dragging_scrollbar_ = false;
+            scroll_offset_ = 0.0f;
+            selected_index_ = ClampPopupSelectedIndex(static_cast<int>(items_.size()), 0);
+            InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
         case UiAction::ExpandItem: {
             const int expand_item = HitTestExpandItem(point);

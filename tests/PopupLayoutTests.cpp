@@ -662,6 +662,20 @@ TEST_CASE(PopupContinuousPasteMovesHighlightToNextItemAndRevealsIt) {
     REQUIRE_EQ(ClipSoul::PopupScrollOffsetToRevealSelection(9, 3, 2), 2);
 }
 
+TEST_CASE(PopupContinuousPasteUsesCurrentHighlightThenAdvances) {
+    const auto middle = ClipSoul::PopupContinuousPasteSelectionStep(4, 1);
+    REQUIRE_EQ(middle.paste_index, 1);
+    REQUIRE_EQ(middle.next_selected_index, 2);
+
+    const auto wrapped = ClipSoul::PopupContinuousPasteSelectionStep(4, 3);
+    REQUIRE_EQ(wrapped.paste_index, 3);
+    REQUIRE_EQ(wrapped.next_selected_index, 0);
+
+    const auto clamped = ClipSoul::PopupContinuousPasteSelectionStep(4, 99);
+    REQUIRE_EQ(clamped.paste_index, 3);
+    REQUIRE_EQ(clamped.next_selected_index, 0);
+}
+
 TEST_CASE(PopupSmoothRevealKeepsSelectionVisibleWithoutRowJump) {
     const auto metrics = ClipSoul::PopupMetrics();
     const float row_pitch = static_cast<float>(metrics.card_height + metrics.card_gap);
@@ -679,11 +693,20 @@ TEST_CASE(PopupSmoothViewportClampDoesNotSnapBackToSelection) {
     REQUIRE(ClipSoul::PopupScrollOffsetToRevealSelectionForHeight(12, scrolled, 0, metrics.height) < scrolled);
 }
 
-TEST_CASE(PopupReopenStartsAtTop) {
-    REQUIRE_EQ(ClipSoul::PopupScrollOffsetAfterReopen(142.0f, 900.0f, 360.0f), 0.0f);
-    REQUIRE_EQ(ClipSoul::PopupScrollOffsetAfterReopen(700.0f, 900.0f, 360.0f), 0.0f);
-    REQUIRE_EQ(ClipSoul::PopupScrollOffsetAfterReopen(120.0f, 300.0f, 360.0f), 0.0f);
-    REQUIRE_EQ(ClipSoul::PopupScrollOffsetAfterReopen(-20.0f, 900.0f, 360.0f), 0.0f);
+TEST_CASE(PopupRevealRangeKeepsCurrentHighlightVisibleInsteadOfResettingToTop) {
+    const auto metrics = ClipSoul::PopupMetrics();
+    const float row_pitch = static_cast<float>(metrics.card_height + metrics.card_gap);
+    const float content_height = row_pitch * 9.0f - static_cast<float>(metrics.card_gap);
+    const float viewport_height = static_cast<float>(metrics.height) - ClipSoul::PopupListTop() - 4.0f;
+    const float seventh_top = row_pitch * 7.0f;
+    const float seventh_bottom = seventh_top + static_cast<float>(metrics.card_height);
+
+    REQUIRE_EQ(ClipSoul::PopupScrollOffsetToRevealRange(0.0f, seventh_top, seventh_bottom,
+                                                        content_height, viewport_height),
+               ClipSoul::PopupScrollOffsetToRevealSelectionForHeight(9, 0.0f, 7, metrics.height));
+    REQUIRE_EQ(ClipSoul::PopupScrollOffsetToRevealRange(120.0f, 0.0f, static_cast<float>(metrics.card_height),
+                                                        content_height, viewport_height), 0.0f);
+    REQUIRE_EQ(ClipSoul::PopupScrollOffsetToRevealRange(120.0f, 20.0f, 92.0f, 300.0f, 360.0f), 0.0f);
 }
 
 TEST_CASE(PopupScrollbarThumbMapsDragPositionToScrollOffset) {
@@ -743,6 +766,24 @@ TEST_CASE(PopupScrollbarThumbOpacityReflectsHoverAndDragFeedback) {
     REQUIRE(ClipSoul::PopupScrollbarThumbOpacity(true, false, 0.5f) > 0.56f);
     REQUIRE(ClipSoul::PopupScrollbarThumbOpacity(true, false, 0.5f) < 0.86f);
     REQUIRE_EQ(ClipSoul::PopupScrollbarThumbOpacity(false, true, 0.0f), 0.90f);
+}
+
+TEST_CASE(PopupScrollToTopButtonAppearsOnlyAfterScrollingAndAvoidsScrollbar) {
+    const auto metrics = ClipSoul::PopupMetrics();
+    const int resized_width = metrics.width + 120;
+    const int resized_height = metrics.height + 90;
+
+    REQUIRE(!ClipSoul::PopupScrollToTopButtonVisible(0.0f));
+    REQUIRE(ClipSoul::PopupScrollToTopButtonVisible(1.0f));
+
+    const auto rect = ClipSoul::PopupScrollToTopButtonRectForSize(resized_width, resized_height);
+    const auto scrollbar_hit = ClipSoul::PopupScrollbarHitRectForSize(resized_width, resized_height);
+
+    REQUIRE_EQ(rect.Width(), 40.0f);
+    REQUIRE_EQ(rect.Height(), 40.0f);
+    REQUIRE(rect.top >= ClipSoul::PopupListTop());
+    REQUIRE(rect.bottom <= static_cast<float>(resized_height - 16));
+    REQUIRE(rect.right < scrollbar_hit.left);
 }
 
 TEST_CASE(PopupListClipRectStartsAtListAndEndsBeforeWindowBottom) {

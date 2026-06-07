@@ -74,6 +74,16 @@ TEST_CASE(PasteShortcutRestoresHeldModifiersAfterCtrlV) {
     REQUIRE(!ClipSoul::ShouldRestoreModifierAfterPaste(VK_MENU, false));
 }
 
+TEST_CASE(ContinuousPasteShortcutDoesNotRestoreAltToAvoidStuckSystemState) {
+    ClipSoul::PasteShortcutOptions normal;
+    ClipSoul::PasteShortcutOptions continuous;
+    continuous.restore_alt_after_paste = false;
+
+    REQUIRE(ClipSoul::ShouldRestoreModifierForPaste(VK_MENU, true, normal));
+    REQUIRE(!ClipSoul::ShouldRestoreModifierForPaste(VK_MENU, true, continuous));
+    REQUIRE(ClipSoul::ShouldRestoreModifierForPaste(VK_CONTROL, true, continuous));
+}
+
 TEST_CASE(MultiPastePayloadKeepsFilesAlongsideCombinedText) {
     const auto payload = ClipSoul::BuildMultiPastePayload({
         TextItem(1, L"说明"),

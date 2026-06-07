@@ -24,6 +24,12 @@ TEST_CASE(HotkeyCaptureIgnoresModifierOnlyKeyPresses) {
     REQUIRE(!ClipSoul::BuildCapturedHotkey(VK_MENU, false, true, false, false).has_value());
 }
 
+TEST_CASE(HotkeyHookBypassesOnlyClipSoulInjectedPasteShortcutEvents) {
+    REQUIRE(ClipSoul::HotkeyHookShouldIgnoreInjectedEvent(true, ClipSoul::kClipSoulInjectedInputExtraInfo));
+    REQUIRE(!ClipSoul::HotkeyHookShouldIgnoreInjectedEvent(true, 0));
+    REQUIRE(!ClipSoul::HotkeyHookShouldIgnoreInjectedEvent(false, ClipSoul::kClipSoulInjectedInputExtraInfo));
+}
+
 TEST_CASE(HotkeyRegistrationAddsNoRepeatAndDetectsAltModifier) {
     REQUIRE_EQ(ClipSoul::RegisteredHotkeyModifiers(MOD_ALT),
                static_cast<unsigned>(MOD_ALT | MOD_NOREPEAT));
@@ -60,11 +66,11 @@ TEST_CASE(HotkeyClassifiesBareAltChords) {
     REQUIRE(!ClipSoul::HotkeyShouldBufferBareAlt(MOD_ALT, MOD_CONTROL | MOD_ALT, false, false, true));
 
     REQUIRE(ClipSoul::HotkeyShouldBufferAltDown(MOD_ALT, MOD_CONTROL | MOD_ALT, false, false, false));
-    REQUIRE(ClipSoul::HotkeyShouldBufferAltDown(MOD_CONTROL | MOD_ALT, MOD_CONTROL | MOD_ALT, false,
-                                                false, false));
-    REQUIRE(ClipSoul::HotkeyShouldBufferAltDown(MOD_CONTROL | MOD_ALT, MOD_ALT, true, false, false));
-    REQUIRE(ClipSoul::HotkeyShouldBufferAltDown(MOD_CONTROL | MOD_ALT | MOD_SHIFT, MOD_ALT, true, true,
-                                                false));
+    REQUIRE(!ClipSoul::HotkeyShouldBufferAltDown(MOD_CONTROL | MOD_ALT, MOD_CONTROL | MOD_ALT, false,
+                                                 false, false));
+    REQUIRE(!ClipSoul::HotkeyShouldBufferAltDown(MOD_CONTROL | MOD_ALT, MOD_ALT, true, false, false));
+    REQUIRE(!ClipSoul::HotkeyShouldBufferAltDown(MOD_CONTROL | MOD_ALT | MOD_SHIFT, MOD_ALT, true, true,
+                                                 false));
     REQUIRE(!ClipSoul::HotkeyShouldBufferAltDown(MOD_CONTROL | MOD_ALT, MOD_ALT, false, true, false));
     REQUIRE(!ClipSoul::HotkeyShouldBufferAltDown(MOD_CONTROL | MOD_SHIFT, MOD_CONTROL | MOD_SHIFT, true,
                                                  false, false));
@@ -86,6 +92,10 @@ TEST_CASE(HotkeyClassifiesBareAltChords) {
     REQUIRE(!ClipSoul::HotkeyShouldKeepBufferedAltForModifier(MOD_CONTROL | MOD_SHIFT, MOD_CONTROL | MOD_SHIFT,
                                                               true, false, false, VK_CONTROL));
 
+    REQUIRE(ClipSoul::HotkeyShouldKeepBufferedAltAfterHandledHotkey(MOD_CONTROL | MOD_ALT, true, false, false));
+    REQUIRE(!ClipSoul::HotkeyShouldKeepBufferedAltAfterHandledHotkey(MOD_CONTROL | MOD_ALT, false, false, false));
+    REQUIRE(!ClipSoul::HotkeyShouldKeepBufferedAltAfterHandledHotkey(MOD_ALT, true, false, false));
+
     REQUIRE(ClipSoul::HotkeyShouldReplayBufferedAlt(false, false, 'X'));
     REQUIRE(!ClipSoul::HotkeyShouldReplayBufferedAlt(true, false, 'X'));
     REQUIRE(!ClipSoul::HotkeyShouldReplayBufferedAlt(false, true, VK_MENU));
@@ -95,11 +105,20 @@ TEST_CASE(HotkeyClassifiesBareAltChords) {
     REQUIRE(ClipSoul::HotkeyShouldSwallowAltReleaseAfterHandledHotkey(true, VK_LMENU));
     REQUIRE(!ClipSoul::HotkeyShouldSwallowAltReleaseAfterHandledHotkey(false, VK_MENU));
     REQUIRE(!ClipSoul::HotkeyShouldSwallowAltReleaseAfterHandledHotkey(true, 'C'));
+    REQUIRE_EQ(ClipSoul::HotkeyAltReleaseActionFor(true, true, false, VK_MENU),
+               ClipSoul::AltReleaseAction::SwallowAndClearBuffered);
+    REQUIRE_EQ(ClipSoul::HotkeyAltReleaseActionFor(true, false, false, VK_MENU),
+               ClipSoul::AltReleaseAction::Swallow);
+    REQUIRE_EQ(ClipSoul::HotkeyAltReleaseActionFor(false, true, false, VK_MENU),
+               ClipSoul::AltReleaseAction::SwallowAndClearBuffered);
+    REQUIRE_EQ(ClipSoul::HotkeyAltReleaseActionFor(false, false, true, VK_MENU),
+               ClipSoul::AltReleaseAction::ReplayBufferedAltUp);
+    REQUIRE_EQ(ClipSoul::HotkeyAltReleaseActionFor(true, true, false, 'V'),
+               ClipSoul::AltReleaseAction::PassThrough);
 
-    REQUIRE(ClipSoul::HotkeyHookShouldIgnoreInjectedEvent(true, true, VK_MENU));
-    REQUIRE(!ClipSoul::HotkeyHookShouldIgnoreInjectedEvent(true, false, VK_MENU));
-    REQUIRE(!ClipSoul::HotkeyHookShouldIgnoreInjectedEvent(true, true, 'C'));
-    REQUIRE(!ClipSoul::HotkeyHookShouldIgnoreInjectedEvent(false, true, VK_MENU));
+    REQUIRE(ClipSoul::HotkeyHookShouldIgnoreInjectedEvent(true, ClipSoul::kClipSoulInjectedInputExtraInfo));
+    REQUIRE(!ClipSoul::HotkeyHookShouldIgnoreInjectedEvent(true, 0));
+    REQUIRE(!ClipSoul::HotkeyHookShouldIgnoreInjectedEvent(false, ClipSoul::kClipSoulInjectedInputExtraInfo));
 
     REQUIRE(!ClipSoul::HotkeyShouldRegisterSystemHotkeys(true));
     REQUIRE(ClipSoul::HotkeyShouldRegisterSystemHotkeys(false));
@@ -116,6 +135,19 @@ TEST_CASE(HotkeyClassifiesBareAltChords) {
     REQUIRE(ClipSoul::HotkeyOpenPopupShouldToggle(true, true));
     REQUIRE(!ClipSoul::HotkeyOpenPopupShouldToggle(true, false));
     REQUIRE(!ClipSoul::HotkeyOpenPopupShouldToggle(false, true));
+    REQUIRE(ClipSoul::HotkeyOpenPopupShouldHandleContinuousPaste(true, true));
+    REQUIRE(!ClipSoul::HotkeyOpenPopupShouldHandleContinuousPaste(true, false));
+    REQUIRE(!ClipSoul::HotkeyOpenPopupShouldHandleContinuousPaste(false, true));
+    REQUIRE_EQ(ClipSoul::HotkeyOpenPopupActionFor(true, true, false, 'C'),
+               ClipSoul::OpenPopupHotkeyAction::TogglePopup);
+    REQUIRE_EQ(ClipSoul::HotkeyOpenPopupActionFor(true, false, true, 'V'),
+               ClipSoul::OpenPopupHotkeyAction::ContinuousPaste);
+    REQUIRE_EQ(ClipSoul::HotkeyOpenPopupActionFor(true, false, false, VK_ESCAPE),
+               ClipSoul::OpenPopupHotkeyAction::ForwardKey);
+    REQUIRE_EQ(ClipSoul::HotkeyOpenPopupActionFor(true, false, false, 'X'),
+               ClipSoul::OpenPopupHotkeyAction::None);
+    REQUIRE_EQ(ClipSoul::HotkeyOpenPopupActionFor(false, false, true, 'V'),
+               ClipSoul::OpenPopupHotkeyAction::None);
 
     REQUIRE(ClipSoul::HotkeyShouldTrackHandledKeyUp(true, 'C'));
     REQUIRE(!ClipSoul::HotkeyShouldTrackHandledKeyUp(false, 'C'));

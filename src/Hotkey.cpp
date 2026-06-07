@@ -47,24 +47,15 @@ bool HotkeyShouldBufferBareAlt(unsigned popup_modifiers, unsigned continuous_mod
 
 bool HotkeyShouldBufferAltDown(unsigned popup_modifiers, unsigned continuous_modifiers, bool ctrl_down,
                                bool shift_down, bool win_down) {
-    const auto matches_prefix = [&](unsigned modifiers) {
+    if (ctrl_down || shift_down || win_down) {
+        return false;
+    }
+    const auto matches_current_modifiers = [&](unsigned hotkey_modifiers) {
         constexpr unsigned kModifierMask = MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_WIN;
-        const unsigned configured = modifiers & kModifierMask;
-        if ((configured & MOD_ALT) == 0) {
-            return false;
-        }
-        if ((configured & MOD_CONTROL) == 0 && ctrl_down) {
-            return false;
-        }
-        if ((configured & MOD_SHIFT) == 0 && shift_down) {
-            return false;
-        }
-        if ((configured & MOD_WIN) == 0 && win_down) {
-            return false;
-        }
-        return true;
+        unsigned actual = MOD_ALT;
+        return (hotkey_modifiers & kModifierMask) == actual;
     };
-    return matches_prefix(popup_modifiers) || matches_prefix(continuous_modifiers);
+    return matches_current_modifiers(popup_modifiers) || matches_current_modifiers(continuous_modifiers);
 }
 
 bool HotkeyShouldKeepBufferedAltForModifier(unsigned popup_modifiers, unsigned continuous_modifiers, bool ctrl_down,
@@ -92,6 +83,25 @@ bool HotkeyShouldKeepBufferedAltForModifier(unsigned popup_modifiers, unsigned c
     return matches_prefix(popup_modifiers) || matches_prefix(continuous_modifiers);
 }
 
+bool HotkeyShouldKeepBufferedAltAfterHandledHotkey(unsigned handled_modifiers, bool ctrl_down, bool shift_down,
+                                                   bool win_down) {
+    constexpr unsigned kModifierMask = MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_WIN;
+    const unsigned configured = handled_modifiers & kModifierMask;
+    if ((configured & MOD_ALT) == 0 || HotkeyUsesOnlyAlt(configured)) {
+        return false;
+    }
+    if ((configured & MOD_CONTROL) != 0 && ctrl_down) {
+        return true;
+    }
+    if ((configured & MOD_SHIFT) != 0 && shift_down) {
+        return true;
+    }
+    if ((configured & MOD_WIN) != 0 && win_down) {
+        return true;
+    }
+    return false;
+}
+
 bool HotkeyShouldReplayBufferedAlt(bool matched_hotkey, bool key_is_alt, unsigned) {
     return !matched_hotkey && !key_is_alt;
 }
@@ -100,8 +110,28 @@ bool HotkeyShouldSwallowAltReleaseAfterHandledHotkey(bool handled_bare_alt_hotke
     return handled_bare_alt_hotkey && HotkeyIsAltKey(vk);
 }
 
-bool HotkeyHookShouldIgnoreInjectedEvent(bool injected, bool replayed_alt_down, unsigned vk) {
-    return injected && replayed_alt_down && HotkeyIsAltKey(vk);
+AltReleaseAction HotkeyAltReleaseActionFor(bool swallow_alt_release, bool buffered_alt_down,
+                                           bool replayed_alt_down, unsigned vk) {
+    if (!HotkeyIsAltKey(vk)) {
+        return AltReleaseAction::PassThrough;
+    }
+    if (swallow_alt_release && buffered_alt_down) {
+        return AltReleaseAction::SwallowAndClearBuffered;
+    }
+    if (swallow_alt_release) {
+        return AltReleaseAction::Swallow;
+    }
+    if (buffered_alt_down) {
+        return AltReleaseAction::SwallowAndClearBuffered;
+    }
+    if (replayed_alt_down) {
+        return AltReleaseAction::ReplayBufferedAltUp;
+    }
+    return AltReleaseAction::PassThrough;
+}
+
+bool HotkeyHookShouldIgnoreInjectedEvent(bool injected, ULONG_PTR extra_info) {
+    return injected && extra_info == kClipSoulInjectedInputExtraInfo;
 }
 
 bool HotkeyShouldRegisterSystemHotkeys(bool keyboard_hook_installed) {
@@ -130,6 +160,24 @@ bool HotkeyOpenPopupShouldHandleKey(unsigned vk) {
 
 bool HotkeyOpenPopupShouldToggle(bool popup_visible, bool matched_popup_hotkey) {
     return popup_visible && matched_popup_hotkey;
+}
+
+bool HotkeyOpenPopupShouldHandleContinuousPaste(bool popup_visible, bool matched_continuous_hotkey) {
+    return popup_visible && matched_continuous_hotkey;
+}
+
+OpenPopupHotkeyAction HotkeyOpenPopupActionFor(bool popup_visible, bool matched_popup_hotkey,
+                                               bool matched_continuous_hotkey, unsigned vk) {
+    if (HotkeyOpenPopupShouldToggle(popup_visible, matched_popup_hotkey)) {
+        return OpenPopupHotkeyAction::TogglePopup;
+    }
+    if (HotkeyOpenPopupShouldHandleContinuousPaste(popup_visible, matched_continuous_hotkey)) {
+        return OpenPopupHotkeyAction::ContinuousPaste;
+    }
+    if (popup_visible && HotkeyOpenPopupShouldHandleKey(vk)) {
+        return OpenPopupHotkeyAction::ForwardKey;
+    }
+    return OpenPopupHotkeyAction::None;
 }
 
 bool HotkeyShouldTrackHandledKeyUp(bool handled_hotkey, unsigned vk) {

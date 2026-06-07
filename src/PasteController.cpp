@@ -1,6 +1,7 @@
 #include "ClipSoul/PasteController.h"
 
 #include "ClipSoul/ClipboardMonitor.h"
+#include "ClipSoul/Hotkey.h"
 #include "ClipSoul/PasteModel.h"
 #include "ClipSoul/TextUtil.h"
 
@@ -102,7 +103,7 @@ bool PasteController::RestoreMultipleToClipboard(const std::vector<HistoryItem>&
     return ok;
 }
 
-void PasteController::SendPaste(HWND target) const {
+void PasteController::SendPaste(HWND target, PasteShortcutOptions options) const {
     if (ShouldActivatePasteTarget(target, GetForegroundWindow())) {
         SetForegroundWindow(target);
     }
@@ -113,6 +114,7 @@ void PasteController::SendPaste(HWND target) const {
         input.type = INPUT_KEYBOARD;
         input.ki.wVk = vk;
         input.ki.dwFlags = flags;
+        input.ki.dwExtraInfo = kClipSoulInjectedInputExtraInfo;
         inputs.push_back(input);
     };
 
@@ -133,7 +135,7 @@ void PasteController::SendPaste(HWND target) const {
     add_key('V', KEYEVENTF_KEYUP);
     add_key(VK_CONTROL, KEYEVENTF_KEYUP);
     for (const WORD vk : physically_down) {
-        if (ShouldRestoreModifierAfterPaste(vk, true)) {
+        if (ShouldRestoreModifierForPaste(vk, true, options)) {
             add_key(vk);
         }
     }

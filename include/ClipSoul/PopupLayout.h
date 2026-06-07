@@ -225,6 +225,11 @@ enum class PopupItemPressMoveAction {
     SelectHitItem,
 };
 
+struct PopupContinuousPasteStep {
+    int paste_index = 0;
+    int next_selected_index = 0;
+};
+
 const PopupMetricsData& PopupMetrics();
 int PopupItemLongPressMilliseconds();
 int ScalePopupMetricForDpi(int value, unsigned dpi);
@@ -239,13 +244,15 @@ int PopupScrollOffsetAfterWheelForHeight(int item_count, int current_offset, sho
 float PopupScrollOffsetAfterWheelForHeight(int item_count, float current_offset, short wheel_delta, int logical_height);
 int ClampPopupSelectedIndex(int item_count, int selected_index);
 int PopupNextSelectedIndex(int item_count, int selected_index);
+PopupContinuousPasteStep PopupContinuousPasteSelectionStep(int item_count, int selected_index);
 int PopupScrollOffsetToRevealSelection(int item_count, int current_offset, int selected_index);
 int PopupScrollOffsetToRevealSelectionForHeight(int item_count, int current_offset, int selected_index,
                                                 int logical_height);
 float PopupScrollOffsetToRevealSelectionForHeight(int item_count, float current_offset, int selected_index,
                                                   int logical_height);
 float PopupScrollOffsetAfterViewportClampForHeight(int item_count, float current_offset, int logical_height);
-float PopupScrollOffsetAfterReopen(float saved_offset, float content_height, float viewport_height);
+float PopupScrollOffsetToRevealRange(float current_offset, float range_top, float range_bottom,
+                                     float content_height, float viewport_height);
 UiRect PopupScrollbarTrackRect();
 UiRect PopupScrollbarTrackRectForHeight(int logical_height);
 UiRect PopupScrollbarTrackRectForSize(int logical_width, int logical_height);
@@ -259,6 +266,8 @@ UiRect PopupScrollbarThumbRectForSize(int item_count, float scroll_offset, int l
 int PopupScrollOffsetForThumbCenterY(int item_count, float thumb_center_y);
 int PopupScrollOffsetForThumbCenterYForHeight(int item_count, float thumb_center_y, int logical_height);
 float PopupScrollbarThumbOpacity(bool hovered, bool dragging, float hover_progress);
+bool PopupScrollToTopButtonVisible(float scroll_offset);
+UiRect PopupScrollToTopButtonRectForSize(int logical_width, int logical_height);
 UiRect PopupListClipRectForHeight(int logical_width, int logical_height);
 float PopupExpandedCardExtraHeightForMeasuredDetail(float measured_detail_height);
 float PopupExpandedImageCardExtraHeightForMeasuredDetail(float measured_detail_height);

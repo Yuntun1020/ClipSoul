@@ -300,9 +300,13 @@ void App::OnContinuousPasteHotkey(HWND target) {
     HistoryQuery query;
     query.limit = settings_.history_limit;
     const auto items = store_.Query(query);
-    if (const auto item = continuous_paste_.NextFromSelection(items, std::nullopt)) {
+    const auto selected_id = popup_ ? popup_->SelectedItemId() : std::nullopt;
+    if (const auto item = continuous_paste_.NextFromSelection(items, selected_id)) {
         if (paste_controller_.RestoreToClipboard(*item, hwnd_)) {
-            paste_controller_.SendPaste(target);
+            paste_controller_.SendPaste(target, PasteShortcutOptions{false});
+            if (popup_) {
+                popup_->AdvanceSelectionAfterContinuousPaste();
+            }
         }
     }
 }
@@ -338,6 +342,7 @@ void App::ReplayBufferedAltDown() {
     INPUT input{};
     input.type = INPUT_KEYBOARD;
     input.ki.wVk = VK_MENU;
+    input.ki.dwExtraInfo = kClipSoulInjectedInputExtraInfo;
     SendInput(1, &input, sizeof(INPUT));
 }
 
@@ -350,6 +355,7 @@ void App::ReplayBufferedAltUp() {
     input.type = INPUT_KEYBOARD;
     input.ki.wVk = VK_MENU;
     input.ki.dwFlags = KEYEVENTF_KEYUP;
+    input.ki.dwExtraInfo = kClipSoulInjectedInputExtraInfo;
     SendInput(1, &input, sizeof(INPUT));
 }
 
@@ -362,23 +368,25 @@ LRESULT App::HandleKeyboardHook(int code, WPARAM wparam, LPARAM lparam) {
     if (!event || event->vkCode == 0) {
         return CallNextHookEx(keyboard_hook_, code, wparam, lparam);
     }
-    if (HotkeyHookShouldIgnoreInjectedEvent((event->flags & LLKHF_INJECTED) != 0, replayed_alt_down_,
-                                            event->vkCode)) {
+    if (HotkeyHookShouldIgnoreInjectedEvent((event->flags & LLKHF_INJECTED) != 0, event->dwExtraInfo)) {
         return CallNextHookEx(keyboard_hook_, code, wparam, lparam);
     }
 
     if (wparam == WM_KEYUP || wparam == WM_SYSKEYUP) {
-        if (HotkeyShouldSwallowAltReleaseAfterHandledHotkey(swallow_alt_release_, event->vkCode)) {
+        switch (HotkeyAltReleaseActionFor(swallow_alt_release_, buffered_alt_down_, replayed_alt_down_,
+                                          event->vkCode)) {
+        case AltReleaseAction::SwallowAndClearBuffered:
             swallow_alt_release_ = false;
-            return 1;
-        }
-        if (buffered_alt_down_ && HotkeyIsAltKey(event->vkCode)) {
             buffered_alt_down_ = false;
             return 1;
-        }
-        if (HotkeyIsAltKey(event->vkCode) && replayed_alt_down_) {
+        case AltReleaseAction::Swallow:
+            swallow_alt_release_ = false;
+            return 1;
+        case AltReleaseAction::ReplayBufferedAltUp:
             ReplayBufferedAltUp();
             return 1;
+        case AltReleaseAction::PassThrough:
+            break;
         }
         if (hook_hotkey_down_ && hook_hotkey_vk_ == event->vkCode) {
             hook_hotkey_down_ = false;
@@ -418,7 +426,8 @@ LRESULT App::HandleKeyboardHook(int code, WPARAM wparam, LPARAM lparam) {
         return 1;
     }
 
-    if (HotkeyOpenPopupShouldToggle(popup_ && popup_->IsVisible(), popup_hotkey)) {
+    switch (HotkeyOpenPopupActionFor(popup_ && popup_->IsVisible(), popup_hotkey, continuous_hotkey, vk)) {
+    case OpenPopupHotkeyAction::TogglePopup:
         last_input_target_ = foreground && foreground != hwnd_ && (!popup_ || foreground != popup_->hwnd())
                                  ? foreground
                                  : last_input_target_;
@@ -429,13 +438,29 @@ LRESULT App::HandleKeyboardHook(int code, WPARAM wparam, LPARAM lparam) {
         swallow_alt_release_ = buffered_alt_down_;
         buffered_alt_down_ = false;
         PostMessageW(hwnd_, WM_CLIPSOUL_HOOK_HOTKEY, HOTKEY_ID_POPUP,
+                      reinterpret_cast<LPARAM>(HotkeyMessageTarget(foreground, CurrentInputTarget())));
+        return 1;
+    case OpenPopupHotkeyAction::ContinuousPaste:
+        if (HotkeyShouldTrackHandledKeyUp(true, vk)) {
+            hook_hotkey_down_ = true;
+            hook_hotkey_vk_ = vk;
+        }
+        swallow_alt_release_ = buffered_alt_down_;
+        buffered_alt_down_ =
+            buffered_alt_down_ &&
+            HotkeyShouldKeepBufferedAltAfterHandledHotkey(settings_.continuous_paste_hotkey_modifiers,
+                                                          ctrl_down, shift_down, win_down);
+        if (HotkeyHookShouldSuppressRegisteredHotkeyEcho(true)) {
+            ++suppress_continuous_hotkey_count_;
+        }
+        PostMessageW(hwnd_, WM_CLIPSOUL_HOOK_HOTKEY, HOTKEY_ID_CONTINUOUS_PASTE,
                      reinterpret_cast<LPARAM>(HotkeyMessageTarget(foreground, CurrentInputTarget())));
         return 1;
-    }
-
-    if (popup_ && popup_->IsVisible() && HotkeyOpenPopupShouldHandleKey(vk)) {
+    case OpenPopupHotkeyAction::ForwardKey:
         PostMessageW(popup_->hwnd(), WM_KEYDOWN, static_cast<WPARAM>(vk), lparam);
         return 1;
+    case OpenPopupHotkeyAction::None:
+        break;
     }
 
     if (!foreground || foreground == hwnd_ || (popup_ && foreground == popup_->hwnd()) ||
@@ -470,7 +495,11 @@ LRESULT App::HandleKeyboardHook(int code, WPARAM wparam, LPARAM lparam) {
         hook_hotkey_vk_ = vk;
     }
     swallow_alt_release_ = buffered_alt_down_;
-    buffered_alt_down_ = false;
+    buffered_alt_down_ =
+        buffered_alt_down_ &&
+        HotkeyShouldKeepBufferedAltAfterHandledHotkey(popup_hotkey ? settings_.hotkey_modifiers
+                                                                   : settings_.continuous_paste_hotkey_modifiers,
+                                                      ctrl_down, shift_down, win_down);
     PostMessageW(hwnd_, WM_CLIPSOUL_HOOK_HOTKEY, popup_hotkey ? HOTKEY_ID_POPUP : HOTKEY_ID_CONTINUOUS_PASTE,
                  reinterpret_cast<LPARAM>(foreground));
     return 1;

@@ -40,11 +40,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "Yuntun1020"
             VALUE "FileDescription", "ClipSoul clipboard history"
-            VALUE "FileVersion", "1.2.0.0"
+            VALUE "FileVersion", "1.4.0.0"
             VALUE "InternalName", "ClipSoul"
             VALUE "OriginalFilename", "ClipSoul.exe"
             VALUE "ProductName", "ClipSoul"
-            VALUE "ProductVersion", "1.2.0"
+            VALUE "ProductVersion", "1.4.0"
         END
     END
     BLOCK "VarFileInfo"

@@ -144,6 +144,14 @@ int PopupNextSelectedIndex(int item_count, int selected_index) {
     return (ClampPopupSelectedIndex(item_count, selected_index) + 1) % item_count;
 }
 
+PopupContinuousPasteStep PopupContinuousPasteSelectionStep(int item_count, int selected_index) {
+    const int paste_index = ClampPopupSelectedIndex(item_count, selected_index);
+    return PopupContinuousPasteStep{
+        paste_index,
+        PopupNextSelectedIndex(item_count, paste_index),
+    };
+}
+
 int PopupScrollOffsetToRevealSelection(int item_count, int current_offset, int selected_index) {
     return PopupScrollOffsetToRevealSelectionForHeight(item_count, current_offset, selected_index, kMetrics.height);
 }
@@ -189,8 +197,17 @@ float PopupScrollOffsetAfterViewportClampForHeight(int item_count, float current
     return ClampPopupScrollOffsetForHeight(item_count, current_offset, logical_height);
 }
 
-float PopupScrollOffsetAfterReopen(float, float, float) {
-    return 0.0f;
+float PopupScrollOffsetToRevealRange(float current_offset, float range_top, float range_bottom,
+                                     float content_height, float viewport_height) {
+    const float max_offset = std::max(0.0f, content_height - viewport_height);
+    float offset = std::clamp(current_offset, 0.0f, max_offset);
+    if (range_top < offset) {
+        offset = range_top;
+    }
+    if (range_bottom > offset + viewport_height) {
+        offset = range_bottom - viewport_height;
+    }
+    return std::clamp(offset, 0.0f, max_offset);
 }
 
 UiRect PopupScrollbarTrackRect() {
@@ -288,6 +305,20 @@ float PopupScrollbarThumbOpacity(bool hovered, bool dragging, float hover_progre
         return 0.56f + 0.30f * std::clamp(hover_progress, 0.0f, 1.0f);
     }
     return 0.56f;
+}
+
+bool PopupScrollToTopButtonVisible(float scroll_offset) {
+    return scroll_offset > 0.0f;
+}
+
+UiRect PopupScrollToTopButtonRectForSize(int logical_width, int logical_height) {
+    constexpr float kButtonSize = 40.0f;
+    constexpr float kBottomInset = 22.0f;
+    constexpr float kScrollbarGap = 12.0f;
+    const auto scrollbar_hit = PopupScrollbarHitRectForSize(logical_width, logical_height);
+    const float right = scrollbar_hit.left - kScrollbarGap;
+    const float bottom = static_cast<float>(logical_height) - kBottomInset;
+    return Rect(right - kButtonSize, bottom - kButtonSize, right, bottom);
 }
 
 UiRect PopupListClipRectForHeight(int logical_width, int logical_height) {

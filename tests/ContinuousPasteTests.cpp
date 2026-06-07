@@ -82,3 +82,16 @@ TEST_CASE(ContinuousPasteFollowsLastPastedIdWhenListOrderRefreshes) {
     REQUIRE_EQ(cursor.NextFromSelection(items, 20)->id, static_cast<int64_t>(20));
     REQUIRE_EQ(cursor.NextFromSelection(refreshed, 20)->id, static_cast<int64_t>(30));
 }
+
+TEST_CASE(ContinuousPasteKeepsAdvancingWhenSelectionAlreadySeeded) {
+    ClipSoul::ContinuousPasteCursor cursor;
+    const std::vector<ClipSoul::HistoryItem> items{
+        Item(10, L"first"),
+        Item(20, L"second"),
+        Item(30, L"third"),
+    };
+
+    REQUIRE_EQ(cursor.NextFromSelection(items, 20)->id, static_cast<int64_t>(20));
+    REQUIRE_EQ(cursor.NextFromSelection(items, 30)->id, static_cast<int64_t>(30));
+    REQUIRE_EQ(cursor.NextFromSelection(items, 10)->id, static_cast<int64_t>(10));
+}
