@@ -1,6 +1,10 @@
 # ClipSoul
 
 ClipSoul 是一个 Windows 原生剪贴板历史工具，目标是轻量、快速、常驻后台，并突破 Windows 自带剪贴板历史 25 条限制。
+<img width="510" height="840" alt="image" src="https://github.com/user-attachments/assets/a1414e99-be75-4937-861f-8c7996222c47" />
+<img width="639" height="638" alt="image" src="https://github.com/user-attachments/assets/9b571c73-90d7-4c84-987c-292d5c58fac7" />
+
+
 
 ## 特性
 
