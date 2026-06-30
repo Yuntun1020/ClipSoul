@@ -21,20 +21,53 @@ struct UiRect {
     float Height() const { return bottom - top; }
 };
 
+struct UiOffset {
+    float x = 0.0f;
+    float y = 0.0f;
+};
+
 struct PopupMetricsData {
     int width = 340;
     int height = 560;
-    int margin = 14;
+    int margin = 16;
     int header_height = 40;
-    int search_height = 38;
-    int toolbar_height = 38;
-    int tab_height = 42;
+    int search_height = 44;
+    int toolbar_height = 30;
+    int tab_height = 34;
     int card_height = 72;
     int card_gap = 8;
     int corner_radius = 18;
-    int header_button_size = 22;
-    int toolbar_icon_size = 14;
-    float glass_tint_opacity = 0.14f;
+    int header_button_size = 28;
+    int toolbar_icon_size = 16;
+    float glass_tint_opacity = 1.0f;
+};
+
+struct PopupDesignTokenData {
+    int window_padding = 16;
+    int section_gap = 16;
+    int control_gap = 12;
+    int card_gap = 8;
+    int search_to_toolbar_gap = 12;
+    int toolbar_to_tab_gap = 6;
+    int tab_to_list_gap = 12;
+    int popup_corner_radius = 18;
+    int control_radius = 10;
+    int card_radius = 12;
+    int search_height = 44;
+    int card_height = 72;
+    int title_font_size = 18;
+    int section_title_font_size = 14;
+    int body_font_size = 13;
+    int secondary_font_size = 12;
+    int caption_font_size = 11;
+    int toolbar_icon_size = 16;
+    int list_type_icon_size = 20;
+    int window_control_icon_size = 16;
+    int menu_icon_size = 16;
+    int popup_motion_ms = 100;
+    int tab_motion_ms = 120;
+    int hover_motion_ms = 80;
+    int pressed_motion_ms = 60;
 };
 
 struct PopupToolbarLayout {
@@ -87,8 +120,10 @@ struct PopupFilterLayout {
     UiRect start_date;
     UiRect end_date;
     UiRect calendar;
+    UiRect calendar_prev_year;
     UiRect calendar_prev;
     UiRect calendar_next;
+    UiRect calendar_next_year;
     UiRect calendar_title;
     UiRect reset;
     UiRect done;
@@ -128,6 +163,12 @@ struct PopupCalendarCell {
     UiRect rect;
 };
 
+struct PopupCalendarRangeSegment {
+    UiRect rect;
+    bool starts_range = false;
+    bool ends_range = false;
+};
+
 struct PopupCalendarWeekdayLabel {
     wchar_t text = L'\0';
     UiRect rect;
@@ -135,8 +176,10 @@ struct PopupCalendarWeekdayLabel {
 
 enum class PopupCalendarArrow {
     None,
+    PreviousYear,
     PreviousMonth,
     NextMonth,
+    NextYear,
 };
 
 enum class PopupDateRangeField {
@@ -176,10 +219,56 @@ struct PopupThemePalette {
     uint32_t muted = 0;
     uint32_t border = 0;
     uint32_t accent = 0;
+    uint32_t strong_border = 0;
+    uint32_t accent_hover = 0;
+    uint32_t text_tertiary = 0;
     uint32_t danger = 0;
+    uint32_t paper_hover = 0;
+    uint32_t paper_selected = 0;
+    uint32_t border_hover = 0;
+    uint32_t border_selected = 0;
+    uint32_t active_tab = 0;
+    uint32_t scrollbar_track = 0;
+    uint32_t scrollbar_thumb = 0;
+    uint32_t scrollbar_pressed = 0;
+    uint32_t focus_outline = 0;
     float window_opacity = 0.0f;
     float panel_opacity = 0.0f;
     float card_opacity = 0.0f;
+};
+
+struct WindowMaterialPolicy {
+    bool acrylic_blur = false;
+    bool system_backdrop = false;
+    bool rounded_corners = true;
+    bool immersive_dark_mode = true;
+};
+
+struct SettingsProjectLayout {
+    UiRect section;
+    UiRect project_button;
+    UiRect divider;
+    UiRect version_row;
+};
+
+struct SettingsControlLayout {
+    UiRect limit_edit;
+    UiRect pause_toggle;
+    UiRect startup_toggle;
+    UiRect popup_resizable_toggle;
+    UiRect theme_system;
+    UiRect theme_light;
+    UiRect theme_dark;
+    int text_visual_offset = 0;
+    bool uses_internal_dividers = false;
+    bool uses_external_hover_backplates = false;
+};
+
+enum class SettingsThemeTarget {
+    None,
+    System,
+    Light,
+    Dark,
 };
 
 enum class PopupFilterTarget {
@@ -192,8 +281,10 @@ enum class PopupFilterTarget {
     LinkChip,
     StartDate,
     EndDate,
+    CalendarPreviousYear,
     CalendarPrevious,
     CalendarNext,
+    CalendarNextYear,
     CalendarDate,
     Reset,
     Done,
@@ -231,8 +322,16 @@ struct PopupContinuousPasteStep {
 };
 
 const PopupMetricsData& PopupMetrics();
+const PopupDesignTokenData& PopupDesignTokens();
 int PopupItemLongPressMilliseconds();
 int ScalePopupMetricForDpi(int value, unsigned dpi);
+int PopupWindowRegionCornerDiameterForDpi(unsigned dpi);
+bool PopupWindowShouldUseHardRoundedRegion();
+UiRect PopupWindowEdgeStrokeRectForSize(int logical_width, int logical_height);
+bool PopupWindowEdgeShouldDrawCornerArcs();
+float PopupWindowEdgeCornerRadius();
+bool PopupWindowShouldDrawClientEdge();
+bool PopupWindowShouldUseDwmAntialiasedFrame();
 int PopupHeightForVisibleItems(int visible_items);
 int PopupVisibleCardCapacity();
 int PopupVisibleCardCapacityForHeight(int logical_height);
@@ -269,11 +368,43 @@ float PopupScrollbarThumbOpacity(bool hovered, bool dragging, float hover_progre
 bool PopupScrollToTopButtonVisible(float scroll_offset);
 UiRect PopupScrollToTopButtonRectForSize(int logical_width, int logical_height);
 UiRect PopupListClipRectForHeight(int logical_width, int logical_height);
+float PopupMotionProgress(float raw_progress);
+float PopupMotionEnterOffset(float progress, float max_offset);
+float PopupViewSwitchListOffset(int direction, float raw_progress, float max_offset);
+UiOffset PopupMotionEnterOffsetFromTrigger(const UiRect& trigger, const UiRect& panel,
+                                           float progress, float max_offset);
+UiOffset PopupMotionExitOffsetFromTrigger(const UiRect& trigger, const UiRect& panel,
+                                          float raw_progress, float max_offset);
+float PopupPopoverExitOpacity(float raw_progress);
+UiRect PopupTabIndicatorRectForMotion(const UiRect& from, const UiRect& to, float progress);
+float PopupMultiSelectToolbarOffset(float progress, bool entering);
+float PopupMultiSelectCheckboxOffset(float progress, bool entering);
+float PopupMultiSelectCheckboxOpacity(float progress, bool entering);
+float PopupToggleKnobPosition(bool from_active, bool to_active, float progress);
+bool PopupPromptShouldUseSlideAnimation();
+bool PopupPromptShouldUseBlendAnimation();
+bool PopupPromptShouldUsePositionNudgeAnimation();
+int PopupPromptEntranceOffsetPixels();
+int PopupPromptEntranceStepCount();
+int PopupPromptEntranceTimerIntervalMs();
+float PopupMotionEnterOpacity(float progress);
 float PopupExpandedCardExtraHeightForMeasuredDetail(float measured_detail_height);
 float PopupExpandedImageCardExtraHeightForMeasuredDetail(float measured_detail_height);
 float PopupExpandedCardExtraHeightForText(std::wstring_view text);
 float PopupExpandedCardExtraHeightForText(std::wstring_view text, float detail_width);
 PopupThemePalette ResolvePopupThemePalette(int theme_mode, bool system_dark);
+WindowMaterialPolicy ResolveWindowMaterialPolicy();
+uint32_t PopupDarkUiIconTintColor(const PopupThemePalette& palette);
+uint32_t PopupToolbarLabelColor(const PopupThemePalette& palette, bool active, bool danger);
+bool PopupUiIconShouldFallbackToOriginalBitmap(const PopupThemePalette& palette, bool content_icon);
+bool PopupUiIconShouldLoadBitmap(const PopupThemePalette& palette, bool content_icon, bool fast_interaction);
+SettingsProjectLayout SettingsWindowProjectLayout();
+SettingsControlLayout SettingsWindowControlLayout();
+SettingsThemeTarget HitTestSettingsThemeTarget(const SettingsControlLayout& layout, float x, float y);
+bool ThemeChangeShouldRefreshPalette(int theme_mode);
+bool SettingsThemePreviewShouldRefreshNativeControls(int previous_mode, int next_mode);
+bool ThemeModeResolvesDarkChrome(int theme_mode, bool system_dark);
+bool SettingsLimitEditShouldSelectAllOnLoad();
 std::wstring_view PopupSearchPlaceholderText();
 std::wstring_view PopupSearchDisplayText(std::wstring_view query);
 std::wstring PopupEmptyMessage(bool favorites_view, std::wstring_view active_favorite_group);
@@ -304,6 +435,7 @@ bool PopupShouldRedrawNativeSearchAfterParentPaint(bool has_native_edit, bool mo
 bool PopupSearchShouldDrawSelection(bool focused, bool has_query_text, PopupSearchSelectionRange selection);
 bool PopupShouldDrawDecorativeShadows(bool moving_or_resizing_window);
 bool PopupShouldLoadUiIcon(bool moving_or_resizing_window);
+bool PopupIsFastMediaInteraction(bool moving_window, bool resizing_window, bool view_switch_motion);
 bool PopupShouldLoadImagePreview(bool moving_or_resizing_window);
 bool PopupShouldLoadFileIcon(bool moving_or_resizing_window);
 bool PopupShouldDrawCachedMediaDuringFastInteraction(bool moving_or_resizing_window, bool cached);
@@ -359,6 +491,8 @@ int HitTestPopupCardExpandIndex(int item_count, int scroll_offset, std::optional
                                 const std::vector<int64_t>& visible_item_ids, float x, float y);
 UiRect FitImageRectToBounds(float source_width, float source_height, const UiRect& bounds);
 std::vector<PopupCalendarCell> BuildPopupCalendarCells(const PopupFilterLayout& layout, int year, int month);
+std::vector<PopupCalendarRangeSegment> BuildPopupCalendarRangeSegments(
+    const PopupFilterLayout& layout, int year, int month, const PopupDateRangeState& state);
 std::optional<PopupCalendarDate> HitTestPopupCalendarDate(const PopupFilterLayout& layout, int year, int month,
                                                           float x, float y);
 PopupCalendarArrow HitTestPopupCalendarArrow(const PopupFilterLayout& layout, float x, float y);

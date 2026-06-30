@@ -1,6 +1,7 @@
 ﻿#include "ClipSoul/Win32Util.h"
 
 #include "ClipSoul/HistoryStore.h"
+#include "ClipSoul/PopupLayout.h"
 #include "ClipSoul/StorageConfig.h"
 #include "ClipSoul/TextUtil.h"
 
@@ -14,53 +15,12 @@
 
 namespace ClipSoul {
 namespace {
-enum AccentState {
-    ACCENT_DISABLED = 0,
-    ACCENT_ENABLE_GRADIENT = 1,
-    ACCENT_ENABLE_TRANSPARENTGRADIENT = 2,
-    ACCENT_ENABLE_BLURBEHIND = 3,
-    ACCENT_ENABLE_ACRYLICBLURBEHIND = 4,
-};
-
-struct AccentPolicy {
-    int accent_state = 0;
-    int accent_flags = 0;
-    int gradient_color = 0;
-    int animation_id = 0;
-};
-
-struct WindowCompositionAttributeData {
-    int attribute = 0;
-    void* data = nullptr;
-    SIZE_T size_of_data = 0;
-};
-
-void EnableAcrylicBlur(HWND hwnd, bool dark) {
-    HMODULE user32 = GetModuleHandleW(L"user32.dll");
-    if (!user32) {
-        return;
-    }
-
-    using SetWindowCompositionAttributeFn = BOOL(WINAPI*)(HWND, WindowCompositionAttributeData*);
-    auto* set_window_composition_attribute = reinterpret_cast<SetWindowCompositionAttributeFn>(
-        GetProcAddress(user32, "SetWindowCompositionAttribute"));
-    if (!set_window_composition_attribute) {
-        return;
-    }
-
-    AccentPolicy accent;
-    accent.accent_state = ACCENT_ENABLE_ACRYLICBLURBEHIND;
-    accent.accent_flags = 2;
-    accent.gradient_color = dark ? 0x66100F0D : 0x33F8FBFF; // AABBGGRR.
-
-    WindowCompositionAttributeData data;
-    data.attribute = 19; // WCA_ACCENT_POLICY
-    data.data = &accent;
-    data.size_of_data = sizeof(accent);
-    set_window_composition_attribute(hwnd, &data);
-}
 std::filesystem::path StorageConfigPath() {
     return ExecutableDir() / L"clipsoul.storage";
+}
+
+COLORREF ColorRefFromHex(uint32_t rgb) {
+    return RGB((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
 }
 } // namespace
 
@@ -139,16 +99,40 @@ void EnableDpiAwareness() {
 
 void SetModernWindowAttributes(HWND hwnd) {
     const bool system_dark = IsSystemDarkTheme();
-    EnableAcrylicBlur(hwnd, system_dark);
+    const auto material = ResolveWindowMaterialPolicy();
 
-    const BOOL dark = system_dark ? TRUE : FALSE;
+    if (material.immersive_dark_mode) {
+        const BOOL dark = system_dark ? TRUE : FALSE;
+        DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
+    }
+
+    if (material.rounded_corners) {
+        const DWORD corner = DWMWCP_ROUND;
+        DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
+    }
+
+    (void)material.system_backdrop;
+}
+
+void SetPopupWindowChromeAttributes(HWND hwnd) {
+    SetPopupWindowChromeAttributes(hwnd, 0);
+}
+
+void SetPopupWindowChromeAttributes(HWND hwnd, int theme_mode) {
+    const DWMNCRENDERINGPOLICY non_client_policy = DWMNCRP_DISABLED;
+    DwmSetWindowAttribute(hwnd, DWMWA_NCRENDERING_POLICY, &non_client_policy, sizeof(non_client_policy));
+
+    const BOOL dark = ThemeModeResolvesDarkChrome(theme_mode, IsSystemDarkTheme()) ? TRUE : FALSE;
     DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
 
-    const DWORD corner = DWMWCP_ROUND;
+    const DWORD corner = PopupWindowShouldUseDwmAntialiasedFrame() ? DWMWCP_ROUND : DWMWCP_DONOTROUND;
     DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
 
-    const DWORD backdrop = 3; // DWMSBT_TRANSIENTWINDOW, a lighter acrylic-like popup backdrop on Windows 11.
-    DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &backdrop, sizeof(backdrop));
+    const auto palette = ResolvePopupThemePalette(theme_mode, IsSystemDarkTheme());
+    const COLORREF border_color = PopupWindowShouldUseDwmAntialiasedFrame()
+                                      ? ColorRefFromHex(palette.border_selected)
+                                      : DWMWA_COLOR_NONE;
+    DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &border_color, sizeof(border_color));
 }
 
 bool IsSystemDarkTheme() {

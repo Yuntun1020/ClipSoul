@@ -14,6 +14,8 @@ bool SaveStorageDir(const std::filesystem::path& storage_dir);
 std::wstring FormatWin32Error(DWORD error);
 void EnableDpiAwareness();
 void SetModernWindowAttributes(HWND hwnd);
+void SetPopupWindowChromeAttributes(HWND hwnd);
+void SetPopupWindowChromeAttributes(HWND hwnd, int theme_mode);
 bool IsSystemDarkTheme();
 bool SetStartWithWindows(bool enabled);
 bool GetStartWithWindows();

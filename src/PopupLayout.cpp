@@ -10,18 +10,19 @@ namespace {
 constexpr PopupMetricsData kMetrics{
     340, // width
     560, // height
-    14,  // margin
-    40,  // header_height
-    38,  // search_height
-    38,  // toolbar_height
-    42,  // tab_height
-    68,  // card_height
-    6,   // card_gap
+    16,  // margin
+    42,  // header_height
+    44,  // search_height
+    30,  // toolbar_height
+    34,  // tab_height
+    72,  // card_height
+    8,   // card_gap
     18,  // corner_radius
-    22,  // header_button_size
-    14,  // toolbar_icon_size
-    0.14f,
+    28,  // header_button_size
+    16,  // toolbar_icon_size
+    1.0f,
 };
+constexpr PopupDesignTokenData kDesignTokens{};
 constexpr int kMinTextRangeHeight = 2;
 
 UiRect Rect(float left, float top, float right, float bottom) {
@@ -69,6 +70,10 @@ const PopupMetricsData& PopupMetrics() {
     return kMetrics;
 }
 
+const PopupDesignTokenData& PopupDesignTokens() {
+    return kDesignTokens;
+}
+
 int PopupItemLongPressMilliseconds() {
     return 200;
 }
@@ -78,6 +83,38 @@ int ScalePopupMetricForDpi(int value, unsigned dpi) {
         dpi = 96;
     }
     return static_cast<int>((static_cast<long long>(value) * dpi + 48) / 96);
+}
+
+int PopupWindowRegionCornerDiameterForDpi(unsigned dpi) {
+    return PopupWindowShouldUseHardRoundedRegion()
+               ? ScalePopupMetricForDpi(static_cast<int>(std::lround(PopupWindowEdgeCornerRadius() * 2.0f)), dpi)
+               : 0;
+}
+
+bool PopupWindowShouldUseHardRoundedRegion() {
+    return false;
+}
+
+UiRect PopupWindowEdgeStrokeRectForSize(int logical_width, int logical_height) {
+    const float right = std::max(0.5f, static_cast<float>(logical_width) - 0.5f);
+    const float bottom = std::max(0.5f, static_cast<float>(logical_height) - 0.5f);
+    return Rect(0.5f, 0.5f, right, bottom);
+}
+
+bool PopupWindowEdgeShouldDrawCornerArcs() {
+    return true;
+}
+
+float PopupWindowEdgeCornerRadius() {
+    return 22.0f;
+}
+
+bool PopupWindowShouldDrawClientEdge() {
+    return false;
+}
+
+bool PopupWindowShouldUseDwmAntialiasedFrame() {
+    return true;
 }
 
 int PopupHeightForVisibleItems(int) {
@@ -219,8 +256,8 @@ UiRect PopupScrollbarTrackRectForHeight(int logical_height) {
 }
 
 UiRect PopupScrollbarTrackRectForSize(int logical_width, int logical_height) {
-    return Rect(static_cast<float>(logical_width - 12), PopupListTop(),
-                static_cast<float>(logical_width - 6), static_cast<float>(logical_height - 10));
+    return Rect(static_cast<float>(logical_width - 14), PopupListTop(),
+                static_cast<float>(logical_width - 8), static_cast<float>(logical_height - 10));
 }
 
 UiRect PopupScrollbarHitRect() {
@@ -326,6 +363,116 @@ UiRect PopupListClipRectForHeight(int logical_width, int logical_height) {
                 std::max(PopupListTop(), static_cast<float>(logical_height) - 4.0f));
 }
 
+float PopupMotionProgress(float raw_progress) {
+    const float clamped = std::clamp(raw_progress, 0.0f, 1.0f);
+    const float inverse = 1.0f - clamped;
+    return 1.0f - inverse * inverse * inverse * inverse;
+}
+
+float PopupMotionEnterOffset(float progress, float max_offset) {
+    return std::max(0.0f, max_offset) * (1.0f - std::clamp(progress, 0.0f, 1.0f));
+}
+
+float PopupViewSwitchListOffset(int direction, float raw_progress, float max_offset) {
+    const float sign = direction < 0 ? -1.0f : 1.0f;
+    return sign * PopupMotionEnterOffset(PopupMotionProgress(raw_progress), max_offset);
+}
+
+UiOffset PopupMotionEnterOffsetFromTrigger(const UiRect& trigger, const UiRect& panel,
+                                           float progress, float max_offset) {
+    const float remaining = PopupMotionEnterOffset(progress, max_offset);
+    if (remaining <= 0.0f) {
+        return UiOffset{};
+    }
+    const float trigger_x = (trigger.left + trigger.right) * 0.5f;
+    const float trigger_y = (trigger.top + trigger.bottom) * 0.5f;
+    const float anchor_x = std::clamp(trigger_x, panel.left, panel.right);
+    const float anchor_y = std::clamp(trigger_y, panel.top, panel.bottom);
+    const float dx = trigger_x - anchor_x;
+    const float dy = trigger_y - anchor_y;
+    const float length = std::sqrt(dx * dx + dy * dy);
+    if (length <= 0.01f) {
+        return UiOffset{0.0f, -remaining};
+    }
+    return UiOffset{dx / length * remaining, dy / length * remaining};
+}
+
+UiOffset PopupMotionExitOffsetFromTrigger(const UiRect& trigger, const UiRect& panel,
+                                          float raw_progress, float max_offset) {
+    (void)trigger;
+    (void)panel;
+    (void)raw_progress;
+    (void)max_offset;
+    return UiOffset{};
+}
+
+float PopupPopoverExitOpacity(float raw_progress) {
+    const float t = std::clamp(raw_progress, 0.0f, 1.0f);
+    const float smooth = t * t * (3.0f - 2.0f * t);
+    return 1.0f - smooth;
+}
+
+UiRect PopupTabIndicatorRectForMotion(const UiRect& from, const UiRect& to, float progress) {
+    const float t = std::clamp(progress, 0.0f, 1.0f);
+    const auto lerp = [t](float a, float b) {
+        return a + (b - a) * t;
+    };
+    return Rect(lerp(from.left, to.left), lerp(from.top, to.top),
+                lerp(from.right, to.right), lerp(from.bottom, to.bottom));
+}
+
+float PopupMultiSelectToolbarOffset(float progress, bool entering) {
+    constexpr float kOffset = 18.0f;
+    const float t = std::clamp(progress, 0.0f, 1.0f);
+    return entering ? PopupMotionEnterOffset(t, kOffset) : 0.0f;
+}
+
+float PopupMultiSelectCheckboxOffset(float progress, bool entering) {
+    constexpr float kOffset = -18.0f;
+    const float t = std::clamp(progress, 0.0f, 1.0f);
+    return entering ? kOffset * (1.0f - t) : kOffset * t;
+}
+
+float PopupMultiSelectCheckboxOpacity(float progress, bool entering) {
+    const float t = std::clamp(progress, 0.0f, 1.0f);
+    return entering ? t : 1.0f - t;
+}
+
+float PopupToggleKnobPosition(bool from_active, bool to_active, float progress) {
+    const float from = from_active ? 1.0f : 0.0f;
+    const float to = to_active ? 1.0f : 0.0f;
+    return from + (to - from) * PopupMotionProgress(progress);
+}
+
+bool PopupPromptShouldUseSlideAnimation() {
+    return false;
+}
+
+bool PopupPromptShouldUseBlendAnimation() {
+    return false;
+}
+
+bool PopupPromptShouldUsePositionNudgeAnimation() {
+    return true;
+}
+
+int PopupPromptEntranceOffsetPixels() {
+    return 6;
+}
+
+int PopupPromptEntranceStepCount() {
+    return 7;
+}
+
+int PopupPromptEntranceTimerIntervalMs() {
+    return 16;
+}
+
+float PopupMotionEnterOpacity(float progress) {
+    constexpr float kStartOpacity = 0.84f;
+    return kStartOpacity + (1.0f - kStartOpacity) * std::clamp(progress, 0.0f, 1.0f);
+}
+
 float PopupExpandedCardExtraHeightForMeasuredDetail(float measured_detail_height) {
     constexpr float kBaseHeight = 102.0f;
     constexpr float kDetailVerticalPadding = 18.0f;
@@ -381,35 +528,150 @@ PopupThemePalette ResolvePopupThemePalette(int theme_mode, bool system_dark) {
     if (dark) {
         return PopupThemePalette{
             true,
-            0x101318,
-            0x1A202A,
-            0x202734,
-            0x18202B,
-            0xF3F6FA,
-            0xA7B0BF,
-            0x465163,
-            0xAEB8C6,
-            0xF87171,
-            0.96f,
-            0.82f,
-            0.78f,
+            0x151412,
+            0x1F1C18,
+            0x28231C,
+            0x1C1A16,
+            0xEEE9DF,
+            0xAAA397,
+            0x5A5348,
+            0x8FA08B,
+            0x6D665A,
+            0xA8B7A4,
+            0x81786A,
+            0xC4685E,
+            0x302D28,
+            0x39342D,
+            0x6D665A,
+            0x8A7F6E,
+            0xA8B7A4,
+            0x2B2823,
+            0x737D6D,
+            0x8FA08B,
+            0x8FA08B,
+            1.0f,
+            1.0f,
+            1.0f,
         };
     }
     return PopupThemePalette{
         false,
-        0xF8FBFF,
-        0xFFFFFF,
-        0xFFFFFF,
-        0xFFFFFF,
-        0x172033,
-        0x7B8798,
-        0xDCE5F0,
-        0x0EA5A4,
-        0xE5484D,
-        kMetrics.glass_tint_opacity,
-        0.88f,
-        0.78f,
+        0xF6F1E8,
+        0xFBF8F2,
+        0xFBF8F2,
+        0xFBF8F2,
+        0x211E19,
+        0x69645B,
+        0xD8D0C5,
+        0x73826B,
+        0xB9A995,
+        0x66725F,
+        0x8D867C,
+        0xA95148,
+        0xF0E7D9,
+        0xECE4D7,
+        0xCFC5B8,
+        0xB9A995,
+        0x69745C,
+        0xEFE8DD,
+        0xA7B09F,
+        0x66725F,
+        0x73826B,
+        1.0f,
+        1.0f,
+        1.0f,
     };
+}
+
+WindowMaterialPolicy ResolveWindowMaterialPolicy() {
+    return WindowMaterialPolicy{
+        false,
+        false,
+        true,
+        true,
+    };
+}
+
+uint32_t PopupDarkUiIconTintColor(const PopupThemePalette& palette) {
+    return palette.dark ? palette.muted : palette.text;
+}
+
+uint32_t PopupToolbarLabelColor(const PopupThemePalette& palette, bool active, bool danger) {
+    if (danger) {
+        return palette.danger;
+    }
+    if (!palette.dark) {
+        return active ? palette.text : palette.muted;
+    }
+    return active ? palette.accent_hover : palette.muted;
+}
+
+bool PopupUiIconShouldFallbackToOriginalBitmap(const PopupThemePalette& palette, bool content_icon) {
+    return !palette.dark || content_icon;
+}
+
+bool PopupUiIconShouldLoadBitmap(const PopupThemePalette& palette, bool content_icon, bool fast_interaction) {
+    return !fast_interaction || (palette.dark && !content_icon);
+}
+
+SettingsProjectLayout SettingsWindowProjectLayout() {
+    return SettingsProjectLayout{
+        Rect(30.0f, 458.0f, 604.0f, 576.0f),
+        Rect(54.0f, 500.0f, 222.0f, 536.0f),
+        Rect(44.0f, 544.0f, 592.0f, 545.0f),
+        Rect(54.0f, 550.0f, 592.0f, 570.0f),
+    };
+}
+
+SettingsControlLayout SettingsWindowControlLayout() {
+    return SettingsControlLayout{
+        Rect(170.0f, 83.0f, 268.0f, 105.0f),
+        Rect(236.0f, 120.0f, 274.0f, 142.0f),
+        Rect(236.0f, 154.0f, 274.0f, 176.0f),
+        Rect(225.0f, 394.0f, 263.0f, 416.0f),
+        Rect(150.0f, 356.0f, 250.0f, 384.0f),
+        Rect(258.0f, 356.0f, 340.0f, 384.0f),
+        Rect(348.0f, 356.0f, 430.0f, 384.0f),
+        1,
+        false,
+        false,
+    };
+}
+
+SettingsThemeTarget HitTestSettingsThemeTarget(const SettingsControlLayout& layout, float x, float y) {
+    if (Contains(layout.theme_system, x, y)) {
+        return SettingsThemeTarget::System;
+    }
+    if (Contains(layout.theme_light, x, y)) {
+        return SettingsThemeTarget::Light;
+    }
+    if (Contains(layout.theme_dark, x, y)) {
+        return SettingsThemeTarget::Dark;
+    }
+    return SettingsThemeTarget::None;
+}
+
+bool ThemeChangeShouldRefreshPalette(int theme_mode) {
+    return std::clamp(theme_mode, 0, 2) == 0;
+}
+
+bool SettingsThemePreviewShouldRefreshNativeControls(int previous_mode, int next_mode) {
+    return std::clamp(previous_mode, 0, 2) != std::clamp(next_mode, 0, 2);
+}
+
+bool ThemeModeResolvesDarkChrome(int theme_mode, bool system_dark) {
+    const int mode = std::clamp(theme_mode, 0, 2);
+    if (mode == 1) {
+        return false;
+    }
+    if (mode == 2) {
+        return true;
+    }
+    return system_dark;
+}
+
+bool SettingsLimitEditShouldSelectAllOnLoad() {
+    return false;
 }
 
 std::wstring_view PopupSearchPlaceholderText() {
@@ -583,6 +845,10 @@ bool PopupShouldLoadUiIcon(bool moving_or_resizing_window) {
     return !moving_or_resizing_window;
 }
 
+bool PopupIsFastMediaInteraction(bool moving_window, bool resizing_window, bool view_switch_motion) {
+    return moving_window || resizing_window || view_switch_motion;
+}
+
 bool PopupShouldLoadImagePreview(bool moving_or_resizing_window) {
     return !moving_or_resizing_window;
 }
@@ -682,19 +948,19 @@ float PopupSearchClearButtonOpacity(bool hovered) {
 }
 
 float PopupSearchTop() {
-    return static_cast<float>(kMetrics.header_height + 8);
+    return static_cast<float>(kMetrics.header_height + 6);
 }
 
 float PopupToolbarTop() {
-    return PopupSearchTop() + static_cast<float>(kMetrics.search_height) + 10.0f;
+    return PopupSearchTop() + static_cast<float>(kMetrics.search_height + kDesignTokens.search_to_toolbar_gap);
 }
 
 float PopupTabsTop() {
-    return PopupToolbarTop() + static_cast<float>(kMetrics.toolbar_height);
+    return PopupToolbarTop() + static_cast<float>(kMetrics.toolbar_height + kDesignTokens.toolbar_to_tab_gap);
 }
 
 float PopupListTop() {
-    return PopupTabsTop() + static_cast<float>(kMetrics.tab_height) + 2.0f;
+    return PopupTabsTop() + static_cast<float>(kMetrics.tab_height + kDesignTokens.tab_to_list_gap);
 }
 
 PopupHeaderLayout BuildPopupHeaderLayout() {
@@ -704,11 +970,11 @@ PopupHeaderLayout BuildPopupHeaderLayout() {
 PopupHeaderLayout BuildPopupHeaderLayoutForWidth(int logical_width) {
     logical_width = std::max(logical_width, 1);
     PopupHeaderLayout layout;
-    layout.title = Rect(static_cast<float>(kMetrics.margin), 10.0f, 160.0f, 38.0f);
-    layout.pin = Rect(static_cast<float>(logical_width - 70), 13.0f,
-                      static_cast<float>(logical_width - 48), 35.0f);
-    layout.close = Rect(static_cast<float>(logical_width - 38), 13.0f,
-                        static_cast<float>(logical_width - 16), 35.0f);
+    layout.title = Rect(static_cast<float>(kMetrics.margin), 12.0f, 190.0f, 36.0f);
+    layout.pin = Rect(static_cast<float>(logical_width - 80), 11.0f,
+                      static_cast<float>(logical_width - 52), 39.0f);
+    layout.close = Rect(static_cast<float>(logical_width - 44), 11.0f,
+                        static_cast<float>(logical_width - 16), 39.0f);
     return layout;
 }
 
@@ -723,22 +989,22 @@ PopupSearchLayout BuildPopupSearchLayoutForWidth(int logical_width) {
     layout.box = Rect(static_cast<float>(kMetrics.margin), top,
                       static_cast<float>(logical_width - kMetrics.margin),
                       top + static_cast<float>(kMetrics.search_height));
-    layout.icon = Rect(static_cast<float>(kMetrics.margin + 14), top + 11.0f,
-                       static_cast<float>(kMetrics.margin + 30), top + 27.0f);
-    layout.text = Rect(static_cast<float>(kMetrics.margin + 42), top + 8.0f,
-                       static_cast<float>(logical_width - kMetrics.margin - 32), top + 31.0f);
-    layout.clear_button = Rect(static_cast<float>(logical_width - kMetrics.margin - 24), top + 11.0f,
-                               static_cast<float>(logical_width - kMetrics.margin - 8), top + 27.0f);
+    layout.icon = Rect(static_cast<float>(kMetrics.margin + 17), top + 13.0f,
+                       static_cast<float>(kMetrics.margin + 35), top + 31.0f);
+    layout.text = Rect(static_cast<float>(kMetrics.margin + 48), top + 10.0f,
+                       static_cast<float>(logical_width - kMetrics.margin - 40), top + 38.0f);
+    layout.clear_button = Rect(static_cast<float>(logical_width - kMetrics.margin - 32), top + 14.0f,
+                               static_cast<float>(logical_width - kMetrics.margin - 16), top + 30.0f);
     return layout;
 }
 
 UiRect BuildPopupHeaderPinIconRect(const PopupHeaderLayout& header) {
-    return Rect(header.pin.left + 4.0f, header.pin.top + 2.5f, header.pin.right - 4.0f, header.pin.bottom - 2.5f);
+    return Rect(header.pin.left + 6.0f, header.pin.top + 6.0f, header.pin.right - 6.0f, header.pin.bottom - 6.0f);
 }
 
 UiRect BuildPopupHeaderCloseIconRect(const PopupHeaderLayout& header) {
-    return Rect(header.close.left + 4.0f, header.close.top + 4.0f, header.close.right - 4.0f,
-                header.close.bottom - 4.0f);
+    return Rect(header.close.left + 6.0f, header.close.top + 6.0f, header.close.right - 6.0f,
+                header.close.bottom - 6.0f);
 }
 
 PopupToolbarLayout BuildPopupToolbarLayout(bool multi_select) {
@@ -748,29 +1014,63 @@ PopupToolbarLayout BuildPopupToolbarLayout(bool multi_select) {
 PopupToolbarLayout BuildPopupToolbarLayoutForWidth(bool multi_select, int logical_width) {
     logical_width = std::max(logical_width, 1);
     const float y = PopupToolbarTop();
-    const float bottom = y + 30.0f;
+    const float bottom = y + static_cast<float>(kMetrics.toolbar_height);
+    const float left_edge = static_cast<float>(kMetrics.margin);
     const float right_edge = static_cast<float>(logical_width - kMetrics.margin);
     PopupToolbarLayout layout;
-    layout.filter = Rect(static_cast<float>(kMetrics.margin), y, static_cast<float>(kMetrics.margin + 92), bottom);
+    const bool compact = logical_width < 520;
+    layout.filter = Rect(left_edge, y, static_cast<float>(kMetrics.margin + (compact ? 92 : 112)), bottom);
     if (multi_select) {
-        layout.cancel_multi_select = Rect(static_cast<float>(kMetrics.margin), y, 76.0f, bottom);
-        layout.select_all = Rect(80.0f, y, 138.0f, bottom);
-        const float right_group_left = right_edge - 184.0f;
-        layout.delete_selected = Rect(right_group_left, y, right_group_left + 90.0f, bottom);
-        layout.paste_selected = Rect(right_group_left + 94.0f, y, right_group_left + 184.0f, bottom);
+        if (compact) {
+            constexpr float kGap = 4.0f;
+            constexpr float kCancelBase = 58.0f;
+            constexpr float kSelectBase = 58.0f;
+            constexpr float kDeleteBase = 88.0f;
+            constexpr float kPasteBase = 92.0f;
+            constexpr float kBaseTotal = kCancelBase + kSelectBase + kDeleteBase + kPasteBase;
+            const float content_width = std::max(1.0f, right_edge - left_edge - kGap * 3.0f);
+            const float scale = content_width < kBaseTotal ? content_width / kBaseTotal : 1.0f;
+            const float extra = std::max(0.0f, content_width - kBaseTotal);
+            const float cancel_width = kCancelBase * scale + extra * 0.15f;
+            const float select_width = kSelectBase * scale + extra * 0.15f;
+            const float delete_width = kDeleteBase * scale + extra * 0.35f;
+            float x = left_edge;
+            layout.cancel_multi_select = Rect(x, y, x + cancel_width, bottom);
+            x = layout.cancel_multi_select.right + kGap;
+            layout.select_all = Rect(x, y, x + select_width, bottom);
+            x = layout.select_all.right + kGap;
+            layout.delete_selected = Rect(x, y, x + delete_width, bottom);
+            x = layout.delete_selected.right + kGap;
+            layout.paste_selected = Rect(x, y, right_edge, bottom);
+        } else {
+            layout.cancel_multi_select = Rect(left_edge, y, 96.0f, bottom);
+            layout.select_all = Rect(104.0f, y, 176.0f, bottom);
+            const float right_group_left = right_edge - 216.0f;
+            layout.delete_selected = Rect(right_group_left, y, right_group_left + 104.0f, bottom);
+            layout.paste_selected = Rect(right_group_left + 112.0f, y, right_group_left + 216.0f, bottom);
+        }
     } else {
-        const float right_group_left = right_edge - 166.0f;
-        layout.multi_select = Rect(right_group_left, y, right_group_left + 64.0f, bottom);
-        layout.clear_all = Rect(right_group_left + 70.0f, y, right_group_left + 166.0f, bottom);
+        if (compact) {
+            constexpr float kGap = 8.0f;
+            const float button_width = std::max(1.0f, (right_edge - left_edge - kGap * 2.0f) / 3.0f);
+            layout.filter = Rect(left_edge, y, left_edge + button_width, bottom);
+            layout.multi_select = Rect(layout.filter.right + kGap, y,
+                                       layout.filter.right + kGap + button_width, bottom);
+            layout.clear_all = Rect(layout.multi_select.right + kGap, y, right_edge, bottom);
+        } else {
+            const float right_group_left = right_edge - 232.0f;
+            layout.multi_select = Rect(right_group_left, y, right_group_left + 96.0f, bottom);
+            layout.clear_all = Rect(right_group_left + 104.0f, y, right_group_left + 232.0f, bottom);
+        }
     }
     return layout;
 }
 
 UiRect PopupToolbarLabelRect(const UiRect& button, bool has_chevron) {
     const bool compact = button.Width() < 94.0f;
-    const float label_left = button.left + (compact ? 24.0f : 29.0f);
+    const float label_left = button.left + (compact ? 24.0f : 34.0f);
     const float label_right = button.right - (has_chevron ? 21.0f : 6.0f);
-    return Rect(label_left, button.top + 7.0f, label_right, button.bottom - 6.0f);
+    return Rect(label_left, button.top + 6.0f, label_right, button.bottom - 6.0f);
 }
 
 PopupTabsLayout BuildPopupTabsLayout(bool favorites_active) {
@@ -780,19 +1080,20 @@ PopupTabsLayout BuildPopupTabsLayout(bool favorites_active) {
 PopupTabsLayout BuildPopupTabsLayoutForWidth(bool favorites_active, int logical_width) {
     logical_width = std::max(logical_width, 1);
     const float top = PopupTabsTop();
-    const float tab_offset = static_cast<float>(logical_width - kMetrics.width) * 0.5f;
+    const float tab_left = std::max(static_cast<float>(kMetrics.margin + 40),
+                                    (static_cast<float>(logical_width) - 144.0f) * 0.5f);
     const float action_offset = static_cast<float>(logical_width - kMetrics.width);
     PopupTabsLayout layout;
-    layout.history = Rect(96.0f + tab_offset, top + 4.0f, 170.0f + tab_offset, top + 32.0f);
-    layout.favorites = Rect(170.0f + tab_offset, top + 4.0f, 244.0f + tab_offset, top + 32.0f);
-    layout.favorite_group = Rect(static_cast<float>(kMetrics.width - 74) + action_offset, top + 8.0f,
-                                 static_cast<float>(kMetrics.width - 50) + action_offset, top + 32.0f);
-    layout.add_favorite_phrase = Rect(static_cast<float>(kMetrics.width - 42) + action_offset, top + 8.0f,
-                                      static_cast<float>(kMetrics.width - 18) + action_offset, top + 32.0f);
+    layout.history = Rect(tab_left, top + 2.0f, tab_left + 72.0f, top + 28.0f);
+    layout.favorites = Rect(tab_left + 72.0f, top + 2.0f, tab_left + 144.0f, top + 28.0f);
+    layout.favorite_group = Rect(static_cast<float>(kMetrics.width - 72) + action_offset, top + 4.0f,
+                                 static_cast<float>(kMetrics.width - 48) + action_offset, top + 28.0f);
+    layout.add_favorite_phrase = Rect(static_cast<float>(kMetrics.width - 40) + action_offset, top + 4.0f,
+                                      static_cast<float>(kMetrics.width - 16) + action_offset, top + 28.0f);
     const UiRect& active = favorites_active ? layout.favorites : layout.history;
-    layout.active_indicator = Rect(active.left + 14.0f, top + 33.0f, active.right - 14.0f, top + 35.0f);
-    layout.divider = Rect(static_cast<float>(kMetrics.margin), top + 35.0f,
-                         static_cast<float>(logical_width - kMetrics.margin), top + 36.0f);
+    layout.active_indicator = Rect(active.left + 12.0f, top + 28.0f, active.right - 12.0f, top + 31.0f);
+    layout.divider = Rect(static_cast<float>(kMetrics.margin), top + 33.0f,
+                          static_cast<float>(logical_width - kMetrics.margin), top + 34.0f);
     return layout;
 }
 
@@ -806,40 +1107,44 @@ PopupFilterLayout BuildPopupFilterLayout() {
     const float left = static_cast<float>(kMetrics.margin);
     const float top = PopupToolbarTop() + 34.0f;
     PopupFilterLayout layout;
-    layout.panel = Rect(left, top, static_cast<float>(kMetrics.width - kMetrics.margin), top + 424.0f);
+    layout.panel = Rect(left, top, static_cast<float>(kMetrics.width - kMetrics.margin), top + 394.0f);
     layout.close = Rect(layout.panel.right - 34.0f, top + 12.0f, layout.panel.right - 14.0f, top + 32.0f);
-    layout.type_section = Rect(left + 14.0f, top + 46.0f, layout.panel.right - 14.0f, top + 122.0f);
+    layout.type_section = Rect(left + 14.0f, top + 42.0f, layout.panel.right - 14.0f, top + 108.0f);
 
     const float chip_width = 132.0f;
-    const float chip_height = 26.0f;
+    const float chip_height = 22.0f;
     const float chip_gap = 12.0f;
     const float chip_left = layout.type_section.left;
-    const float chip_top = layout.type_section.top + 22.0f;
+    const float chip_top = layout.type_section.top + 19.0f;
     layout.text_chip = Rect(chip_left, chip_top, chip_left + chip_width, chip_top + chip_height);
     layout.image_chip = Rect(chip_left + chip_width + chip_gap, chip_top,
                              chip_left + chip_width * 2.0f + chip_gap, chip_top + chip_height);
-    layout.file_chip = Rect(chip_left, chip_top + chip_height + 8.0f,
-                            chip_left + chip_width, chip_top + chip_height * 2.0f + 8.0f);
-    layout.link_chip = Rect(chip_left + chip_width + chip_gap, chip_top + chip_height + 8.0f,
-                            chip_left + chip_width * 2.0f + chip_gap, chip_top + chip_height * 2.0f + 8.0f);
+    layout.file_chip = Rect(chip_left, chip_top + chip_height + 6.0f,
+                            chip_left + chip_width, chip_top + chip_height * 2.0f + 6.0f);
+    layout.link_chip = Rect(chip_left + chip_width + chip_gap, chip_top + chip_height + 6.0f,
+                            chip_left + chip_width * 2.0f + chip_gap, chip_top + chip_height * 2.0f + 6.0f);
 
-    layout.date_card = Rect(left + 14.0f, top + 132.0f, layout.panel.right - 14.0f, top + 206.0f);
-    const float date_box_top = layout.date_card.top + 32.0f;
+    layout.date_card = Rect(left + 14.0f, top + 121.0f, layout.panel.right - 14.0f, top + 187.0f);
+    const float date_box_top = layout.date_card.top + 26.0f;
     const float date_box_width = (layout.date_card.Width() - 30.0f) / 2.0f;
     layout.start_date = Rect(layout.date_card.left + 10.0f, date_box_top,
-                             layout.date_card.left + 10.0f + date_box_width, date_box_top + 32.0f);
+                             layout.date_card.left + 10.0f + date_box_width, date_box_top + 30.0f);
     layout.end_date = Rect(layout.start_date.right + 10.0f, date_box_top,
-                           layout.start_date.right + 10.0f + date_box_width, date_box_top + 32.0f);
+                           layout.start_date.right + 10.0f + date_box_width, date_box_top + 30.0f);
 
-    layout.calendar = Rect(left + 14.0f, top + 216.0f, layout.panel.right - 14.0f, top + 390.0f);
-    layout.calendar_prev = Rect(layout.calendar.left + 10.0f, layout.calendar.top + 9.0f,
-                                layout.calendar.left + 30.0f, layout.calendar.top + 29.0f);
-    layout.calendar_next = Rect(layout.calendar.right - 30.0f, layout.calendar.top + 9.0f,
-                                layout.calendar.right - 10.0f, layout.calendar.top + 29.0f);
-    layout.calendar_title = Rect(layout.calendar.left + 46.0f, layout.calendar.top + 10.0f,
-                                 layout.calendar.right - 46.0f, layout.calendar.top + 29.0f);
-    layout.reset = Rect(left + 16.0f, top + 398.0f, left + 110.0f, top + 414.0f);
-    layout.done = Rect(layout.panel.right - 88.0f, top + 394.0f, layout.panel.right - 16.0f, top + 416.0f);
+    layout.calendar = Rect(left + 14.0f, top + 197.0f, layout.panel.right - 14.0f, top + 357.0f);
+    layout.calendar_prev_year = Rect(layout.calendar.left + 10.0f, layout.calendar.top + 8.0f,
+                                     layout.calendar.left + 30.0f, layout.calendar.top + 28.0f);
+    layout.calendar_prev = Rect(layout.calendar.left + 34.0f, layout.calendar.top + 8.0f,
+                                layout.calendar.left + 54.0f, layout.calendar.top + 28.0f);
+    layout.calendar_next = Rect(layout.calendar.right - 54.0f, layout.calendar.top + 8.0f,
+                                layout.calendar.right - 34.0f, layout.calendar.top + 28.0f);
+    layout.calendar_next_year = Rect(layout.calendar.right - 30.0f, layout.calendar.top + 8.0f,
+                                     layout.calendar.right - 10.0f, layout.calendar.top + 28.0f);
+    layout.calendar_title = Rect(layout.calendar.left + 62.0f, layout.calendar.top + 9.0f,
+                                 layout.calendar.right - 62.0f, layout.calendar.top + 28.0f);
+    layout.reset = Rect(left + 16.0f, top + 364.0f, left + 110.0f, top + 384.0f);
+    layout.done = Rect(layout.panel.right - 88.0f, top + 362.0f, layout.panel.right - 16.0f, top + 386.0f);
     return layout;
 }
 
@@ -855,7 +1160,7 @@ PopupFavoriteGroupMenuLayout BuildPopupFavoriteGroupMenuLayout(size_t group_coun
 
     const float right = static_cast<float>(kMetrics.width - kMetrics.margin);
     const float left = right - kPanelWidth;
-    const float top = PopupTabsTop() + 34.0f;
+    const float top = PopupTabsTop() + 30.0f;
     const size_t visible_groups = PopupFavoriteGroupMenuVisibleGroupCount(group_count);
     const float groups_height = static_cast<float>(visible_groups) * kRowHeight;
     const float panel_height = kPanelPadding * 2.0f + kRowHeight + kDividerGap + groups_height + kDividerGap + kRowHeight;
@@ -929,7 +1234,7 @@ std::vector<PopupCalendarWeekdayLabel> BuildPopupCalendarWeekdayLabels(const Pop
         const float left = layout.calendar.left + static_cast<float>(i) * cell_width;
         labels.push_back(PopupCalendarWeekdayLabel{
             kWeekdays[i],
-            Rect(left, layout.calendar.top + 35.0f, left + cell_width, layout.calendar.top + 51.0f),
+            Rect(left, layout.calendar.top + 32.0f, left + cell_width, layout.calendar.top + 46.0f),
         });
     }
     return labels;
@@ -939,28 +1244,28 @@ PopupCardLayout BuildPopupCardLayout(bool multi_select, float top) {
     const float left = static_cast<float>(kMetrics.margin);
     const float right = static_cast<float>(kMetrics.width - kMetrics.margin);
     const float bottom = top + static_cast<float>(kMetrics.card_height);
-    const float title_right = right - 78.0f;
-    const float icon_left = multi_select ? left + 42.0f : left + 16.0f;
+    const float title_right = right - 76.0f;
 
     PopupCardLayout layout;
     layout.card = Rect(left, top, right, bottom);
-    layout.stripe = Rect(icon_left, top + 17.0f, icon_left + 20.0f, top + 37.0f);
-    layout.image_preview = Rect(icon_left - 9.0f, top + 5.0f, icon_left + 53.0f, top + 67.0f);
-    layout.file_icon = Rect(icon_left - 1.0f, top + 13.0f, icon_left + 43.0f, top + 57.0f);
-    layout.checkbox = Rect(left + 16.0f, top + 26.0f, left + 30.0f, top + 40.0f);
-    const float text_left = multi_select ? left + 104.0f : left + 80.0f;
-    layout.title = Rect(text_left, top + 12.0f, title_right, top + 35.0f);
-    layout.meta = Rect(text_left, top + 41.0f, right - 18.0f, top + 60.0f);
-    layout.time = Rect(right - 70.0f, top + 13.0f, right - 34.0f, top + 31.0f);
-    layout.menu = Rect(right - 34.0f, top + 11.0f, right - 12.0f, top + 33.0f);
-    layout.expand = Rect(right - 30.0f, top + 36.0f, right - 8.0f, top + 58.0f);
+    layout.stripe = Rect(left + 4.0f, top + 12.0f, left + 4.0f, bottom - 12.0f);
+    const float media_left = multi_select ? left + 54.0f : left + 26.0f;
+    layout.image_preview = Rect(media_left, top + 16.0f, media_left + 40.0f, top + 56.0f);
+    layout.file_icon = Rect(media_left + 5.0f, top + 21.0f, media_left + 35.0f, top + 51.0f);
+    layout.checkbox = Rect(left + 24.0f, top + 29.0f, left + 38.0f, top + 43.0f);
+    const float text_left = multi_select ? left + 104.0f : left + 78.0f;
+    layout.title = Rect(text_left, top + 12.0f, title_right, top + 34.0f);
+    layout.meta = Rect(text_left, top + 40.0f, right - 18.0f, top + 60.0f);
+    layout.time = Rect(right - 68.0f, top + 13.0f, right - 38.0f, top + 31.0f);
+    layout.menu = Rect(right - 34.0f, top + 12.0f, right - 10.0f, top + 34.0f);
+    layout.expand = Rect(right - 30.0f, top + 38.0f, right - 8.0f, top + 60.0f);
     return layout;
 }
 
 UiRect PopupCardKindIconRect(const PopupCardLayout& card) {
-    const float center_x = (card.stripe.left + card.stripe.right) * 0.5f;
-    const float center_y = (card.stripe.top + card.stripe.bottom) * 0.5f;
-    return Rect(center_x - 8.0f, center_y - 8.0f, center_x + 8.0f, center_y + 8.0f);
+    const float center_x = (card.image_preview.left + card.image_preview.right) * 0.5f;
+    const float center_y = (card.image_preview.top + card.image_preview.bottom) * 0.5f;
+    return Rect(center_x - 10.0f, center_y - 10.0f, center_x + 10.0f, center_y + 10.0f);
 }
 
 float PopupExpandedCardExtraHeight(bool expanded) {
@@ -1408,8 +1713,8 @@ std::vector<PopupCalendarCell> BuildPopupCalendarCells(const PopupFilterLayout& 
     }
 
     const float cell_width = layout.calendar.Width() / 7.0f;
-    const float cell_height = 18.0f;
-    const float grid_top = layout.calendar.top + 54.0f;
+    const float cell_height = 16.0f;
+    const float grid_top = layout.calendar.top + 48.0f;
     const int first_weekday = WeekdaySundayFirst(year, month, 1);
     const int days = DaysInMonth(year, month);
     cells.reserve(static_cast<size_t>(days));
@@ -1426,6 +1731,56 @@ std::vector<PopupCalendarCell> BuildPopupCalendarCells(const PopupFilterLayout& 
     return cells;
 }
 
+std::vector<PopupCalendarRangeSegment> BuildPopupCalendarRangeSegments(
+    const PopupFilterLayout& layout, int year, int month, const PopupDateRangeState& state) {
+    std::vector<PopupCalendarRangeSegment> segments;
+    if (!state.start || !state.end || *state.end < *state.start) {
+        return segments;
+    }
+
+    const auto cells = BuildPopupCalendarCells(layout, year, month);
+    UiRect current{};
+    bool active = false;
+    int current_row = -1;
+    constexpr float kRangeInsetX = 8.0f;
+    constexpr float kRangeHalfHeight = 8.0f;
+
+    auto flush = [&]() {
+        if (active) {
+            segments.push_back(PopupCalendarRangeSegment{current, false, false});
+            active = false;
+        }
+    };
+
+    for (const auto& cell : cells) {
+        if (cell.date < *state.start || *state.end < cell.date) {
+            flush();
+            continue;
+        }
+        const int row = static_cast<int>(
+            std::lround((cell.rect.top - (layout.calendar.top + 48.0f)) / 16.0f));
+        const float center_y = (cell.rect.top + cell.rect.bottom) * 0.5f;
+        const UiRect segment_part =
+            Rect(cell.rect.left + kRangeInsetX, center_y - kRangeHalfHeight,
+                 cell.rect.right - kRangeInsetX, center_y + kRangeHalfHeight);
+        if (!active || row != current_row) {
+            flush();
+            current = segment_part;
+            active = true;
+            current_row = row;
+            continue;
+        }
+        current.right = segment_part.right;
+    }
+    flush();
+
+    for (auto& segment : segments) {
+        segment.starts_range = true;
+        segment.ends_range = true;
+    }
+    return segments;
+}
+
 std::optional<PopupCalendarDate> HitTestPopupCalendarDate(const PopupFilterLayout& layout, int year, int month,
                                                           float x, float y) {
     for (const auto& cell : BuildPopupCalendarCells(layout, year, month)) {
@@ -1437,11 +1792,17 @@ std::optional<PopupCalendarDate> HitTestPopupCalendarDate(const PopupFilterLayou
 }
 
 PopupCalendarArrow HitTestPopupCalendarArrow(const PopupFilterLayout& layout, float x, float y) {
+    if (Contains(layout.calendar_prev_year, x, y)) {
+        return PopupCalendarArrow::PreviousYear;
+    }
     if (Contains(layout.calendar_prev, x, y)) {
         return PopupCalendarArrow::PreviousMonth;
     }
     if (Contains(layout.calendar_next, x, y)) {
         return PopupCalendarArrow::NextMonth;
+    }
+    if (Contains(layout.calendar_next_year, x, y)) {
+        return PopupCalendarArrow::NextYear;
     }
     return PopupCalendarArrow::None;
 }
@@ -1467,8 +1828,10 @@ PopupFilterTarget HitTestPopupFilterTarget(const PopupFilterLayout& layout, int 
     if (Contains(layout.link_chip, x, y)) return PopupFilterTarget::LinkChip;
     if (Contains(layout.start_date, x, y)) return PopupFilterTarget::StartDate;
     if (Contains(layout.end_date, x, y)) return PopupFilterTarget::EndDate;
+    if (Contains(layout.calendar_prev_year, x, y)) return PopupFilterTarget::CalendarPreviousYear;
     if (Contains(layout.calendar_prev, x, y)) return PopupFilterTarget::CalendarPrevious;
     if (Contains(layout.calendar_next, x, y)) return PopupFilterTarget::CalendarNext;
+    if (Contains(layout.calendar_next_year, x, y)) return PopupFilterTarget::CalendarNextYear;
     if (HitTestPopupCalendarDate(layout, year, month, x, y)) return PopupFilterTarget::CalendarDate;
     if (Contains(layout.reset, x, y)) return PopupFilterTarget::Reset;
     if (Contains(layout.done, x, y)) return PopupFilterTarget::Done;

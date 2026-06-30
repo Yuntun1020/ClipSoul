@@ -47,14 +47,52 @@ TEST_CASE(HistoryStoreDeduplicatesRepeatedCopiesAcrossHistory) {
     ClipSoul::HistoryStore store;
     store.Open(TempDbPath(L"dedupe-across-history.db"));
 
-    REQUIRE(store.Add(TextContent(L"alpha")));
-    REQUIRE(store.Add(TextContent(L"beta")));
-    REQUIRE(store.Add(TextContent(L"alpha")));
+    auto first_alpha = TextContent(L"alpha");
+    first_alpha.created_at_unix = 1000;
+    REQUIRE(store.Add(first_alpha));
+    const auto first_alpha_id = store.Recent(10, L"").front().id;
+
+    auto beta = TextContent(L"beta");
+    beta.created_at_unix = 1001;
+    REQUIRE(store.Add(beta));
+
+    auto second_alpha = TextContent(L"alpha");
+    second_alpha.created_at_unix = 1002;
+    REQUIRE(store.Add(second_alpha));
 
     const auto items = store.Recent(10, L"");
     REQUIRE_EQ(items.size(), static_cast<size_t>(2));
-    REQUIRE_EQ(items[0].text, std::wstring(L"beta"));
-    REQUIRE_EQ(items[1].text, std::wstring(L"alpha"));
+    REQUIRE_EQ(items[0].text, std::wstring(L"alpha"));
+    REQUIRE_EQ(items[0].created_at_unix, static_cast<int64_t>(1002));
+    REQUIRE(items[0].id != first_alpha_id);
+    REQUIRE_EQ(items[1].text, std::wstring(L"beta"));
+}
+
+TEST_CASE(HistoryStoreKeepsFavoriteDuplicateAndAddsFreshHistoryCopy) {
+    ClipSoul::HistoryStore store;
+    store.Open(TempDbPath(L"dedupe-favorite-keeps-history.db"));
+
+    REQUIRE(store.Add(TextContent(L"alpha")));
+    const auto history = store.Recent(10, L"");
+    REQUIRE_EQ(history.size(), static_cast<size_t>(1));
+    REQUIRE(store.SetFavorite(history.front().id, true));
+
+    auto copied_again = TextContent(L"alpha");
+    copied_again.created_at_unix = 2000;
+    REQUIRE(store.Add(copied_again));
+
+    const auto fresh_history = store.Recent(10, L"");
+    REQUIRE_EQ(fresh_history.size(), static_cast<size_t>(1));
+    REQUIRE_EQ(fresh_history.front().text, std::wstring(L"alpha"));
+    REQUIRE_EQ(fresh_history.front().created_at_unix, static_cast<int64_t>(2000));
+    REQUIRE(!fresh_history.front().is_favorite);
+
+    ClipSoul::HistoryQuery favorites_query;
+    favorites_query.favorites_only = true;
+    const auto favorites = store.Query(favorites_query);
+    REQUIRE_EQ(favorites.size(), static_cast<size_t>(1));
+    REQUIRE(favorites.front().is_favorite);
+    REQUIRE_EQ(favorites.front().text, std::wstring(L"alpha"));
 }
 
 TEST_CASE(HistoryStoreAllowsSameHashWhenClipboardKindDiffers) {
@@ -538,13 +576,15 @@ TEST_CASE(HistoryStoreDeduplicatesSameTextWithinThreeSeconds) {
         b.search_text = L"hello";
         b.content_hash = L"hash_b";
         b.created_at_unix = 1001;
-        store.Add(b);
+        REQUIRE(store.Add(b));
 
         ClipSoul::HistoryQuery query;
         query.limit = 10;
         const auto items = store.Query(query);
         REQUIRE_EQ(items.size(), static_cast<size_t>(1));
         REQUIRE_EQ(items.front().text, std::wstring(L"hello"));
+        REQUIRE_EQ(items.front().kind, ClipSoul::ClipboardKind::Html);
+        REQUIRE_EQ(items.front().created_at_unix, static_cast<int64_t>(1001));
     }
     std::filesystem::remove(db_path);
 }

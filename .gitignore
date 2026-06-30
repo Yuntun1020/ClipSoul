@@ -2,6 +2,7 @@ build/
 dist/
 .vs/
 out/
+.superpowers/
 cache/
 *.user
 *.suo

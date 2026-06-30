@@ -42,6 +42,7 @@ public:
     bool HotkeyAvailable(unsigned modifiers, unsigned vk) const;
     void RefreshPopupTheme();
     void ResetPopupSize();
+    void RefreshThemeForSystemChange();
 
 private:
     bool Initialize();

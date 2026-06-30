@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -29,6 +30,7 @@
 
 namespace ClipSoul {
 namespace {
+constexpr float kPi = 3.14159265358979323846f;
 constexpr wchar_t kPopupClass[] = L"ClipSoul.PopupWindow";
 constexpr UINT_PTR kAnimationTimer = 42;
 constexpr UINT_PTR kHoverTimer = 43;
@@ -64,8 +66,13 @@ constexpr wchar_t kPhrasePromptClass[] = L"ClipSoul.FavoritePhrasePrompt";
 constexpr int kTextPromptEditId = 4201;
 constexpr wchar_t kTextPromptClass[] = L"ClipSoul.TextPrompt";
 constexpr UINT_PTR kPhraseHoverTimer = 62;
+constexpr UINT_PTR kPromptEntranceTimer = 63;
+constexpr DWORD kChildWindowEntranceMs = 120;
+constexpr DWORD kChildWindowExitMs = 90;
 constexpr DWORD kAttachParentProcess = static_cast<DWORD>(-1);
 constexpr DWORD kPopupBandShellSurface = 16;
+constexpr wchar_t kPromptEntranceTopProp[] = L"ClipSoul.PromptEntranceTop";
+constexpr wchar_t kPromptEntranceStepProp[] = L"ClipSoul.PromptEntranceStep";
 
 using CreateWindowInBandProc = HWND(WINAPI*)(DWORD, LPCWSTR, LPCWSTR, DWORD, int, int, int, int, HWND, HMENU, HINSTANCE,
                                              LPVOID, DWORD);
@@ -76,6 +83,86 @@ void ReleasePtr(T*& ptr) {
         ptr->Release();
         ptr = nullptr;
     }
+}
+
+struct ScopedD2DLayer {
+    ID2D1RenderTarget* target = nullptr;
+    ID2D1Layer* layer = nullptr;
+    bool active = false;
+
+    ~ScopedD2DLayer() {
+        if (active && target) {
+            target->PopLayer();
+        }
+        ReleasePtr(layer);
+    }
+};
+
+void ShowChildWindowWithEntrance(HWND hwnd) {
+    if (PopupPromptShouldUseSlideAnimation() &&
+        AnimateWindow(hwnd, kChildWindowEntranceMs, AW_ACTIVATE | AW_SLIDE | AW_VER_POSITIVE)) {
+        return;
+    }
+    if (PopupPromptShouldUseBlendAnimation() && AnimateWindow(hwnd, kChildWindowEntranceMs, AW_ACTIVATE | AW_BLEND)) {
+        return;
+    }
+    if (PopupPromptShouldUsePositionNudgeAnimation()) {
+        RECT rect{};
+        if (GetWindowRect(hwnd, &rect)) {
+            const int offset = PopupPromptEntranceOffsetPixels();
+            SetWindowPos(hwnd, nullptr, rect.left, rect.top + offset, 0, 0,
+                         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            ShowWindow(hwnd, SW_SHOW);
+            UpdateWindow(hwnd);
+            SetPropW(hwnd, kPromptEntranceTopProp, IntToPtr(rect.top));
+            SetPropW(hwnd, kPromptEntranceStepProp, IntToPtr(0));
+            SetTimer(hwnd, kPromptEntranceTimer, PopupPromptEntranceTimerIntervalMs(), nullptr);
+            return;
+        }
+    }
+    ShowWindow(hwnd, SW_SHOW);
+}
+
+bool AdvancePromptEntranceAnimation(HWND hwnd) {
+    auto top_handle = GetPropW(hwnd, kPromptEntranceTopProp);
+    if (!top_handle) {
+        KillTimer(hwnd, kPromptEntranceTimer);
+        return false;
+    }
+    const int top = PtrToInt(top_handle);
+    const int step = PtrToInt(GetPropW(hwnd, kPromptEntranceStepProp)) + 1;
+    const int steps = std::max(1, PopupPromptEntranceStepCount());
+    RECT rect{};
+    if (!GetWindowRect(hwnd, &rect)) {
+        KillTimer(hwnd, kPromptEntranceTimer);
+        RemovePropW(hwnd, kPromptEntranceTopProp);
+        RemovePropW(hwnd, kPromptEntranceStepProp);
+        return true;
+    }
+    const float progress = PopupMotionProgress(static_cast<float>(std::min(step, steps)) / static_cast<float>(steps));
+    const int offset = PopupPromptEntranceOffsetPixels();
+    const int y = top + static_cast<int>(std::lround(static_cast<float>(offset) * (1.0f - progress)));
+    SetWindowPos(hwnd, nullptr, rect.left, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    if (step >= steps) {
+        KillTimer(hwnd, kPromptEntranceTimer);
+        RemovePropW(hwnd, kPromptEntranceTopProp);
+        RemovePropW(hwnd, kPromptEntranceStepProp);
+        SetWindowPos(hwnd, nullptr, rect.left, top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    } else {
+        SetPropW(hwnd, kPromptEntranceStepProp, IntToPtr(step));
+    }
+    return true;
+}
+
+void CloseChildWindowWithExit(HWND hwnd) {
+    KillTimer(hwnd, kPromptEntranceTimer);
+    RemovePropW(hwnd, kPromptEntranceTopProp);
+    RemovePropW(hwnd, kPromptEntranceStepProp);
+    DestroyWindow(hwnd);
+}
+
+void SetPromptCursorForTarget(int target) {
+    SetCursor(LoadCursorW(nullptr, target == 0 ? IDC_ARROW : IDC_HAND));
 }
 
 D2D1_RECT_F Rect(float left, float top, float right, float bottom) {
@@ -102,6 +189,14 @@ UiRect CenteredRect(const UiRect& rect, float width, float height) {
 
 UiRect ShrinkRect(const UiRect& rect, float dx, float dy) {
     return UiRect{rect.left + dx, rect.top + dy, rect.right - dx, rect.bottom - dy};
+}
+
+D2D1_POINT_2F RotatePoint(float x, float y, float center_x, float center_y, float radians) {
+    const float s = std::sin(radians);
+    const float c = std::cos(radians);
+    const float dx = x - center_x;
+    const float dy = y - center_y;
+    return D2D1::Point2F(center_x + dx * c - dy * s, center_y + dx * s + dy * c);
 }
 
 bool Contains(const UiRect& rect, POINT value) {
@@ -151,6 +246,13 @@ void FocusSearchEdit(HWND search_edit) {
         return;
     }
     SetFocus(search_edit);
+    HideCaret(search_edit);
+}
+
+void HideNativeSearchCaret(HWND search_edit) {
+    if (search_edit && GetFocus() == search_edit) {
+        HideCaret(search_edit);
+    }
 }
 
 HMENU ControlId(int id) {
@@ -215,6 +317,46 @@ void FillGdiSolid(HDC dc, const RECT& rect, COLORREF fill) {
     HBRUSH brush = CreateSolidBrush(fill);
     FillRect(dc, &rect, brush);
     DeleteObject(brush);
+}
+
+COLORREF PromptCanvasFill() {
+    return RGB(246, 241, 232);
+}
+
+COLORREF PromptSurfaceFill() {
+    return RGB(251, 248, 242);
+}
+
+COLORREF PromptHoverFill() {
+    return RGB(240, 231, 217);
+}
+
+COLORREF PromptBorderColor() {
+    return RGB(216, 208, 197);
+}
+
+COLORREF PromptStrongBorderColor() {
+    return RGB(185, 169, 149);
+}
+
+COLORREF PromptTextColor() {
+    return RGB(33, 30, 25);
+}
+
+COLORREF PromptMutedColor() {
+    return RGB(105, 100, 91);
+}
+
+COLORREF PromptPrimaryColor(bool hovered) {
+    return hovered ? RGB(102, 114, 95) : RGB(115, 130, 107);
+}
+
+COLORREF PromptDangerColor() {
+    return RGB(169, 81, 72);
+}
+
+COLORREF PromptDangerFill() {
+    return RGB(248, 229, 224);
 }
 
 bool IsPromptEditMessage(HWND edit, HWND candidate) {
@@ -306,34 +448,33 @@ LRESULT CALLBACK TextPromptProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM l
         HDC mem_dc = CreateCompatibleDC(dc);
         HBITMAP bitmap = CreateCompatibleBitmap(dc, rc.right - rc.left, rc.bottom - rc.top);
         HGDIOBJ old_bitmap = SelectObject(mem_dc, bitmap);
-        FillGdiSolid(mem_dc, rc, RGB(248, 251, 255));
+        FillGdiSolid(mem_dc, rc, PromptCanvasFill());
         RECT panel_rect{0, 0, rc.right - 1, rc.bottom - 1};
-        DrawGdiRoundedPanel(mem_dc, panel_rect, 18, RGB(248, 251, 255), RGB(220, 231, 244));
+        DrawGdiRoundedPanel(mem_dc, panel_rect, 18, PromptCanvasFill(), PromptBorderColor());
         RECT input_rect{22, 78, 298, 144};
-        DrawGdiRoundedPanel(mem_dc, input_rect, 12, RGB(255, 255, 255), RGB(226, 234, 242));
+        DrawGdiRoundedPanel(mem_dc, input_rect, 12, PromptSurfaceFill(), PromptBorderColor());
 
         const bool save_hover = state->hover_target == 2 && state->hover_progress > 0.0f;
         RECT save_button{146, 158, 216, 186};
-        DrawGdiRoundedPanel(mem_dc, save_button, 12,
-                            save_hover ? RGB(13, 148, 145) : RGB(14, 165, 164),
-                            save_hover ? RGB(13, 148, 145) : RGB(14, 165, 164));
+        DrawGdiRoundedPanel(mem_dc, save_button, 12, PromptPrimaryColor(save_hover),
+                            PromptPrimaryColor(save_hover));
         const bool cancel_hover = state->hover_target == 3 && state->hover_progress > 0.0f;
         RECT cancel_button{228, 158, 298, 186};
         DrawGdiRoundedPanel(mem_dc, cancel_button, 12,
-                            cancel_hover ? RGB(244, 255, 253) : RGB(255, 255, 255),
-                            cancel_hover ? RGB(101, 218, 210) : RGB(220, 231, 244));
+                            cancel_hover ? PromptHoverFill() : PromptSurfaceFill(),
+                            cancel_hover ? PromptStrongBorderColor() : PromptBorderColor());
 
         SetBkMode(mem_dc, TRANSPARENT);
         auto font = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
         HGDIOBJ old_font = SelectObject(mem_dc, font);
-        SetTextColor(mem_dc, RGB(23, 32, 51));
+        SetTextColor(mem_dc, PromptTextColor());
         TextOutW(mem_dc, 22, 18, state->title.c_str(), static_cast<int>(state->title.size()));
         if (state->hover_target == 1 && state->hover_progress > 0.0f) {
             RECT close_rect{286, 12, 310, 36};
-            DrawGdiRoundedPanel(mem_dc, close_rect, 8, RGB(255, 241, 242), RGB(242, 85, 90));
+            DrawGdiRoundedPanel(mem_dc, close_rect, 8, PromptDangerFill(), PromptDangerColor());
         }
         HPEN close_pen = CreatePen(PS_SOLID, 2,
-                                   state->hover_target == 1 ? RGB(229, 72, 77) : RGB(38, 54, 75));
+                                   state->hover_target == 1 ? PromptDangerColor() : PromptMutedColor());
         HGDIOBJ old_pen = SelectObject(mem_dc, close_pen);
         MoveToEx(mem_dc, 294, 20, nullptr);
         LineTo(mem_dc, 302, 28);
@@ -341,11 +482,11 @@ LRESULT CALLBACK TextPromptProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM l
         LineTo(mem_dc, 294, 28);
         SelectObject(mem_dc, old_pen);
         DeleteObject(close_pen);
-        SetTextColor(mem_dc, RGB(123, 135, 152));
+        SetTextColor(mem_dc, PromptMutedColor());
         TextOutW(mem_dc, 22, 48, state->subtitle.c_str(), static_cast<int>(state->subtitle.size()));
-        SetTextColor(mem_dc, RGB(255, 255, 255));
+        SetTextColor(mem_dc, PromptSurfaceFill());
         DrawCenteredText(mem_dc, save_button, L"保存");
-        SetTextColor(mem_dc, RGB(23, 32, 51));
+        SetTextColor(mem_dc, PromptTextColor());
         DrawCenteredText(mem_dc, cancel_button, L"取消");
         SelectObject(mem_dc, old_font);
         BitBlt(dc, 0, 0, rc.right - rc.left, rc.bottom - rc.top, mem_dc, 0, 0, SRCCOPY);
@@ -358,7 +499,7 @@ LRESULT CALLBACK TextPromptProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM l
     case WM_LBUTTONDOWN: {
         const int target = TextPromptHitTarget(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
         if (target == 1 || target == 3) {
-            DestroyWindow(hwnd);
+            CloseChildWindowWithExit(hwnd);
             return 0;
         }
         if (target == 2) {
@@ -370,12 +511,16 @@ LRESULT CALLBACK TextPromptProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM l
             value.resize(static_cast<size_t>(length));
             state->text = NormalizeEditableNote(value);
             state->accepted = !state->text.empty();
-            DestroyWindow(hwnd);
+            CloseChildWindowWithExit(hwnd);
             return 0;
         }
         break;
     }
     case WM_TIMER:
+        if (wparam == kPromptEntranceTimer) {
+            AdvancePromptEntranceAnimation(hwnd);
+            return 0;
+        }
         if (wparam == kPhraseHoverTimer) {
             state->hover_progress = std::min(1.0f, state->hover_progress + 0.18f);
             if (state->hover_progress >= 1.0f) KillTimer(hwnd, kPhraseHoverTimer);
@@ -392,6 +537,7 @@ LRESULT CALLBACK TextPromptProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM l
             state->tracking_mouse = true;
         }
         const int target = TextPromptHitTarget(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
+        SetPromptCursorForTarget(target);
         if (target != state->hover_target) {
             state->hover_target = target;
             state->hover_progress = 0.0f;
@@ -400,6 +546,15 @@ LRESULT CALLBACK TextPromptProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM l
         }
         return 0;
     }
+    case WM_SETCURSOR:
+        if (LOWORD(lparam) == HTCLIENT) {
+            POINT cursor{};
+            GetCursorPos(&cursor);
+            ScreenToClient(hwnd, &cursor);
+            SetPromptCursorForTarget(TextPromptHitTarget(cursor.x, cursor.y));
+            return TRUE;
+        }
+        break;
     case WM_MOUSELEAVE:
         state->tracking_mouse = false;
         state->hover_target = 0;
@@ -408,7 +563,7 @@ LRESULT CALLBACK TextPromptProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM l
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
     case WM_CLOSE:
-        DestroyWindow(hwnd);
+        CloseChildWindowWithExit(hwnd);
         return 0;
     }
     return DefWindowProcW(hwnd, message, wparam, lparam);
@@ -448,38 +603,37 @@ LRESULT CALLBACK PhrasePromptProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM
         HDC mem_dc = CreateCompatibleDC(dc);
         HBITMAP bitmap = CreateCompatibleBitmap(dc, rc.right - rc.left, rc.bottom - rc.top);
         HGDIOBJ old_bitmap = SelectObject(mem_dc, bitmap);
-        FillGdiSolid(mem_dc, rc, RGB(248, 251, 255));
+        FillGdiSolid(mem_dc, rc, PromptCanvasFill());
 
         RECT panel_rect{0, 0, rc.right - 1, rc.bottom - 1};
-        DrawGdiRoundedPanel(mem_dc, panel_rect, 18, RGB(248, 251, 255), RGB(220, 231, 244));
+        DrawGdiRoundedPanel(mem_dc, panel_rect, 18, PromptCanvasFill(), PromptBorderColor());
         RECT input_rect{22, 74, 298, 150};
-        DrawGdiRoundedPanel(mem_dc, input_rect, 12, RGB(255, 255, 255), RGB(226, 234, 242));
+        DrawGdiRoundedPanel(mem_dc, input_rect, 12, PromptSurfaceFill(), PromptBorderColor());
         RECT note_rect{22, 172, 298, 222};
-        DrawGdiRoundedPanel(mem_dc, note_rect, 12, RGB(255, 255, 255), RGB(226, 234, 242));
+        DrawGdiRoundedPanel(mem_dc, note_rect, 12, PromptSurfaceFill(), PromptBorderColor());
 
         const bool save_hover = state->hover_target == 2 && state->hover_progress > 0.0f;
         RECT save_button{146, 236, 216, 264};
-        DrawGdiRoundedPanel(mem_dc, save_button, 12,
-                            save_hover ? RGB(13, 148, 145) : RGB(14, 165, 164),
-                            save_hover ? RGB(13, 148, 145) : RGB(14, 165, 164));
+        DrawGdiRoundedPanel(mem_dc, save_button, 12, PromptPrimaryColor(save_hover),
+                            PromptPrimaryColor(save_hover));
 
         const bool cancel_hover = state->hover_target == 3 && state->hover_progress > 0.0f;
         RECT cancel_button{228, 236, 298, 264};
         DrawGdiRoundedPanel(mem_dc, cancel_button, 12,
-                            cancel_hover ? RGB(244, 255, 253) : RGB(255, 255, 255),
-                            cancel_hover ? RGB(101, 218, 210) : RGB(220, 231, 244));
+                            cancel_hover ? PromptHoverFill() : PromptSurfaceFill(),
+                            cancel_hover ? PromptStrongBorderColor() : PromptBorderColor());
 
         SetBkMode(mem_dc, TRANSPARENT);
         auto font = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
         HGDIOBJ old_font = SelectObject(mem_dc, font);
-        SetTextColor(mem_dc, RGB(23, 32, 51));
+        SetTextColor(mem_dc, PromptTextColor());
         TextOutW(mem_dc, 22, 18, L"\u6dfb\u52a0\u5e38\u7528\u8bed", 5);
         if (state->hover_target == 1 && state->hover_progress > 0.0f) {
             RECT close_rect{286, 12, 310, 36};
-            DrawGdiRoundedPanel(mem_dc, close_rect, 8, RGB(255, 241, 242), RGB(242, 85, 90));
+            DrawGdiRoundedPanel(mem_dc, close_rect, 8, PromptDangerFill(), PromptDangerColor());
         }
         HPEN close_pen = CreatePen(PS_SOLID, 2,
-                                   state->hover_target == 1 ? RGB(229, 72, 77) : RGB(38, 54, 75));
+                                   state->hover_target == 1 ? PromptDangerColor() : PromptMutedColor());
         HGDIOBJ old_pen = SelectObject(mem_dc, close_pen);
         MoveToEx(mem_dc, 294, 20, nullptr);
         LineTo(mem_dc, 302, 28);
@@ -487,13 +641,13 @@ LRESULT CALLBACK PhrasePromptProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM
         LineTo(mem_dc, 294, 28);
         SelectObject(mem_dc, old_pen);
         DeleteObject(close_pen);
-        SetTextColor(mem_dc, RGB(123, 135, 152));
+        SetTextColor(mem_dc, PromptMutedColor());
         TextOutW(mem_dc, 22, 48, L"保存后会出现在收藏夹", 10);
         TextOutW(mem_dc, 22, 154, L"备注", 2);
-        SetTextColor(mem_dc, RGB(255, 255, 255));
+        SetTextColor(mem_dc, PromptSurfaceFill());
         RECT save_rect{146, 236, 216, 264};
         DrawCenteredText(mem_dc, save_rect, L"保存");
-        SetTextColor(mem_dc, RGB(23, 32, 51));
+        SetTextColor(mem_dc, PromptTextColor());
         RECT cancel_rect{228, 236, 298, 264};
         DrawCenteredText(mem_dc, cancel_rect, L"取消");
         SelectObject(mem_dc, old_font);
@@ -509,7 +663,7 @@ LRESULT CALLBACK PhrasePromptProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM
         const int y = GET_Y_LPARAM(lparam);
         const int target = PhraseHitTarget(x, y);
         if (target == 1) {
-            DestroyWindow(hwnd);
+            CloseChildWindowWithExit(hwnd);
             return 0;
         }
         if (target == 2) {
@@ -528,16 +682,20 @@ LRESULT CALLBACK PhrasePromptProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM
             note_value.resize(static_cast<size_t>(note_length));
             state->note = NormalizeEditableNote(note_value);
             state->accepted = !state->text.empty();
-            DestroyWindow(hwnd);
+            CloseChildWindowWithExit(hwnd);
             return 0;
         }
         if (target == 3) {
-            DestroyWindow(hwnd);
+            CloseChildWindowWithExit(hwnd);
             return 0;
         }
         break;
     }
     case WM_TIMER:
+        if (wparam == kPromptEntranceTimer) {
+            AdvancePromptEntranceAnimation(hwnd);
+            return 0;
+        }
         if (wparam == kPhraseHoverTimer) {
             state->hover_progress = std::min(1.0f, state->hover_progress + 0.18f);
             if (state->hover_progress >= 1.0f) KillTimer(hwnd, kPhraseHoverTimer);
@@ -554,6 +712,7 @@ LRESULT CALLBACK PhrasePromptProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM
             state->tracking_mouse = true;
         }
         const int target = PhraseHitTarget(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
+        SetPromptCursorForTarget(target);
         if (target != state->hover_target) {
             state->hover_target = target;
             state->hover_progress = 0.0f;
@@ -562,6 +721,15 @@ LRESULT CALLBACK PhrasePromptProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM
         }
         return 0;
     }
+    case WM_SETCURSOR:
+        if (LOWORD(lparam) == HTCLIENT) {
+            POINT cursor{};
+            GetCursorPos(&cursor);
+            ScreenToClient(hwnd, &cursor);
+            SetPromptCursorForTarget(PhraseHitTarget(cursor.x, cursor.y));
+            return TRUE;
+        }
+        break;
     case WM_MOUSELEAVE:
         state->tracking_mouse = false;
         state->hover_target = 0;
@@ -572,7 +740,7 @@ LRESULT CALLBACK PhrasePromptProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM
     case WM_COMMAND:
         break;
     case WM_CLOSE:
-        DestroyWindow(hwnd);
+        CloseChildWindowWithExit(hwnd);
         return 0;
     }
     return DefWindowProcW(hwnd, message, wparam, lparam);
@@ -582,7 +750,7 @@ std::optional<FavoritePhraseInput> PromptFavoritePhrase(HWND owner, HINSTANCE in
     WNDCLASSW wc{};
     wc.lpfnWndProc = PhrasePromptProc;
     wc.hInstance = instance;
-    wc.hCursor = LoadCursorW(nullptr, IDC_IBEAM);
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.lpszClassName = kPhrasePromptClass;
     RegisterClassW(&wc);
 
@@ -603,7 +771,7 @@ std::optional<FavoritePhraseInput> PromptFavoritePhrase(HWND owner, HINSTANCE in
     }
 
     EnableWindow(owner, FALSE);
-    ShowWindow(hwnd, SW_SHOW);
+    ShowChildWindowWithEntrance(hwnd);
     UpdateWindow(hwnd);
     MSG message{};
     while (IsWindow(hwnd) && GetMessageW(&message, nullptr, 0, 0) > 0) {
@@ -623,7 +791,7 @@ std::optional<std::wstring> PromptText(HWND owner, HINSTANCE instance, std::wstr
     WNDCLASSW wc{};
     wc.lpfnWndProc = TextPromptProc;
     wc.hInstance = instance;
-    wc.hCursor = LoadCursorW(nullptr, IDC_IBEAM);
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.lpszClassName = kTextPromptClass;
     RegisterClassW(&wc);
 
@@ -646,7 +814,7 @@ std::optional<std::wstring> PromptText(HWND owner, HINSTANCE instance, std::wstr
     }
 
     EnableWindow(owner, FALSE);
-    ShowWindow(hwnd, SW_SHOW);
+    ShowChildWindowWithEntrance(hwnd);
     UpdateWindow(hwnd);
     MSG message{};
     while (IsWindow(hwnd) && GetMessageW(&message, nullptr, 0, 0) > 0) {
@@ -807,22 +975,24 @@ std::wstring ItemTime(const HistoryItem& item) {
 }
 
 D2D1_COLOR_F KindColor(ClipboardKind kind) {
-    switch (kind) {
-    case ClipboardKind::Text:
-    case ClipboardKind::Html:
-        return D2D1::ColorF(0x3B82F6, 0.86f);
-    case ClipboardKind::Image:
-        return D2D1::ColorF(0x10B981, 0.86f);
-    case ClipboardKind::Files:
-        return D2D1::ColorF(0x8B5CF6, 0.86f);
-    case ClipboardKind::Link:
-        return D2D1::ColorF(0xF97316, 0.86f);
-    }
-    return D2D1::ColorF(0x94A3B8, 0.86f);
+    (void)kind;
+    return D2D1::ColorF(0x8A7E6D, 0.86f);
 }
 
 D2D1_COLOR_F ColorWithAlpha(uint32_t rgb, float alpha) {
     return D2D1::ColorF(rgb, alpha);
+}
+
+uint32_t PopupSubtleAccentFill(const PopupThemePalette& palette) {
+    return palette.dark ? palette.paper_selected : palette.paper_selected;
+}
+
+uint32_t PopupNeutralHoverFill(const PopupThemePalette& palette) {
+    return palette.paper_hover;
+}
+
+uint32_t PopupSurfacePressedFill(const PopupThemePalette& palette) {
+    return palette.paper_selected;
 }
 
 const wchar_t* KindGlyph(ClipboardKind kind) {
@@ -2245,6 +2415,7 @@ PopupWindow::~PopupWindow() {
     ReleasePtr(small_format_);
     ReleasePtr(detail_format_);
     ReleasePtr(centered_small_format_);
+    ReleasePtr(date_value_format_);
     ReleasePtr(wic_factory_);
     ReleasePtr(dwrite_factory_);
     ReleasePtr(d2d_factory_);
@@ -2269,7 +2440,6 @@ bool PopupWindow::Create(HWND owner) {
     wc.lpfnWndProc = PopupWindow::WindowProc;
     wc.hInstance = instance_;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.style = CS_DROPSHADOW;
     wc.lpszClassName = kPopupClass;
     RegisterClassW(&wc);
 
@@ -2308,6 +2478,7 @@ bool PopupWindow::Create(HWND owner) {
         UpdateSearchEditBounds();
     }
     ApplyBackdrop();
+    ApplyWindowRegion();
     return true;
 }
 
@@ -2369,6 +2540,7 @@ void PopupWindow::Show(HWND target) {
     x = position.x;
     y = position.y;
     SetWindowPos(hwnd_, HWND_TOPMOST, x, y, size.cx, size.cy, flags);
+    ApplyWindowRegion();
     UpdatePopupLogicalSize();
     scroll_offset_ = ScrollOffsetToRevealSelection(scroll_offset_, selected_index_);
     RECT shown_rect{};
@@ -2412,6 +2584,12 @@ void PopupWindow::Show(HWND target) {
         KillTimer(hwnd_, kSearchCaretTimer);
     }
     KillTimer(hwnd_, kAnimationTimer);
+    motion_target_ = PopupMotionTarget::None;
+    motion_progress_ = 1.0f;
+    closing_filter_panel_ = false;
+    closing_favorite_group_menu_ = false;
+    closing_delete_confirm_ = false;
+    closing_delete_confirm_snapshot_ = PendingFavoriteGroupDelete{};
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
@@ -2458,6 +2636,13 @@ void PopupWindow::Hide(std::wstring_view reason) {
     KillTimer(hwnd_, kOutsideClickTimer);
     KillTimer(hwnd_, kSuppressInactiveHideTimer);
     KillTimer(hwnd_, kShellTopmostRaiseTimer);
+    KillTimer(hwnd_, kAnimationTimer);
+    motion_target_ = PopupMotionTarget::None;
+    motion_progress_ = 1.0f;
+    closing_filter_panel_ = false;
+    closing_favorite_group_menu_ = false;
+    closing_delete_confirm_ = false;
+    closing_delete_confirm_snapshot_ = PendingFavoriteGroupDelete{};
     CancelItemPress();
     if (moving_window_ || resizing_window_) {
         ReleaseCapture();
@@ -2484,6 +2669,17 @@ void PopupWindow::Refresh() {
     if (hwnd_) {
         ResizeToCurrentItems();
         SyncSearchEdit();
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+}
+
+void PopupWindow::RefreshTheme() {
+    UpdateThemeFromSettings(true);
+    ApplyBackdrop();
+    if (search_edit_) {
+        InvalidateRect(search_edit_, nullptr, TRUE);
+    }
+    if (hwnd_) {
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
 }
@@ -2664,12 +2860,12 @@ void PopupWindow::EndSearchSelectionDrag() {
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
-void PopupWindow::UpdateThemeFromSettings() {
+void PopupWindow::UpdateThemeFromSettings(bool force) {
     const auto settings = store_.LoadSettings();
     const int next_theme = std::clamp(settings.theme_mode, 0, 2);
     const bool resize_changed = popup_resizable_ != settings.popup_resizable;
     popup_resizable_ = settings.popup_resizable;
-    if (next_theme == theme_mode_ && text_brush_) {
+    if (!force && next_theme == theme_mode_ && text_brush_) {
         if (resize_changed && !popup_resizable_) {
             manual_popup_size_ = false;
             ResizeToCurrentItems();
@@ -2681,6 +2877,16 @@ void PopupWindow::UpdateThemeFromSettings() {
         DeleteObject(search_edit_brush_);
         search_edit_brush_ = nullptr;
     }
+    ReleasePtr(pin_icon_inverted_);
+    ReleasePtr(pin_active_icon_inverted_);
+    ReleasePtr(close_icon_inverted_);
+    ReleasePtr(filter_icon_inverted_);
+    ReleasePtr(filter_active_icon_inverted_);
+    ReleasePtr(multi_select_icon_inverted_);
+    ReleasePtr(multi_select_active_icon_inverted_);
+    ReleasePtr(trash_icon_inverted_);
+    ReleasePtr(add_favorite_folder_outline_icon_inverted_);
+    ReleasePtr(add_favorite_folder_filled_icon_inverted_);
     if (text_brush_) {
         const auto palette = ResolvePopupThemePalette(theme_mode_, IsSystemDarkTheme());
         text_brush_->SetColor(D2D1::ColorF(palette.text, 0.94f));
@@ -2847,6 +3053,38 @@ void PopupWindow::CompleteItemPress(POINT point) {
     }
 }
 
+void PopupWindow::CloseFilterPanelWithMotion() {
+    if (!filter_open_) {
+        return;
+    }
+    filter_open_ = false;
+    closing_filter_panel_ = true;
+    hover_filter_target_ = PopupFilterTarget::None;
+    hover_filter_date_.reset();
+    StartMotion(PopupMotionTarget::FilterPanel, -1);
+}
+
+void PopupWindow::CloseFavoriteGroupMenuWithMotion() {
+    if (!favorite_group_menu_open_) {
+        return;
+    }
+    favorite_group_menu_open_ = false;
+    closing_favorite_group_menu_ = true;
+    hover_favorite_group_menu_hit_ = {};
+    StartMotion(PopupMotionTarget::FavoriteMenu, -1);
+}
+
+void PopupWindow::CloseFavoriteGroupDeleteConfirmWithMotion() {
+    if (!pending_favorite_group_delete_) {
+        return;
+    }
+    closing_delete_confirm_snapshot_ = *pending_favorite_group_delete_;
+    pending_favorite_group_delete_.reset();
+    closing_delete_confirm_ = true;
+    hover_delete_confirm_target_ = PopupFavoriteGroupDeleteConfirmTarget::None;
+    StartMotion(PopupMotionTarget::DeleteConfirm, -1);
+}
+
 void PopupWindow::ActivateSelection() {
     if (items_.empty()) return;
     const auto& item = items_[selected_index_];
@@ -2870,6 +3108,7 @@ void PopupWindow::ToggleMultiSelect() {
         filter_open_ = false;
         favorite_group_menu_open_ = false;
     }
+    StartMotion(PopupMotionTarget::MultiSelect, multi_select_ ? 1 : -1);
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
@@ -3020,11 +3259,16 @@ void PopupWindow::PromptAddFavoritePhrase() {
 }
 
 void PopupWindow::ToggleFavoriteGroupMenu() {
-    favorite_group_menu_open_ = !favorite_group_menu_open_;
     if (favorite_group_menu_open_) {
+        CloseFavoriteGroupMenuWithMotion();
+    } else {
+        favorite_group_menu_open_ = true;
+        closing_favorite_group_menu_ = false;
         filter_open_ = false;
+        closing_filter_panel_ = false;
         hover_filter_target_ = PopupFilterTarget::None;
         hover_filter_date_.reset();
+        StartMotion(PopupMotionTarget::FavoriteMenu);
     }
     hover_progress_ = 0.0f;
     SetTimer(hwnd_, kHoverTimer, 16, nullptr);
@@ -3037,6 +3281,9 @@ void PopupWindow::ToggleExpanded(int64_t id) {
     } else {
         expanded_item_id_ = id;
     }
+    arrow_motion_item_id_ = id;
+    arrow_motion_progress_ = 0.0f;
+    SetTimer(hwnd_, kAnimationTimer, 16, nullptr);
     ResizeToCurrentItems();
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
@@ -3412,6 +3659,87 @@ int PopupWindow::ResizeHitTest(POINT point) const {
     return edges;
 }
 
+HCURSOR PopupWindow::CursorForPoint(POINT point) const {
+    if (const int resize_edges = ResizeHitTest(point)) {
+        if ((resize_edges & kPopupResizeLeft && resize_edges & kPopupResizeTop) ||
+            (resize_edges & kPopupResizeRight && resize_edges & kPopupResizeBottom)) {
+            return LoadCursorW(nullptr, IDC_SIZENWSE);
+        }
+        if ((resize_edges & kPopupResizeRight && resize_edges & kPopupResizeTop) ||
+            (resize_edges & kPopupResizeLeft && resize_edges & kPopupResizeBottom)) {
+            return LoadCursorW(nullptr, IDC_SIZENESW);
+        }
+        if (resize_edges & (kPopupResizeLeft | kPopupResizeRight)) {
+            return LoadCursorW(nullptr, IDC_SIZEWE);
+        }
+        if (resize_edges & (kPopupResizeTop | kPopupResizeBottom)) {
+            return LoadCursorW(nullptr, IDC_SIZENS);
+        }
+    }
+
+    const auto search_layout = BuildPopupSearchLayoutForWidth(popup_logical_width_);
+    if (Contains(search_layout.box, point)) {
+        return LoadCursorW(nullptr, PopupSearchClearButtonHitTest(search_layout, !query_.empty(), point)
+                                        ? IDC_HAND
+                                        : IDC_IBEAM);
+    }
+
+    if (pending_favorite_group_delete_ || closing_delete_confirm_) {
+        const auto target = HitTestFavoriteGroupDeleteConfirm(point);
+        if (target == PopupFavoriteGroupDeleteConfirmTarget::Delete ||
+            target == PopupFavoriteGroupDeleteConfirmTarget::Cancel) {
+            return LoadCursorW(nullptr, IDC_HAND);
+        }
+        return LoadCursorW(nullptr, IDC_ARROW);
+    }
+
+    if (filter_open_) {
+        const auto target = HitTestPopupFilterTarget(BuildPopupFilterLayout(), calendar_year_, calendar_month_,
+                                                     static_cast<float>(point.x), static_cast<float>(point.y));
+        if (target != PopupFilterTarget::None && target != PopupFilterTarget::Panel) {
+            return LoadCursorW(nullptr, IDC_HAND);
+        }
+    }
+
+    if (favorite_group_menu_open_) {
+        const auto hit = HitTestPopupFavoriteGroupMenu(BuildPopupFavoriteGroupMenuLayout(favorite_groups_.size()),
+                                                       favorite_groups_.size(), static_cast<float>(point.x),
+                                                       static_cast<float>(point.y));
+        if (hit.target != PopupFavoriteGroupMenuTarget::None &&
+            hit.target != PopupFavoriteGroupMenuTarget::Panel) {
+            return LoadCursorW(nullptr, IDC_HAND);
+        }
+    }
+
+    switch (HitTestAction(point)) {
+    case UiAction::None:
+    case UiAction::Search:
+        return LoadCursorW(nullptr, IDC_ARROW);
+    case UiAction::ClearSearch:
+    case UiAction::Filter:
+    case UiAction::MultiSelect:
+    case UiAction::ClearAll:
+    case UiAction::SelectAll:
+    case UiAction::DeleteSelected:
+    case UiAction::PasteSelected:
+    case UiAction::HistoryTab:
+    case UiAction::FavoritesTab:
+    case UiAction::FavoriteGroupMenu:
+    case UiAction::AddFavoritePhrase:
+    case UiAction::ExpandItem:
+    case UiAction::Scrollbar:
+    case UiAction::ScrollToTop:
+    case UiAction::Pin:
+    case UiAction::Close:
+        return LoadCursorW(nullptr, IDC_HAND);
+    }
+    return LoadCursorW(nullptr, IDC_ARROW);
+}
+
+void PopupWindow::ApplyCursorForPoint(POINT point) const {
+    SetCursor(CursorForPoint(point));
+}
+
 void PopupWindow::BeginWindowMove() {
     if (!hwnd_) {
         return;
@@ -3545,7 +3873,7 @@ void PopupWindow::EnsureDeviceResources() {
                                           18.0f, L"zh-CN", &title_format_);
         dwrite_factory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
                                           DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                                          14.0f, L"zh-CN", &body_format_);
+                                          13.0f, L"zh-CN", &body_format_);
         dwrite_factory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
                                           DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
                                           12.0f, L"zh-CN", &small_format_);
@@ -3555,14 +3883,18 @@ void PopupWindow::EnsureDeviceResources() {
         dwrite_factory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
                                           DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
                                           12.0f, L"zh-CN", &centered_small_format_);
+        dwrite_factory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+                                          DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+                                          11.0f, L"zh-CN", &date_value_format_);
         centered_small_format_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
         centered_small_format_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        date_value_format_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         body_format_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         small_format_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         DWRITE_TRIMMING trimming{};
         trimming.granularity = DWRITE_TRIMMING_GRANULARITY_CHARACTER;
         dwrite_factory_->CreateEllipsisTrimmingSign(body_format_, &ellipsis_trimming_sign_);
-        for (auto* format : {title_format_, body_format_, small_format_, centered_small_format_}) {
+        for (auto* format : {title_format_, body_format_, small_format_, centered_small_format_, date_value_format_}) {
             format->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
             format->SetTrimming(&trimming, ellipsis_trimming_sign_);
         }
@@ -3582,9 +3914,10 @@ void PopupWindow::EnsureDeviceResources() {
             &render_target_);
         const float dpi = static_cast<float>(CurrentDpi());
         render_target_->SetDpi(dpi, dpi);
-        render_target_->CreateSolidColorBrush(D2D1::ColorF(0x172033, 0.94f), &text_brush_);
-        render_target_->CreateSolidColorBrush(D2D1::ColorF(0x7B8798, 0.84f), &muted_brush_);
-        render_target_->CreateSolidColorBrush(D2D1::ColorF(0x0EA5A4, 0.9f), &accent_brush_);
+        const auto palette = ResolvePopupThemePalette(theme_mode_, IsSystemDarkTheme());
+        render_target_->CreateSolidColorBrush(D2D1::ColorF(palette.text, 0.94f), &text_brush_);
+        render_target_->CreateSolidColorBrush(D2D1::ColorF(palette.muted, 0.84f), &muted_brush_);
+        render_target_->CreateSolidColorBrush(D2D1::ColorF(palette.accent, 0.90f), &accent_brush_);
         UpdateThemeFromSettings();
     }
 }
@@ -3602,6 +3935,16 @@ void PopupWindow::DiscardDeviceResources() {
     ReleasePtr(link_kind_icon_);
     ReleasePtr(add_favorite_folder_outline_icon_);
     ReleasePtr(add_favorite_folder_filled_icon_);
+    ReleasePtr(pin_icon_inverted_);
+    ReleasePtr(pin_active_icon_inverted_);
+    ReleasePtr(close_icon_inverted_);
+    ReleasePtr(filter_icon_inverted_);
+    ReleasePtr(filter_active_icon_inverted_);
+    ReleasePtr(multi_select_icon_inverted_);
+    ReleasePtr(multi_select_active_icon_inverted_);
+    ReleasePtr(trash_icon_inverted_);
+    ReleasePtr(add_favorite_folder_outline_icon_inverted_);
+    ReleasePtr(add_favorite_folder_filled_icon_inverted_);
     for (auto& [_, bitmap] : image_preview_cache_) {
         ReleasePtr(bitmap);
     }
@@ -3699,6 +4042,116 @@ ID2D1Bitmap* PopupWindow::LoadIconBitmap(IconId icon) {
     ReleasePtr(converter);
     ReleasePtr(frame);
     ReleasePtr(decoder);
+    return *slot;
+}
+
+ID2D1Bitmap* PopupWindow::LoadInvertedIconBitmap(IconId icon) {
+    ID2D1Bitmap** slot = nullptr;
+    const wchar_t* filename = nullptr;
+    int resource_id = 0;
+    switch (icon) {
+    case IconId::Pin:
+        slot = &pin_icon_inverted_;
+        filename = L"pin.png";
+        resource_id = IDR_CLIPSOUL_ICON_PIN;
+        break;
+    case IconId::PinActive:
+        slot = &pin_active_icon_inverted_;
+        filename = L"pin-active.png";
+        resource_id = IDR_CLIPSOUL_ICON_PIN_ACTIVE;
+        break;
+    case IconId::Close:
+        slot = &close_icon_inverted_;
+        filename = L"close.png";
+        resource_id = IDR_CLIPSOUL_ICON_CLOSE;
+        break;
+    case IconId::Filter:
+        slot = &filter_icon_inverted_;
+        filename = L"filter.png";
+        resource_id = IDR_CLIPSOUL_ICON_FILTER;
+        break;
+    case IconId::FilterActive:
+        slot = &filter_active_icon_inverted_;
+        filename = L"filter-active.png";
+        resource_id = IDR_CLIPSOUL_ICON_FILTER_ACTIVE;
+        break;
+    case IconId::MultiSelect:
+        slot = &multi_select_icon_inverted_;
+        filename = L"multi-select.png";
+        resource_id = IDR_CLIPSOUL_ICON_MULTI_SELECT;
+        break;
+    case IconId::MultiSelectActive:
+        slot = &multi_select_active_icon_inverted_;
+        filename = L"multi-select-active.png";
+        resource_id = IDR_CLIPSOUL_ICON_MULTI_SELECT_ACTIVE;
+        break;
+    case IconId::Trash:
+        slot = &trash_icon_inverted_;
+        filename = L"trash.png";
+        resource_id = IDR_CLIPSOUL_ICON_TRASH;
+        break;
+    case IconId::AddFavoriteFolderOutline:
+        slot = &add_favorite_folder_outline_icon_inverted_;
+        filename = L"add-favorite-folder-outline.png";
+        resource_id = IDR_CLIPSOUL_ICON_ADD_FAVORITE_FOLDER_OUTLINE;
+        break;
+    case IconId::AddFavoriteFolderFilled:
+        slot = &add_favorite_folder_filled_icon_inverted_;
+        filename = L"add-favorite-folder-filled.png";
+        resource_id = IDR_CLIPSOUL_ICON_ADD_FAVORITE_FOLDER_FILLED;
+        break;
+    default:
+        return LoadIconBitmap(icon);
+    }
+    if (!slot || *slot || !wic_factory_ || !render_target_) {
+        return slot ? *slot : nullptr;
+    }
+
+    IWICBitmapDecoder* decoder = nullptr;
+    IWICBitmapFrameDecode* frame = nullptr;
+    IWICFormatConverter* converter = nullptr;
+    UINT width = 0;
+    UINT height = 0;
+    HRESULT hr = E_FAIL;
+    if ((LoadWicFrameFromResource(wic_factory_, resource_id, &decoder, &frame) ||
+         LoadWicFrameFromFile(wic_factory_, IconPath(filename), &decoder, &frame)) &&
+        SUCCEEDED(wic_factory_->CreateFormatConverter(&converter)) &&
+        SUCCEEDED(converter->Initialize(frame, GUID_WICPixelFormat32bppBGRA, WICBitmapDitherTypeNone, nullptr, 0.0,
+                                        WICBitmapPaletteTypeMedianCut)) &&
+        SUCCEEDED(converter->GetSize(&width, &height)) && width > 0 && height > 0 && width <= 512 && height <= 512) {
+        const UINT stride = width * 4;
+        std::vector<uint8_t> pixels(static_cast<size_t>(stride) * height);
+        hr = converter->CopyPixels(nullptr, stride, static_cast<UINT>(pixels.size()), pixels.data());
+        if (SUCCEEDED(hr)) {
+            const auto palette = ResolvePopupThemePalette(theme_mode_, IsSystemDarkTheme());
+            const uint32_t tint = PopupDarkUiIconTintColor(palette);
+            const uint8_t tint_blue = static_cast<uint8_t>(tint & 0xFF);
+            const uint8_t tint_green = static_cast<uint8_t>((tint >> 8) & 0xFF);
+            const uint8_t tint_red = static_cast<uint8_t>((tint >> 16) & 0xFF);
+            for (size_t index = 0; index + 3 < pixels.size(); index += 4) {
+                const uint8_t alpha = pixels[index + 3];
+                if (alpha == 0) {
+                    pixels[index + 0] = 0;
+                    pixels[index + 1] = 0;
+                    pixels[index + 2] = 0;
+                    continue;
+                }
+                pixels[index + 0] = static_cast<uint8_t>((static_cast<unsigned int>(tint_blue) * alpha + 127) / 255);
+                pixels[index + 1] =
+                    static_cast<uint8_t>((static_cast<unsigned int>(tint_green) * alpha + 127) / 255);
+                pixels[index + 2] = static_cast<uint8_t>((static_cast<unsigned int>(tint_red) * alpha + 127) / 255);
+            }
+            const auto bitmap_properties = D2D1::BitmapProperties(
+                D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+            hr = render_target_->CreateBitmap(D2D1::SizeU(width, height), pixels.data(), stride, bitmap_properties, slot);
+        }
+    }
+    ReleasePtr(converter);
+    ReleasePtr(frame);
+    ReleasePtr(decoder);
+    if (FAILED(hr)) {
+        return nullptr;
+    }
     return *slot;
 }
 
@@ -3874,6 +4327,33 @@ ID2D1Bitmap* PopupWindow::CachedIconBitmap(IconId icon) const {
     return nullptr;
 }
 
+ID2D1Bitmap* PopupWindow::CachedInvertedIconBitmap(IconId icon) const {
+    switch (icon) {
+    case IconId::Pin:
+        return pin_icon_inverted_;
+    case IconId::PinActive:
+        return pin_active_icon_inverted_;
+    case IconId::Close:
+        return close_icon_inverted_;
+    case IconId::Filter:
+        return filter_icon_inverted_;
+    case IconId::FilterActive:
+        return filter_active_icon_inverted_;
+    case IconId::MultiSelect:
+        return multi_select_icon_inverted_;
+    case IconId::MultiSelectActive:
+        return multi_select_active_icon_inverted_;
+    case IconId::Trash:
+        return trash_icon_inverted_;
+    case IconId::AddFavoriteFolderOutline:
+        return add_favorite_folder_outline_icon_inverted_;
+    case IconId::AddFavoriteFolderFilled:
+        return add_favorite_folder_filled_icon_inverted_;
+    default:
+        return nullptr;
+    }
+}
+
 ID2D1Bitmap* PopupWindow::CachedImagePreviewBitmap(const std::filesystem::path& path) const {
     if (path.empty()) {
         return nullptr;
@@ -3916,8 +4396,22 @@ PopupWindow::IconId PopupWindow::ToWindowIcon(PopupIconAssetSlot slot) const {
 }
 
 void PopupWindow::DrawIcon(IconId icon, const UiRect& rect, float opacity) {
-    const bool fast_interaction = moving_window_ || resizing_window_;
-    ID2D1Bitmap* bitmap = PopupShouldLoadUiIcon(fast_interaction) ? LoadIconBitmap(icon) : CachedIconBitmap(icon);
+    const auto palette = ResolvePopupThemePalette(theme_mode_, IsSystemDarkTheme());
+    const bool fast_interaction =
+        PopupIsFastMediaInteraction(moving_window_, resizing_window_, motion_target_ == PopupMotionTarget::ViewSwitch);
+    const bool content_icon = icon == IconId::TextKind || icon == IconId::LinkKind;
+    ID2D1Bitmap* bitmap = nullptr;
+    if (palette.dark && !content_icon) {
+        bitmap = PopupUiIconShouldLoadBitmap(palette, content_icon, fast_interaction) ? LoadInvertedIconBitmap(icon)
+                                                                                      : CachedInvertedIconBitmap(icon);
+    }
+    if (!bitmap) {
+        if (!PopupUiIconShouldFallbackToOriginalBitmap(palette, content_icon)) {
+            return;
+        }
+        bitmap = PopupUiIconShouldLoadBitmap(palette, content_icon, fast_interaction) ? LoadIconBitmap(icon)
+                                                                                      : CachedIconBitmap(icon);
+    }
     if (!PopupShouldDrawCachedMediaDuringFastInteraction(fast_interaction, bitmap != nullptr)) {
         return;
     }
@@ -3927,7 +4421,8 @@ void PopupWindow::DrawIcon(IconId icon, const UiRect& rect, float opacity) {
 }
 
 void PopupWindow::DrawCardMedia(const HistoryItem& item, const PopupCardLayout& card, ID2D1SolidColorBrush* brush) {
-    const bool fast_interaction = moving_window_ || resizing_window_;
+    const bool fast_interaction =
+        PopupIsFastMediaInteraction(moving_window_, resizing_window_, motion_target_ == PopupMotionTarget::ViewSwitch);
     const bool load_previews = PopupShouldLoadImagePreview(fast_interaction);
     const auto kind_color = KindColor(item.kind);
     if (item.kind == ClipboardKind::Image) {
@@ -3973,21 +4468,67 @@ void PopupWindow::DrawCardMedia(const HistoryItem& item, const PopupCardLayout& 
 
     if (item.kind == ClipboardKind::Text || item.kind == ClipboardKind::Html || item.kind == ClipboardKind::Link) {
         const bool link = item.kind == ClipboardKind::Link;
-        const UiRect badge = ShrinkRect(card.stripe, -4.0f, -4.0f);
-        brush->SetColor(link ? D2D1::ColorF(0xFFF4DE, 0.92f) : D2D1::ColorF(0xEEF2FF, 0.90f));
-        render_target_->FillRoundedRectangle(RoundRect(badge, 6), brush);
-        brush->SetColor(link ? D2D1::ColorF(0xF59E0B, 0.48f) : D2D1::ColorF(0x7C8EF8, 0.42f));
-        render_target_->DrawRoundedRectangle(RoundRect(badge, 6), brush, 1.0f);
+        const UiRect badge = CenteredRect(card.image_preview, 26.0f, 26.0f);
+        brush->SetColor(D2D1::ColorF(link ? 0xF3F0EA : 0xF1F2F4, 0.92f));
+        render_target_->FillRoundedRectangle(RoundRect(badge, 7), brush);
+        brush->SetColor(D2D1::ColorF(link ? 0x7A6F60 : 0x73767D, 0.42f));
+        render_target_->DrawRoundedRectangle(RoundRect(badge, 7), brush, 1.0f);
         const auto icon_rect = PopupCardKindIconRect(card);
         DrawIcon(link ? IconId::LinkKind : IconId::TextKind, icon_rect, 0.92f);
         return;
     }
 
     brush->SetColor(D2D1::ColorF(kind_color.r, kind_color.g, kind_color.b, 0.12f));
-    render_target_->FillRoundedRectangle(RoundRect(card.stripe, 6), brush);
+    render_target_->FillRoundedRectangle(RoundRect(card.image_preview, 8), brush);
     brush->SetColor(kind_color);
-    render_target_->DrawRoundedRectangle(RoundRect(card.stripe, 6), brush, 1.0f);
-    render_target_->DrawTextW(KindGlyph(item.kind), 1, centered_small_format_, Rect(card.stripe), brush);
+    render_target_->DrawRoundedRectangle(RoundRect(card.image_preview, 8), brush, 1.0f);
+    render_target_->DrawTextW(KindGlyph(item.kind), 1, centered_small_format_, Rect(card.image_preview), brush);
+}
+
+void PopupWindow::StartMotion(PopupMotionTarget target, int direction) {
+    if (!hwnd_ || moving_window_ || resizing_window_) {
+        return;
+    }
+    motion_target_ = target;
+    motion_progress_ = 0.0f;
+    motion_direction_ = direction < 0 ? -1 : 1;
+    SetTimer(hwnd_, kAnimationTimer, 16, nullptr);
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void PopupWindow::AdvanceMotion() {
+    const bool has_panel_motion = motion_target_ != PopupMotionTarget::None;
+    const bool has_arrow_motion = arrow_motion_progress_ < 1.0f;
+    if (!has_panel_motion && !has_arrow_motion) {
+        KillTimer(hwnd_, kAnimationTimer);
+        return;
+    }
+    if (has_panel_motion) {
+        motion_progress_ = std::min(1.0f, motion_progress_ + 0.16f);
+        if (motion_progress_ >= 1.0f) {
+            motion_progress_ = 1.0f;
+            if (motion_target_ == PopupMotionTarget::FilterPanel) {
+                closing_filter_panel_ = false;
+            } else if (motion_target_ == PopupMotionTarget::FavoriteMenu) {
+                closing_favorite_group_menu_ = false;
+            } else if (motion_target_ == PopupMotionTarget::DeleteConfirm) {
+                closing_delete_confirm_ = false;
+                closing_delete_confirm_snapshot_ = PendingFavoriteGroupDelete{};
+            }
+            motion_target_ = PopupMotionTarget::None;
+        }
+    }
+    if (has_arrow_motion) {
+        arrow_motion_progress_ = std::min(1.0f, arrow_motion_progress_ + 0.22f);
+        if (arrow_motion_progress_ >= 1.0f) {
+            arrow_motion_progress_ = 1.0f;
+            arrow_motion_item_id_.reset();
+        }
+    }
+    if (motion_target_ == PopupMotionTarget::None && arrow_motion_progress_ >= 1.0f) {
+        KillTimer(hwnd_, kAnimationTimer);
+    }
+    InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
 void PopupWindow::Paint() {
@@ -3999,7 +4540,7 @@ void PopupWindow::Paint() {
     }
     const auto palette = ResolvePopupThemePalette(theme_mode_, IsSystemDarkTheme());
     render_target_->BeginDraw();
-    render_target_->Clear(D2D1::ColorF(0x000000, 0.0f));
+    render_target_->Clear(D2D1::ColorF(palette.window_tint, 1.0f));
 
     ID2D1SolidColorBrush* brush = nullptr;
     render_target_->CreateSolidColorBrush(ColorWithAlpha(palette.window_tint, palette.window_opacity), &brush);
@@ -4008,59 +4549,117 @@ void PopupWindow::Paint() {
         if (!PopupShouldDrawDecorativeShadows(drawing_fast_interaction)) {
             return;
         }
-        const uint32_t color = palette.dark ? 0x000000 : 0x8FA0B6;
-        for (int i = 2; i >= 1; --i) {
-            const float t = static_cast<float>(i);
-            const float alpha = (palette.dark ? 0.030f : 0.022f) * strength * (3.0f - t);
-            brush->SetColor(D2D1::ColorF(color, alpha));
-            render_target_->FillRoundedRectangle(
-                RoundRect(rect.left - t, rect.top + y_offset - t * 0.4f,
-                          rect.right + t, rect.bottom + y_offset + t * 0.8f,
-                          radius + t),
-                brush);
-        }
+        const float alpha = (palette.dark ? 0.10f : 0.055f) * std::clamp(strength, 0.0f, 1.0f);
+        brush->SetColor(D2D1::ColorF(0x000000, alpha));
+        render_target_->FillRoundedRectangle(
+            RoundRect(rect.left, rect.top + y_offset, rect.right, rect.bottom + y_offset, radius),
+            brush);
     };
-    render_target_->FillRoundedRectangle(RoundRect(1.0f, 1.0f, popup_logical_width_ - 1.0f,
-                                                   popup_logical_height_ - 1.0f,
-                                                   static_cast<float>(metrics.corner_radius)),
-                                         brush);
-    brush->SetColor(ColorWithAlpha(palette.dark ? 0x5A6473 : 0xFFFFFF, palette.dark ? 0.42f : 0.62f));
-    render_target_->DrawRoundedRectangle(RoundRect(1.0f, 1.0f, popup_logical_width_ - 1.0f,
-                                                   popup_logical_height_ - 1.0f,
-                                                   static_cast<float>(metrics.corner_radius)),
-                                         brush, 1.0f);
-
+    auto drawInkPanelFrame = [&](const UiRect& rect, float radius, float opacity = 0.74f,
+                                 bool strong = false) {
+        brush->SetColor(D2D1::ColorF(strong ? palette.border_selected : palette.border,
+                                     palette.dark ? opacity * 0.78f : opacity));
+        render_target_->DrawRoundedRectangle(RoundRect(rect, radius), brush, strong ? 1.25f : 1.0f);
+    };
+    auto drawPopupInnerEdge = [&](const UiRect& rect, float radius) {
+        const float outer_alpha = palette.dark ? 0.52f : 0.74f;
+        brush->SetColor(D2D1::ColorF(palette.border_selected, outer_alpha));
+        if (PopupWindowEdgeShouldDrawCornerArcs()) {
+            render_target_->DrawRoundedRectangle(
+                RoundRect(rect.left, rect.top, rect.right, rect.bottom, radius),
+                brush, 1.0f);
+            return;
+        }
+        render_target_->DrawLine(D2D1::Point2F(rect.left, rect.top),
+                                 D2D1::Point2F(rect.right, rect.top), brush, 1.0f);
+        render_target_->DrawLine(D2D1::Point2F(rect.right, rect.top),
+                                 D2D1::Point2F(rect.right, rect.bottom), brush, 1.0f);
+        render_target_->DrawLine(D2D1::Point2F(rect.right, rect.bottom),
+                                 D2D1::Point2F(rect.left, rect.bottom), brush, 1.0f);
+        render_target_->DrawLine(D2D1::Point2F(rect.left, rect.bottom),
+                                 D2D1::Point2F(rect.left, rect.top), brush, 1.0f);
+    };
+    const auto motionProgressFor = [&](PopupMotionTarget target) {
+        if (motion_target_ != target) {
+            return 1.0f;
+        }
+        const float progress = PopupMotionProgress(motion_progress_);
+        return motion_direction_ < 0 ? 1.0f - progress : progress;
+    };
+    auto applyMotionTransform = [&](PopupMotionTarget target, float max_offset, float min_scale,
+                                    const UiRect& anchor, bool horizontal = false) {
+        const bool view_switch_motion =
+            horizontal && target == PopupMotionTarget::ViewSwitch && motion_target_ == target;
+        const float motion = view_switch_motion ? PopupMotionProgress(motion_progress_) : motionProgressFor(target);
+        const float offset = view_switch_motion ? PopupViewSwitchListOffset(motion_direction_, motion_progress_, max_offset)
+                                                : PopupMotionEnterOffset(motion, max_offset);
+        const float scale = min_scale + (1.0f - min_scale) * motion;
+        const auto center =
+            D2D1::Point2F((anchor.left + anchor.right) * 0.5f, (anchor.top + anchor.bottom) * 0.5f);
+        const auto scale_matrix = D2D1::Matrix3x2F::Scale(scale, scale, center);
+        const auto move_matrix = horizontal
+                                     ? D2D1::Matrix3x2F::Translation(offset, 0.0f)
+                                     : D2D1::Matrix3x2F::Translation(0.0f, offset);
+        render_target_->SetTransform(scale_matrix * move_matrix);
+    };
+    auto applyMotionTransformFromTrigger = [&](PopupMotionTarget target, float max_offset, float min_scale,
+                                               const UiRect& trigger, const UiRect& panel) {
+        const bool exiting = motion_target_ == target && motion_direction_ < 0;
+        const float motion = motionProgressFor(target);
+        const auto offset = exiting
+                                ? PopupMotionExitOffsetFromTrigger(trigger, panel, motion_progress_, max_offset)
+                                : PopupMotionEnterOffsetFromTrigger(trigger, panel, motion, max_offset);
+        const float scale = min_scale + (1.0f - min_scale) * motion;
+        const auto center =
+            D2D1::Point2F((trigger.left + trigger.right) * 0.5f, (trigger.top + trigger.bottom) * 0.5f);
+        const auto scale_matrix = D2D1::Matrix3x2F::Scale(scale, scale, center);
+        const auto move_matrix = D2D1::Matrix3x2F::Translation(offset.x, offset.y);
+        render_target_->SetTransform(scale_matrix * move_matrix);
+    };
+    const UiRect window_surface_rect{0.0f, 0.0f, static_cast<float>(popup_logical_width_),
+                                     static_cast<float>(popup_logical_height_)};
+    brush->SetColor(ColorWithAlpha(palette.window_tint, palette.window_opacity));
+    render_target_->FillRoundedRectangle(RoundRect(window_surface_rect, PopupWindowEdgeCornerRadius()), brush);
+    if (PopupWindowShouldDrawClientEdge()) {
+        const UiRect popup_edge_rect = PopupWindowEdgeStrokeRectForSize(popup_logical_width_, popup_logical_height_);
+        drawPopupInnerEdge(popup_edge_rect, PopupWindowEdgeCornerRadius());
+    }
     const auto header = BuildPopupHeaderLayoutForWidth(popup_logical_width_);
     render_target_->DrawTextW(L"ClipSoul", 8, title_format_, Rect(header.title), text_brush_);
     render_target_->DrawTextW(kClipSoulVersion.data(), static_cast<UINT32>(kClipSoulVersion.size()), small_format_,
-                              Rect(header.title.left + 80.0f, header.title.top + 4.0f,
-                                   header.title.left + 142.0f, header.title.bottom),
+                              Rect(header.title.left + 96.0f, header.title.top + 4.0f,
+                                   header.title.left + 158.0f, header.title.bottom),
                               muted_brush_);
+    const float brand_y = header.title.bottom + 3.0f;
+    brush->SetColor(D2D1::ColorF(palette.active_tab, palette.dark ? 0.68f : 0.74f));
+    render_target_->DrawLine(D2D1::Point2F(header.title.left + 1.0f, brand_y),
+                             D2D1::Point2F(header.title.left + 52.0f, brand_y), brush, 1.4f);
     auto drawHeaderButton = [&](const UiRect& rect, bool active, UiAction action) {
         const bool hovered = hover_action_ == action;
         const float hover = hovered ? hover_progress_ : 0.0f;
         if (active || hovered) {
-            drawEdgeShadow(rect, 6.0f, active ? 0.42f : 0.28f + 0.12f * hover, 1.5f);
+            drawEdgeShadow(rect, 9.0f, active ? 0.32f : 0.18f + 0.10f * hover, 1.0f);
             if (action == UiAction::Close && hovered) {
-                brush->SetColor(D2D1::ColorF(0xFFF1F2, 0.40f + 0.35f * hover));
+                brush->SetColor(D2D1::ColorF(palette.dark ? 0x3A211F : 0xF8DED8,
+                                             0.40f + 0.35f * hover));
             } else {
-                brush->SetColor(active ? D2D1::ColorF(0xDDFCF8, 0.48f + 0.20f * hover)
-                                       : D2D1::ColorF(0xF4FFFD, 0.70f * hover));
+                brush->SetColor(active ? D2D1::ColorF(PopupSubtleAccentFill(palette), 0.72f)
+                                       : D2D1::ColorF(PopupNeutralHoverFill(palette), 0.70f * hover));
             }
-            render_target_->FillRoundedRectangle(RoundRect(rect, 6), brush);
+            render_target_->FillRoundedRectangle(RoundRect(rect, 9), brush);
             if (action == UiAction::Close && hovered) {
-                brush->SetColor(D2D1::ColorF(0xE5484D, 0.32f + 0.42f * hover));
+                brush->SetColor(D2D1::ColorF(palette.danger, 0.32f + 0.42f * hover));
             } else {
-                brush->SetColor(active ? D2D1::ColorF(0x14B8A6, 0.42f)
-                                       : D2D1::ColorF(0xDDE5EF, 0.72f * hover));
+                brush->SetColor(active ? D2D1::ColorF(palette.border_selected, 0.64f)
+                                       : D2D1::ColorF(palette.border_hover, 0.78f * hover));
             }
-            render_target_->DrawRoundedRectangle(RoundRect(rect, 6), brush, 0.75f + 0.3f * hover);
+            render_target_->DrawRoundedRectangle(RoundRect(rect, 9), brush, 1.0f);
         }
     };
     drawHeaderButton(header.pin, pinned_open_, UiAction::Pin);
     DrawIcon(ToWindowIcon(PopupPinIconSlot(pinned_open_)),
              BuildPopupHeaderPinIconRect(header),
-             pinned_open_ ? 0.94f : 0.74f);
+             palette.dark ? (pinned_open_ ? 0.96f : 0.88f) : (pinned_open_ ? 0.94f : 0.74f));
     drawHeaderButton(header.close, false, UiAction::Close);
     DrawIcon(IconId::Close,
              BuildPopupHeaderCloseIconRect(header),
@@ -4072,27 +4671,25 @@ void PopupWindow::Paint() {
     const bool search_active = search_focused_ && GetFocus() == search_edit_;
     const float search_focus = PopupSearchFocusProgress(search_active, search_hovered, hover_progress_);
     if (search_hovered || search_active) {
-        brush->SetColor(D2D1::ColorF(palette.accent, search_active ? 0.11f : 0.05f + 0.05f * search_focus));
+        brush->SetColor(D2D1::ColorF(0x000000, search_active ? 0.070f : 0.036f + 0.028f * search_focus));
         render_target_->FillRoundedRectangle(
             RoundRect(metrics.margin - 1.0f, search_top - 1.0f, popup_logical_width_ - metrics.margin + 1.0f,
-                      search_top + metrics.search_height + 1.0f, 10),
+                      search_top + metrics.search_height + 2.0f, 10),
             brush);
     }
-    brush->SetColor(ColorWithAlpha(search_hovered || search_active ? (palette.dark ? 0x243040 : 0xFFFFFF)
-                                                                   : palette.search_fill,
-                                    palette.dark ? 0.76f + 0.08f * search_focus : 0.90f + 0.06f * search_focus));
+    brush->SetColor(ColorWithAlpha(palette.search_fill, palette.dark ? 0.96f : 1.0f));
     render_target_->FillRoundedRectangle(
         RoundRect(metrics.margin, search_top, popup_logical_width_ - metrics.margin, search_top + metrics.search_height, 9),
         brush);
-    brush->SetColor(search_active ? D2D1::ColorF(palette.accent, 0.70f)
-                                   : D2D1::ColorF(search_hovered ? palette.accent : palette.border,
-                                                  search_hovered ? 0.42f + 0.18f * search_focus : 0.68f));
+    brush->SetColor(search_active ? D2D1::ColorF(palette.accent, 0.92f)
+                                   : D2D1::ColorF(search_hovered ? palette.strong_border : palette.border,
+                                                  search_hovered ? 0.52f + 0.22f * search_focus : 0.78f));
     render_target_->DrawRoundedRectangle(
         RoundRect(metrics.margin, search_top, popup_logical_width_ - metrics.margin, search_top + metrics.search_height, 9),
-        brush, search_active ? 1.45f : 1.0f + 0.25f * search_focus);
+        brush, search_active ? 1.5f : 1.0f);
     const float search_icon_x = static_cast<float>(metrics.margin) + 20.0f;
     const float search_icon_y = search_top + metrics.search_height * 0.5f;
-    brush->SetColor(D2D1::ColorF(palette.muted, 0.72f));
+    brush->SetColor(D2D1::ColorF(palette.text_tertiary, 0.76f));
     render_target_->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(search_icon_x, search_icon_y - 1.0f), 5.0f, 5.0f),
                                 brush, 1.45f);
     render_target_->DrawLine(D2D1::Point2F(search_icon_x + 3.8f, search_icon_y + 3.0f),
@@ -4106,7 +4703,7 @@ void PopupWindow::Paint() {
         const float selection_right =
             ClampPopupSearchCaretX(search_layout, SearchTextOffsetDips(search_selection.end, false));
         if (selection_right > selection_left) {
-            brush->SetColor(D2D1::ColorF(palette.accent, palette.dark ? 0.34f : 0.22f));
+            brush->SetColor(D2D1::ColorF(palette.accent, palette.dark ? 0.34f : 0.12f));
             render_target_->FillRoundedRectangle(
                 RoundRect(selection_left, search_layout.text.top + 3.0f, selection_right,
                           search_layout.text.bottom - 3.0f, 3.0f),
@@ -4115,7 +4712,7 @@ void PopupWindow::Paint() {
     }
     brush->SetColor(PopupSearchCompositionTextColor(has_composition, query_)
         ? D2D1::ColorF(palette.text, 0.94f)
-        : D2D1::ColorF(palette.muted, 0.46f));
+        : D2D1::ColorF(palette.text_tertiary, 0.62f));
     if (has_composition && dwrite_factory_ && small_format_) {
         const auto committed_text = std::wstring(query_);
         IDWriteTextLayout* text_layout = nullptr;
@@ -4140,7 +4737,7 @@ void PopupWindow::Paint() {
         PopupSearchCaretVisibleDuringComposition(has_composition)) {
         const float measured_text_width = SearchCaretOffsetDips();
         const float caret_x = ClampPopupSearchCaretX(search_layout, measured_text_width);
-        brush->SetColor(D2D1::ColorF(palette.accent, 0.82f));
+        brush->SetColor(D2D1::ColorF(palette.accent, 0.86f));
         render_target_->DrawLine(D2D1::Point2F(caret_x, search_layout.text.top + 3.0f),
                                  D2D1::Point2F(caret_x, search_layout.text.bottom - 3.0f),
                                  brush, 1.0f);
@@ -4149,14 +4746,15 @@ void PopupWindow::Paint() {
         const bool clear_hovered = hover_action_ == UiAction::ClearSearch ||
                                    PopupSearchClearButtonHitTest(search_layout, true, hover_point_);
         const float clear_opacity = clear_hovered ? 0.95f : 0.82f;
-        brush->SetColor(D2D1::ColorF(palette.muted, clear_opacity));
+        brush->SetColor(D2D1::ColorF(clear_hovered ? palette.muted : palette.text_tertiary, clear_opacity));
         const auto center = PopupSearchClearButtonCenterDips(search_layout);
         render_target_->DrawLine(D2D1::Point2F(static_cast<float>(center.x) - 4.0f, static_cast<float>(center.y) - 4.0f),
                                  D2D1::Point2F(static_cast<float>(center.x) + 4.0f, static_cast<float>(center.y) + 4.0f), brush, 1.8f);
         render_target_->DrawLine(D2D1::Point2F(static_cast<float>(center.x) + 4.0f, static_cast<float>(center.y) - 4.0f),
                                  D2D1::Point2F(static_cast<float>(center.x) - 4.0f, static_cast<float>(center.y) + 4.0f), brush, 1.8f);
     }
-    auto drawToolbarIcon = [&](const UiRect& rect, wchar_t icon, bool active = false, bool has_chevron = false) {
+    auto drawToolbarIcon = [&](const UiRect& rect, wchar_t icon, bool active = false,
+                               bool has_chevron = false) {
         IconId icon_id = IconId::Filter;
         if (icon == L'F') icon_id = ToWindowIcon(PopupFilterIconSlot(active));
         if (icon == L'M') icon_id = ToWindowIcon(PopupMultiSelectIconSlot(active));
@@ -4165,16 +4763,26 @@ void PopupWindow::Paint() {
         if (icon == L'D') icon_id = IconId::Trash;
         if (icon == L'C') icon_id = IconId::Close;
         const bool compact = rect.Width() < 94.0f;
-        DrawIcon(icon_id, CenteredRect(UiRect{rect.left + 7.0f, rect.top + 4.0f,
-                                             rect.left + (compact ? 25.0f : 29.0f), rect.bottom - 4.0f},
-                                      compact ? 12.0f : 13.0f, compact ? 12.0f : 13.0f),
-                 active ? 0.86f : 0.66f);
+        const auto icon_rect =
+            CenteredRect(UiRect{rect.left + (compact ? 5.0f : 8.0f), rect.top + 4.0f,
+                                rect.left + (compact ? 23.0f : 34.0f), rect.bottom - 4.0f},
+                         static_cast<float>(metrics.toolbar_icon_size),
+                         static_cast<float>(metrics.toolbar_icon_size));
+        DrawIcon(icon_id, icon_rect, palette.dark ? (active ? 0.96f : 0.88f) : (active ? 0.86f : 0.66f));
         if (has_chevron) {
-            const float cx = rect.right - 15.0f;
-            const float cy = rect.top + 14.0f;
-            brush->SetColor(D2D1::ColorF(0x26364B, 0.72f));
-            render_target_->DrawLine(D2D1::Point2F(cx, cy), D2D1::Point2F(cx + 4.0f, cy + 4.0f), brush, 1.15f);
-            render_target_->DrawLine(D2D1::Point2F(cx + 8.0f, cy), D2D1::Point2F(cx + 4.0f, cy + 4.0f), brush, 1.15f);
+            const float cx = rect.right - 11.0f;
+            const float cy = (rect.top + rect.bottom) * 0.5f;
+            const float panel_motion = motion_target_ == PopupMotionTarget::FilterPanel
+                                           ? PopupMotionProgress(motion_progress_)
+                                           : 1.0f;
+            const float rotation_progress = active ? panel_motion : 1.0f - panel_motion;
+            const float radians = rotation_progress * kPi;
+            const auto p1 = RotatePoint(cx - 4.0f, cy - 2.0f, cx, cy, radians);
+            const auto p2 = RotatePoint(cx, cy + 2.0f, cx, cy, radians);
+            const auto p3 = RotatePoint(cx + 4.0f, cy - 2.0f, cx, cy, radians);
+            brush->SetColor(D2D1::ColorF(PopupToolbarLabelColor(palette, active, false), 0.78f));
+            render_target_->DrawLine(p1, p2, brush, 1.15f);
+            render_target_->DrawLine(p3, p2, brush, 1.15f);
         }
     };
     auto drawButton = [&](const UiRect& rect, const wchar_t* label, wchar_t icon, UiAction action,
@@ -4183,64 +4791,63 @@ void PopupWindow::Paint() {
         const float hover = hovered ? hover_progress_ : 0.0f;
         const bool danger = action == UiAction::ClearAll || action == UiAction::DeleteSelected;
         if (danger) {
-            brush->SetColor(D2D1::ColorF(hovered ? 0xFFF1F2 : 0xFFFFFF, 0.66f + 0.18f * hover));
+            brush->SetColor(ColorWithAlpha(hovered ? PopupNeutralHoverFill(palette) : palette.card_fill,
+                                           0.78f + 0.18f * hover));
         } else {
-            brush->SetColor(active ? D2D1::ColorF(0xDDFCF8, 0.82f)
-                                   : ColorWithAlpha(palette.panel_fill, 0.62f + 0.26f * hover));
+            brush->SetColor(active ? D2D1::ColorF(PopupSubtleAccentFill(palette), 0.86f)
+                                   : ColorWithAlpha(hovered ? PopupNeutralHoverFill(palette) : palette.card_fill,
+                                                    0.78f + 0.18f * hover));
         }
-        drawEdgeShadow(rect, 9.0f, active ? 0.48f : 0.30f + 0.12f * hover, 2.0f);
+        drawEdgeShadow(rect, 9.0f, active ? 0.30f : 0.12f + 0.10f * hover, 1.0f);
         render_target_->FillRoundedRectangle(RoundRect(rect, 9), brush);
-        if (danger) {
-            brush->SetColor(D2D1::ColorF(hovered ? 0xE5484D : 0xF2555A, hovered ? 0.72f : 0.58f));
-        } else {
-            brush->SetColor(active ? D2D1::ColorF(0x0EA5A4, 0.56f)
-                                   : D2D1::ColorF(hover > 0.0f ? 0x65DAD2 : palette.border,
-                                                  hover > 0.0f ? 0.54f * hover : 0.52f));
-        }
-        render_target_->DrawRoundedRectangle(RoundRect(rect, 9), brush, 0.85f + 0.4f * hover);
+        brush->SetColor(active ? D2D1::ColorF(palette.border_selected, 0.82f)
+                               : D2D1::ColorF(hover > 0.0f ? palette.border_hover : palette.border,
+                                              hover > 0.0f ? 0.78f : 0.68f));
+        render_target_->DrawRoundedRectangle(RoundRect(rect, 9), brush, active ? 1.15f : 1.0f);
         drawToolbarIcon(rect, icon, active, has_chevron);
-        ID2D1SolidColorBrush* label_brush = danger ? brush : text_brush_;
-        if (danger) {
-            brush->SetColor(D2D1::ColorF(hovered ? 0xC92A2A : 0xE5484D, 0.94f));
-        }
+        const uint32_t label_color = PopupToolbarLabelColor(palette, active, danger);
+        brush->SetColor(D2D1::ColorF(label_color, danger ? (hovered ? 0.96f : 0.86f) : 0.92f));
         render_target_->DrawTextW(label, static_cast<UINT32>(wcslen(label)), small_format_,
-                                  Rect(PopupToolbarLabelRect(rect, has_chevron)), label_brush);
+                                  Rect(PopupToolbarLabelRect(rect, has_chevron)), brush);
     };
     const auto toolbar = BuildPopupToolbarLayoutForWidth(multi_select_, popup_logical_width_);
+    const bool multi_motion_active = motion_target_ == PopupMotionTarget::MultiSelect;
+    const float multi_motion = multi_motion_active ? PopupMotionProgress(motion_progress_) : 1.0f;
+    const bool multi_entering = multi_select_;
+    D2D1_MATRIX_3X2_F toolbar_transform{};
+    render_target_->GetTransform(&toolbar_transform);
+    if (multi_motion_active) {
+        const float toolbar_offset = PopupMultiSelectToolbarOffset(multi_motion, multi_entering);
+        render_target_->SetTransform(D2D1::Matrix3x2F::Translation(toolbar_offset, 0.0f));
+    }
     if (multi_select_) {
-        drawButton(toolbar.select_all, L"\u5168\u9009", L'A', UiAction::SelectAll, true);
+        drawButton(toolbar.select_all, L"\u5168\u9009", L'A', UiAction::SelectAll);
         drawButton(toolbar.cancel_multi_select, L"取消", L'C', UiAction::MultiSelect);
         drawButton(toolbar.delete_selected, L"选中删除", L'D', UiAction::DeleteSelected);
-        drawButton(toolbar.paste_selected, L"选中粘贴", L'P', UiAction::PasteSelected, true);
+        drawButton(toolbar.paste_selected, L"选中粘贴", L'P', UiAction::PasteSelected);
     } else {
         drawButton(toolbar.filter, L"\u7b5b\u9009", L'F', UiAction::Filter, filter_open_, true);
         drawButton(toolbar.multi_select, L"\u591a\u9009", L'M', UiAction::MultiSelect);
         drawButton(toolbar.clear_all, L"全部清除", L'D', UiAction::ClearAll);
     }
+    if (multi_motion_active) {
+        render_target_->SetTransform(toolbar_transform);
+    }
 
     const auto tabs = BuildPopupTabsLayoutForWidth(view_mode_ == ViewMode::Favorites, popup_logical_width_);
-    auto drawTabGlow = [&](const UiRect& rect) {
-        const float cx = (rect.left + rect.right) * 0.5f;
-        const float cy = (rect.top + rect.bottom) * 0.5f;
-        for (int i = 7; i >= 0; --i) {
-            const float t = static_cast<float>(i) / 7.0f;
-            const float width = 42.0f + t * 48.0f;
-            const float height = 18.0f + t * 28.0f;
-            const float fade = 1.0f - t;
-            const float alpha = (0.006f + 0.040f * fade * fade) * hover_progress_;
-            brush->SetColor(D2D1::ColorF(palette.dark ? 0xC8D0DA : 0x7DE7DE, alpha));
-            render_target_->FillRoundedRectangle(
-                RoundRect(cx - width * 0.5f, cy - height * 0.5f, cx + width * 0.5f, cy + height * 0.5f,
-                          height * 0.5f),
-                brush);
+    auto drawTabSurface = [&](const UiRect& rect, bool active, UiAction action) {
+        const bool hovered = hover_action_ == action;
+        const float hover = hovered ? hover_progress_ : 0.0f;
+        if (!active && !hovered) {
+            return;
+        }
+        if (hovered && !active) {
+            brush->SetColor(D2D1::ColorF(PopupNeutralHoverFill(palette), 0.45f * hover));
+            render_target_->FillRoundedRectangle(RoundRect(rect, 10), brush);
         }
     };
-    if (hover_action_ == UiAction::HistoryTab) {
-        drawTabGlow(tabs.history);
-    }
-    if (hover_action_ == UiAction::FavoritesTab) {
-        drawTabGlow(tabs.favorites);
-    }
+    drawTabSurface(tabs.history, view_mode_ == ViewMode::History, UiAction::HistoryTab);
+    drawTabSurface(tabs.favorites, view_mode_ == ViewMode::Favorites, UiAction::FavoritesTab);
     render_target_->DrawTextW(L"历史", 2, centered_small_format_, Rect(tabs.history),
                               view_mode_ == ViewMode::History ? accent_brush_ : text_brush_);
     render_target_->DrawTextW(L"\u6536\u85cf\u5939", 3, centered_small_format_, Rect(tabs.favorites),
@@ -4249,8 +4856,8 @@ void PopupWindow::Paint() {
         const bool group_hovered = hover_action_ == UiAction::FavoriteGroupMenu;
         const float group_hover = group_hovered ? hover_progress_ : 0.0f;
         drawEdgeShadow(tabs.favorite_group, 11.0f, 0.24f + 0.12f * group_hover, 1.6f);
-        brush->SetColor(group_hovered ? D2D1::ColorF(0xE0F7F4, 0.64f + 0.18f * group_hover)
-                                      : ColorWithAlpha(palette.panel_fill, 0.72f));
+        brush->SetColor(group_hovered ? D2D1::ColorF(PopupNeutralHoverFill(palette), 0.72f + 0.14f * group_hover)
+                                      : ColorWithAlpha(palette.card_fill, 0.72f));
         render_target_->FillRoundedRectangle(RoundRect(tabs.favorite_group, 10), brush);
         brush->SetColor(group_hovered ? D2D1::ColorF(palette.accent, 0.52f)
                                       : D2D1::ColorF(palette.border, 0.62f));
@@ -4259,31 +4866,41 @@ void PopupWindow::Paint() {
             PopupFavoriteFolderIconSlotForGroup(favorite_group_menu_open_ || active_favorite_group_id_.has_value());
         DrawIcon(group_icon_slot == PopupFavoriteFolderIconSlot::Filled ? IconId::AddFavoriteFolderFilled
                                                                         : IconId::AddFavoriteFolderOutline,
-                 PopupFavoriteGroupIconRect(tabs), 0.82f);
+                 PopupFavoriteGroupIconRect(tabs), palette.dark ? 0.92f : 0.82f);
 
         const float add_cx = (tabs.add_favorite_phrase.left + tabs.add_favorite_phrase.right) * 0.5f;
         const float add_cy = (tabs.add_favorite_phrase.top + tabs.add_favorite_phrase.bottom) * 0.5f;
         const bool add_hovered = hover_action_ == UiAction::AddFavoritePhrase;
         const float add_hover = add_hovered ? hover_progress_ : 0.0f;
-        brush->SetColor(add_hovered ? D2D1::ColorF(0xE0F7F4, 0.64f + 0.22f * add_hover)
-                                    : D2D1::ColorF(0xFFFFFF, 0.64f));
+        brush->SetColor(add_hovered ? D2D1::ColorF(PopupNeutralHoverFill(palette), 0.70f + 0.16f * add_hover)
+                                    : D2D1::ColorF(palette.card_fill, 0.70f));
         render_target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(add_cx, add_cy), 11.0f, 11.0f), brush);
-        brush->SetColor(D2D1::ColorF(0xDDE5EF, 0.72f));
+        brush->SetColor(D2D1::ColorF(palette.border, 0.72f));
         render_target_->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(add_cx, add_cy), 11.0f, 11.0f), brush,
                                     1.0f + 0.35f * add_hover);
-        brush->SetColor(D2D1::ColorF(0x0EA5A4, 0.9f));
+        brush->SetColor(D2D1::ColorF(palette.accent, 0.90f));
         render_target_->DrawLine(D2D1::Point2F(add_cx - 4.0f, add_cy), D2D1::Point2F(add_cx + 4.0f, add_cy), brush,
                                  1.35f);
         render_target_->DrawLine(D2D1::Point2F(add_cx, add_cy - 4.0f), D2D1::Point2F(add_cx, add_cy + 4.0f), brush,
                                  1.35f);
     }
-    brush->SetColor(D2D1::ColorF(palette.accent, 0.92f));
-    render_target_->FillRectangle(Rect(tabs.active_indicator), brush);
-    brush->SetColor(D2D1::ColorF(0xDDE5EF, 0.65f));
+    UiRect indicator = tabs.active_indicator;
+    if (motion_target_ == PopupMotionTarget::ViewSwitch) {
+        const auto previous_tabs =
+            BuildPopupTabsLayoutForWidth(motion_direction_ > 0 ? false : true, popup_logical_width_);
+        indicator = PopupTabIndicatorRectForMotion(previous_tabs.active_indicator, tabs.active_indicator,
+                                                   PopupMotionProgress(motion_progress_));
+    }
+    brush->SetColor(D2D1::ColorF(palette.active_tab, 0.92f));
+    render_target_->FillRectangle(Rect(indicator), brush);
+    brush->SetColor(D2D1::ColorF(palette.border, 0.58f));
     render_target_->FillRectangle(Rect(tabs.divider), brush);
 
     const auto list_clip = PopupListClipRectForHeight(popup_logical_width_, popup_logical_height_);
     render_target_->PushAxisAlignedClip(Rect(list_clip), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    D2D1_MATRIX_3X2_F list_transform{};
+    render_target_->GetTransform(&list_transform);
+    applyMotionTransform(PopupMotionTarget::ViewSwitch, 18.0f, 0.992f, list_clip, true);
 
     const int first_visible_index = FirstVisibleItemIndex();
     float y = PopupListTop() - (scroll_offset_ - ItemScrollTop(first_visible_index));
@@ -4295,7 +4912,24 @@ void PopupWindow::Paint() {
         const bool hovered = item_index == hover_item_index_;
         const float hover = hovered ? hover_progress_ : 0.0f;
         const bool checked = selection_.IsSelected(item.id);
-        auto card = BuildPopupCardLayout(multi_select_, y);
+        auto card = BuildPopupCardLayout(multi_select_ || multi_motion_active, y);
+        if (multi_motion_active) {
+            const auto single_card = BuildPopupCardLayout(false, y);
+            const auto multi_card = BuildPopupCardLayout(true, y);
+            const float layout_progress = multi_select_ ? multi_motion : 1.0f - multi_motion;
+            const auto blendRect = [layout_progress](const UiRect& from, const UiRect& to) {
+                const auto blend = [layout_progress](float a, float b) {
+                    return a + (b - a) * layout_progress;
+                };
+                return UiRect{blend(from.left, to.left), blend(from.top, to.top),
+                              blend(from.right, to.right), blend(from.bottom, to.bottom)};
+            };
+            card.image_preview = blendRect(single_card.image_preview, multi_card.image_preview);
+            card.file_icon = blendRect(single_card.file_icon, multi_card.file_icon);
+            card.title = blendRect(single_card.title, multi_card.title);
+            card.meta = blendRect(single_card.meta, multi_card.meta);
+            card.checkbox = multi_card.checkbox;
+        }
         const float width_delta = static_cast<float>(popup_logical_width_ - metrics.width);
         card.card.right += width_delta;
         card.title.right += width_delta;
@@ -4310,57 +4944,80 @@ void PopupWindow::Paint() {
         const auto detail = expanded ? ItemDetailText(item) : std::wstring{};
         const float expanded_height = expanded ? ExpandedExtraHeightForItem(item) : 0.0f;
         card.card.bottom += expanded_height;
-        brush->SetColor(selected ? D2D1::ColorF(palette.dark ? 0x2B3442 : 0xF0FFFD, 0.94f)
-                                 : ColorWithAlpha(hovered ? (palette.dark ? 0x2D3B4E : 0xF7FFFE) : palette.card_fill,
-                                                  palette.card_opacity + 0.14f * hover));
-        render_target_->FillRoundedRectangle(RoundRect(card.card, 9), brush);
-        brush->SetColor(selected ? D2D1::ColorF(palette.accent, 0.78f)
-                                 : D2D1::ColorF(hovered ? (palette.dark ? 0xAEB8C6 : 0x65DAD2) : palette.border,
-                                                hovered ? 0.58f * hover : 0.72f));
-        render_target_->DrawRoundedRectangle(RoundRect(card.card, 9), brush,
-                                             selected ? 1.25f : 1.0f + 0.25f * hover);
+        const UiRect card_surface = ShrinkRect(card.card, 0.55f, 0.55f);
+        if (selected || hovered) {
+            drawEdgeShadow(card_surface, 12.0f, selected ? 0.34f : 0.12f + 0.08f * hover,
+                           selected ? 1.6f : 1.0f);
+        }
+        brush->SetColor(selected ? D2D1::ColorF(palette.paper_selected, palette.dark ? 0.92f : 0.98f)
+                                 : ColorWithAlpha(hovered ? PopupNeutralHoverFill(palette) : palette.card_fill,
+                                                  palette.card_opacity));
+        render_target_->FillRoundedRectangle(RoundRect(card_surface, 12), brush);
+        brush->SetColor(selected ? D2D1::ColorF(palette.border_selected, 0.92f)
+                                 : D2D1::ColorF(hovered ? palette.border_hover : palette.border,
+                                                hovered ? 0.86f : 0.74f));
+        render_target_->DrawRoundedRectangle(RoundRect(card_surface, 12), brush,
+                                             selected ? 1.15f : 1.0f);
         DrawCardMedia(item, card, brush);
 
-        if (multi_select_) {
-            brush->SetColor(checked ? D2D1::ColorF(0x0EA5A4, 0.9f) : D2D1::ColorF(0xFFFFFF, 0.72f));
-            render_target_->FillRoundedRectangle(RoundRect(card.checkbox, 4), brush);
-            brush->SetColor(D2D1::ColorF(0x7B8798, 0.7f));
-            render_target_->DrawRoundedRectangle(RoundRect(card.checkbox, 4), brush, 1.0f);
+        if (multi_select_ || multi_motion_active) {
+            const float checkbox_opacity = multi_motion_active
+                                               ? PopupMultiSelectCheckboxOpacity(multi_motion, multi_entering)
+                                               : 1.0f;
+            const float checkbox_offset = multi_motion_active
+                                              ? PopupMultiSelectCheckboxOffset(multi_motion, multi_entering)
+                                              : 0.0f;
+            const UiRect checkbox{
+                card.checkbox.left + checkbox_offset,
+                card.checkbox.top,
+                card.checkbox.right + checkbox_offset,
+                card.checkbox.bottom,
+            };
+            brush->SetColor(checked ? D2D1::ColorF(palette.accent, 0.90f)
+                                    : D2D1::ColorF(palette.panel_fill, 0.78f * checkbox_opacity));
+            render_target_->FillRoundedRectangle(RoundRect(checkbox, 4), brush);
+            brush->SetColor(D2D1::ColorF(checked ? palette.accent : palette.border, checked ? 0.82f : 0.76f));
+            brush->SetOpacity(checkbox_opacity);
+            render_target_->DrawRoundedRectangle(RoundRect(checkbox, 4), brush, 1.0f);
+            brush->SetOpacity(1.0f);
             if (checked) {
                 brush->SetColor(D2D1::ColorF(0xFFFFFF, 0.96f));
-                render_target_->DrawLine(D2D1::Point2F(card.checkbox.left + 3.0f, card.checkbox.top + 7.0f),
-                                         D2D1::Point2F(card.checkbox.left + 6.0f, card.checkbox.top + 10.0f),
+                brush->SetOpacity(checkbox_opacity);
+                render_target_->DrawLine(D2D1::Point2F(checkbox.left + 3.0f, checkbox.top + 7.0f),
+                                         D2D1::Point2F(checkbox.left + 6.0f, checkbox.top + 10.0f),
                                          brush, 1.7f);
-                render_target_->DrawLine(D2D1::Point2F(card.checkbox.left + 6.0f, card.checkbox.top + 10.0f),
-                                         D2D1::Point2F(card.checkbox.right - 3.0f, card.checkbox.top + 4.0f),
+                render_target_->DrawLine(D2D1::Point2F(checkbox.left + 6.0f, checkbox.top + 10.0f),
+                                         D2D1::Point2F(checkbox.right - 3.0f, checkbox.top + 4.0f),
                                          brush, 1.7f);
+                brush->SetOpacity(1.0f);
             }
         }
 
         const auto title = ItemTitle(item);
         const auto meta = ItemMeta(item);
+        brush->SetColor(D2D1::ColorF(palette.text, selected ? 0.98f : 0.92f));
         render_target_->DrawTextW(title.c_str(), static_cast<UINT32>(title.size()), body_format_,
-                                  Rect(card.title), text_brush_);
+                                  Rect(card.title), brush);
         render_target_->DrawTextW(meta.c_str(), static_cast<UINT32>(meta.size()), small_format_,
                                   Rect(card.meta), muted_brush_);
         const auto time = ItemTime(item);
         render_target_->DrawTextW(time.c_str(), static_cast<UINT32>(time.size()), small_format_, Rect(card.time),
                                   muted_brush_);
 
-        brush->SetColor(D2D1::ColorF(expanded ? palette.accent : palette.muted, expanded ? 0.92f : 0.70f));
+        brush->SetColor(D2D1::ColorF(expanded ? palette.accent : palette.text_tertiary, expanded ? 0.92f : 0.70f));
         const float ex = (card.expand.left + card.expand.right) * 0.5f;
         const float ey = (card.expand.top + card.expand.bottom) * 0.5f;
-        if (expanded) {
-            render_target_->DrawLine(D2D1::Point2F(ex - 4.0f, ey - 2.0f), D2D1::Point2F(ex, ey + 3.0f), brush,
-                                     1.5f);
-            render_target_->DrawLine(D2D1::Point2F(ex + 4.0f, ey - 2.0f), D2D1::Point2F(ex, ey + 3.0f), brush,
-                                     1.5f);
-        } else {
-            render_target_->DrawLine(D2D1::Point2F(ex - 2.0f, ey - 5.0f), D2D1::Point2F(ex + 3.0f, ey), brush,
-                                     1.5f);
-            render_target_->DrawLine(D2D1::Point2F(ex + 3.0f, ey), D2D1::Point2F(ex - 2.0f, ey + 5.0f), brush,
-                                     1.5f);
+        float arrow_progress = 1.0f;
+        if (arrow_motion_item_id_ && *arrow_motion_item_id_ == item.id) {
+            arrow_progress = PopupMotionProgress(arrow_motion_progress_);
         }
+        const float arrow_angle = expanded ? (-kPi * 0.5f) * (1.0f - arrow_progress)
+                                           : (-kPi * 0.5f) * arrow_progress;
+        const auto arrow_a = RotatePoint(ex - 4.0f, ey - 2.0f, ex, ey, arrow_angle);
+        const auto arrow_b = RotatePoint(ex, ey + 3.0f, ex, ey, arrow_angle);
+        const auto arrow_c = RotatePoint(ex + 4.0f, ey - 2.0f, ex, ey, arrow_angle);
+        render_target_->DrawLine(arrow_a, arrow_b, brush, 1.5f);
+        render_target_->DrawLine(arrow_c, arrow_b, brush, 1.5f);
 
         if (expanded) {
             const UiRect detail_rect{card.title.left, card.meta.bottom + 6.0f, card.card.right - 16.0f,
@@ -4373,7 +5030,8 @@ void PopupWindow::Paint() {
                                         std::min(detail_rect.top + 116.0f, detail_rect.bottom)};
                 brush->SetColor(D2D1::ColorF(0xFFFFFF, 0.54f));
                 render_target_->FillRoundedRectangle(RoundRect(image_rect, 10), brush);
-                const bool fast_interaction = moving_window_ || resizing_window_;
+                const bool fast_interaction = PopupIsFastMediaInteraction(
+                    moving_window_, resizing_window_, motion_target_ == PopupMotionTarget::ViewSwitch);
                 const bool load_preview = PopupShouldLoadImagePreview(fast_interaction);
                 ID2D1Bitmap* bitmap = nullptr;
                 if (image_item) {
@@ -4415,6 +5073,7 @@ void PopupWindow::Paint() {
                                   muted_brush_);
     }
 
+    render_target_->SetTransform(list_transform);
     render_target_->PopAxisAlignedClip();
 
     const float content_height = TotalScrollHeight();
@@ -4430,9 +5089,12 @@ void PopupWindow::Paint() {
             hover_action_ == UiAction::Scrollbar ||
             Contains(PopupScrollbarHitRectForSize(popup_logical_width_, popup_logical_height_), hover_point_);
         const float thumb_opacity = PopupScrollbarThumbOpacity(scrollbar_hovered, dragging_scrollbar_, hover_progress_);
-        brush->SetColor(D2D1::ColorF(palette.border, 0.34f));
+        brush->SetColor(D2D1::ColorF(palette.scrollbar_track, palette.dark ? 0.28f : 0.86f));
         render_target_->FillRoundedRectangle(RoundRect(track, 2), brush);
-        brush->SetColor(D2D1::ColorF(palette.accent, thumb_opacity));
+        const uint32_t thumb_color = dragging_scrollbar_ ? palette.scrollbar_pressed
+                                   : scrollbar_hovered ? palette.accent
+                                                       : palette.scrollbar_thumb;
+        brush->SetColor(D2D1::ColorF(thumb_color, thumb_opacity));
         render_target_->FillRoundedRectangle(RoundRect(thumb, 2), brush);
 
         if (PopupScrollToTopButtonVisible(scroll_offset_)) {
@@ -4440,19 +5102,18 @@ void PopupWindow::Paint() {
             const bool button_hovered =
                 hover_action_ == UiAction::ScrollToTop || Contains(button, hover_point_);
             const float button_hover = button_hovered ? hover_progress_ : 0.0f;
-            drawEdgeShadow(button, 20.0f, button_hovered ? 0.38f + 0.12f * button_hover : 0.24f, 2.0f);
-            brush->SetColor(ColorWithAlpha(palette.dark ? 0x1E293B : 0xFFFFFF,
+            drawEdgeShadow(button, 10.0f, button_hovered ? 0.28f + 0.10f * button_hover : 0.16f, 1.4f);
+            brush->SetColor(ColorWithAlpha(palette.dark ? palette.card_fill : palette.panel_fill,
                                            palette.dark ? 0.82f + 0.08f * button_hover
                                                         : 0.84f + 0.10f * button_hover));
-            render_target_->FillRoundedRectangle(RoundRect(button, 20), brush);
-            brush->SetColor(D2D1::ColorF(button_hovered ? palette.accent : palette.border,
-                                         button_hovered ? 0.70f : 0.76f));
-            render_target_->DrawRoundedRectangle(RoundRect(button, 20), brush, 1.0f + 0.2f * button_hover);
+            render_target_->FillRoundedRectangle(RoundRect(button, 10), brush);
+            brush->SetColor(D2D1::ColorF(button_hovered ? palette.border_hover : palette.border, 0.86f));
+            render_target_->DrawRoundedRectangle(RoundRect(button, 10), brush, 1.0f);
 
-            brush->SetColor(D2D1::ColorF(button_hovered ? palette.accent : palette.muted,
+            brush->SetColor(D2D1::ColorF(button_hovered ? palette.accent : palette.text_tertiary,
                                          button_hovered ? 0.96f : 0.82f));
             const float cx = (button.left + button.right) * 0.5f;
-            const float cy = (button.top + button.bottom) * 0.5f;
+            const float cy = (button.top + button.bottom) * 0.5f - 1.0f * button_hover;
             render_target_->DrawLine(D2D1::Point2F(cx, cy + 8.0f), D2D1::Point2F(cx, cy - 7.0f), brush, 1.8f);
             render_target_->DrawLine(D2D1::Point2F(cx - 6.0f, cy - 1.0f), D2D1::Point2F(cx, cy - 7.0f), brush, 1.8f);
             render_target_->DrawLine(D2D1::Point2F(cx + 6.0f, cy - 1.0f), D2D1::Point2F(cx, cy - 7.0f), brush, 1.8f);
@@ -4461,6 +5122,10 @@ void PopupWindow::Paint() {
 
     if (favorite_group_menu_open_) {
         const auto menu = BuildPopupFavoriteGroupMenuLayout(favorite_groups_.size());
+        D2D1_MATRIX_3X2_F previous_transform{};
+        render_target_->GetTransform(&previous_transform);
+        applyMotionTransformFromTrigger(PopupMotionTarget::FavoriteMenu, 10.0f, 1.0f,
+                                        tabs.favorite_group, menu.panel);
         const auto isMenuHovered = [&](PopupFavoriteGroupMenuTarget target, size_t index = 0) {
             if (hover_favorite_group_menu_hit_.target != target) {
                 return 0.0f;
@@ -4472,10 +5137,18 @@ void PopupWindow::Paint() {
         };
         auto drawMenuRow = [&](const UiRect& rect, const std::wstring& label, bool active, float hover,
                                bool group_row = false, size_t group_index = 0) {
-            if (hover > 0.0f || active) {
-                brush->SetColor(active ? D2D1::ColorF(0xDDFCF8, 0.72f)
-                                       : D2D1::ColorF(0xF4FFFD, 0.58f * hover));
+            const bool delete_hover =
+                group_row &&
+                hover_favorite_group_menu_hit_.target == PopupFavoriteGroupMenuTarget::DeleteGroup &&
+                hover_favorite_group_menu_hit_.group_index == group_index;
+            const float row_hover = delete_hover ? std::max(hover, hover_progress_) : hover;
+            if (row_hover > 0.0f || active) {
+                brush->SetColor(active ? D2D1::ColorF(PopupSubtleAccentFill(palette), 0.82f)
+                                       : D2D1::ColorF(PopupNeutralHoverFill(palette), 0.76f * row_hover));
                 render_target_->FillRoundedRectangle(RoundRect(rect, 10), brush);
+                brush->SetColor(D2D1::ColorF(active ? palette.border_selected : palette.border_hover,
+                                             active ? 0.70f : 0.58f * row_hover));
+                render_target_->DrawRoundedRectangle(RoundRect(rect, 10), brush, active ? 1.0f : 0.8f);
             }
             if (active) {
                 brush->SetColor(D2D1::ColorF(palette.accent, 0.88f));
@@ -4490,18 +5163,16 @@ void PopupWindow::Paint() {
                                       active ? accent_brush_ : text_brush_);
             if (group_row) {
                 const auto delete_rect = PopupFavoriteGroupMenuDeleteRect(rect);
-                const bool delete_hover =
-                    hover_favorite_group_menu_hit_.target == PopupFavoriteGroupMenuTarget::DeleteGroup &&
-                    hover_favorite_group_menu_hit_.group_index == group_index;
                 if (delete_hover) {
-                    brush->SetColor(D2D1::ColorF(0xFFF1F2, 0.88f));
+                    brush->SetColor(D2D1::ColorF(palette.dark ? 0x3A211F : 0xF8DED8, 0.88f));
                     render_target_->FillEllipse(D2D1::Ellipse(
                                                     D2D1::Point2F((delete_rect.left + delete_rect.right) * 0.5f,
                                                                   (delete_rect.top + delete_rect.bottom) * 0.5f),
                                                     10.0f, 10.0f),
                                                 brush);
                 }
-                brush->SetColor(D2D1::ColorF(delete_hover ? 0xE5484D : palette.muted, delete_hover ? 0.92f : 0.68f));
+                brush->SetColor(D2D1::ColorF(delete_hover ? palette.danger : palette.muted,
+                                             delete_hover ? 0.92f : 0.68f));
                 const float cx = (delete_rect.left + delete_rect.right) * 0.5f;
                 const float cy = (delete_rect.top + delete_rect.bottom) * 0.5f;
                 render_target_->DrawLine(D2D1::Point2F(cx - 3.2f, cy - 3.2f),
@@ -4511,15 +5182,15 @@ void PopupWindow::Paint() {
             }
         };
 
-        drawEdgeShadow(menu.panel, 16.0f, 0.62f, 3.0f);
-        brush->SetColor(ColorWithAlpha(palette.dark ? 0x1E293B : 0xFFFFFF, palette.dark ? 0.98f : 0.97f));
-        render_target_->FillRoundedRectangle(RoundRect(menu.panel, 16), brush);
-        brush->SetColor(ColorWithAlpha(palette.border, 0.78f));
-        render_target_->DrawRoundedRectangle(RoundRect(menu.panel, 16), brush, 1.0f);
+        drawEdgeShadow(menu.panel, 12.0f, 0.36f, 2.0f);
+        brush->SetColor(ColorWithAlpha(palette.dark ? palette.card_fill : palette.panel_fill,
+                                       palette.dark ? 0.98f : 0.99f));
+        render_target_->FillRoundedRectangle(RoundRect(menu.panel, 12), brush);
+        drawInkPanelFrame(menu.panel, 12.0f, 0.84f, false);
 
         drawMenuRow(menu.all_favorites, L"全部收藏", !active_favorite_group_id_,
                     isMenuHovered(PopupFavoriteGroupMenuTarget::AllFavorites));
-        brush->SetColor(D2D1::ColorF(palette.border, 0.70f));
+        brush->SetColor(D2D1::ColorF(palette.border, 0.72f));
         render_target_->FillRectangle(Rect(menu.first_divider), brush);
 
         const size_t visible_groups = PopupFavoriteGroupMenuVisibleGroupCount(favorite_groups_.size());
@@ -4530,33 +5201,47 @@ void PopupWindow::Paint() {
                         isMenuHovered(PopupFavoriteGroupMenuTarget::Group, index), true, index);
         }
 
-        brush->SetColor(D2D1::ColorF(palette.border, 0.70f));
+        brush->SetColor(D2D1::ColorF(palette.border, 0.72f));
         render_target_->FillRectangle(Rect(menu.second_divider), brush);
         drawMenuRow(menu.new_group, L"\u65b0\u5efa\u6536\u85cf\u5939...", false,
                     isMenuHovered(PopupFavoriteGroupMenuTarget::NewGroup));
+        render_target_->SetTransform(previous_transform);
     }
 
     if (pending_favorite_group_delete_) {
         const auto confirm = FavoriteGroupDeleteConfirmPanelRect();
         const auto delete_button = FavoriteGroupDeleteConfirmDeleteRect(confirm);
         const auto cancel_button = FavoriteGroupDeleteConfirmCancelRect(confirm);
+        UiRect confirm_trigger = tabs.favorite_group;
+        const auto menu = BuildPopupFavoriteGroupMenuLayout(favorite_groups_.size());
+        const PendingFavoriteGroupDelete confirm_data =
+            pending_favorite_group_delete_ ? *pending_favorite_group_delete_ : closing_delete_confirm_snapshot_;
+        if (confirm_data.group_index <
+            PopupFavoriteGroupMenuVisibleGroupCount(favorite_groups_.size())) {
+            const auto row = PopupFavoriteGroupMenuGroupRect(menu, confirm_data.group_index);
+            confirm_trigger = PopupFavoriteGroupMenuDeleteRect(row);
+        }
+        D2D1_MATRIX_3X2_F previous_transform{};
+        render_target_->GetTransform(&previous_transform);
+        applyMotionTransformFromTrigger(PopupMotionTarget::DeleteConfirm, 12.0f, 1.0f,
+                                        confirm_trigger, confirm);
         brush->SetColor(D2D1::ColorF(0x0B1220, palette.dark ? 0.24f : 0.10f));
         render_target_->FillRoundedRectangle(RoundRect(8.0f, PopupTabsTop() - 4.0f,
                                                        metrics.width - 8.0f,
                                                        std::min<float>(metrics.height - 8.0f, confirm.bottom + 18.0f),
                                                        16.0f),
                                              brush);
-        drawEdgeShadow(confirm, 16.0f, 0.76f, 3.0f);
-        brush->SetColor(ColorWithAlpha(palette.dark ? 0x1E293B : 0xFFFFFF, palette.dark ? 0.99f : 0.98f));
-        render_target_->FillRoundedRectangle(RoundRect(confirm, 16), brush);
-        brush->SetColor(ColorWithAlpha(palette.border, 0.82f));
-        render_target_->DrawRoundedRectangle(RoundRect(confirm, 16), brush, 1.0f);
+        drawEdgeShadow(confirm, 12.0f, 0.42f, 2.0f);
+        brush->SetColor(ColorWithAlpha(palette.dark ? palette.card_fill : palette.panel_fill,
+                                       palette.dark ? 0.99f : 0.99f));
+        render_target_->FillRoundedRectangle(RoundRect(confirm, 12), brush);
+        drawInkPanelFrame(confirm, 12.0f, 0.88f, false);
 
         render_target_->DrawTextW(L"\u5220\u9664\u6536\u85cf\u5939", 5, body_format_,
                                   Rect(confirm.left + 16.0f, confirm.top + 14.0f,
                                        confirm.right - 16.0f, confirm.top + 38.0f),
                                   text_brush_);
-        const std::wstring message = L"\u5220\u9664 \"" + pending_favorite_group_delete_->name + L"\"\uff1f";
+        const std::wstring message = L"\u5220\u9664 \"" + confirm_data.name + L"\"\uff1f";
         render_target_->DrawTextW(message.c_str(), static_cast<UINT32>(message.size()), small_format_,
                                   Rect(confirm.left + 16.0f, confirm.top + 46.0f,
                                        confirm.right - 16.0f, confirm.top + 66.0f),
@@ -4571,15 +5256,17 @@ void PopupWindow::Paint() {
         const bool cancel_hover =
             hover_delete_confirm_target_ == PopupFavoriteGroupDeleteConfirmTarget::Cancel;
         drawEdgeShadow(delete_button, 11.0f, delete_hover ? 0.44f : 0.30f, 2.0f);
-        brush->SetColor(delete_hover ? D2D1::ColorF(0xDC2626, 0.98f) : D2D1::ColorF(0xE5484D, 0.94f));
+        brush->SetColor(delete_hover ? D2D1::ColorF(palette.danger, 0.98f)
+                                     : D2D1::ColorF(palette.danger, 0.90f));
         render_target_->FillRoundedRectangle(RoundRect(delete_button, 11), brush);
         brush->SetColor(D2D1::ColorF(0xFFFFFF, 0.34f));
         render_target_->DrawRoundedRectangle(RoundRect(delete_button, 11), brush, 0.8f);
 
         drawEdgeShadow(cancel_button, 11.0f, cancel_hover ? 0.34f : 0.22f, 2.0f);
-        brush->SetColor(cancel_hover ? D2D1::ColorF(0xF4FFFD, 0.96f) : D2D1::ColorF(0xFFFFFF, 0.92f));
+        brush->SetColor(cancel_hover ? D2D1::ColorF(PopupNeutralHoverFill(palette), 0.96f)
+                                     : D2D1::ColorF(palette.panel_fill, 0.96f));
         render_target_->FillRoundedRectangle(RoundRect(cancel_button, 11), brush);
-        brush->SetColor(cancel_hover ? D2D1::ColorF(palette.accent, 0.46f)
+        brush->SetColor(cancel_hover ? D2D1::ColorF(palette.strong_border, 0.66f)
                                      : D2D1::ColorF(palette.border, 0.82f));
         render_target_->DrawRoundedRectangle(RoundRect(cancel_button, 11), brush, 1.0f);
 
@@ -4588,10 +5275,33 @@ void PopupWindow::Paint() {
         brush->SetColor(D2D1::ColorF(0xFFFFFF, 0.98f));
         render_target_->DrawTextW(L"删除", 2, centered_small_format_, Rect(delete_button), brush);
         render_target_->DrawTextW(L"取消", 2, centered_small_format_, Rect(cancel_button), text_brush_);
+        render_target_->SetTransform(previous_transform);
     }
 
-    if (filter_open_) {
+    if (filter_open_ || closing_filter_panel_) {
         const auto filter = BuildPopupFilterLayout();
+        D2D1_MATRIX_3X2_F previous_transform{};
+        render_target_->GetTransform(&previous_transform);
+        applyMotionTransformFromTrigger(PopupMotionTarget::FilterPanel, 16.0f, 1.0f,
+                                        toolbar.filter, filter.panel);
+        const bool filter_motion_active = motion_target_ == PopupMotionTarget::FilterPanel;
+        const bool filter_exiting = filter_motion_active && motion_direction_ < 0;
+        const float filter_opacity = filter_exiting
+                                         ? PopupPopoverExitOpacity(motion_progress_)
+                                         : (filter_motion_active
+                                                ? PopupMotionEnterOpacity(PopupMotionProgress(motion_progress_))
+                                                : 1.0f);
+        ID2D1Layer* filter_layer = nullptr;
+        const bool filter_layer_active =
+            filter_opacity < 0.999f &&
+            SUCCEEDED(render_target_->CreateLayer(nullptr, &filter_layer)) && filter_layer != nullptr;
+        if (filter_layer_active) {
+            render_target_->PushLayer(
+                D2D1::LayerParameters(Rect(filter.panel), nullptr, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                                      D2D1::Matrix3x2F::Identity(), filter_opacity),
+                filter_layer);
+        }
+        ScopedD2DLayer filter_layer_scope{render_target_, filter_layer, filter_layer_active};
         const auto isFilterHovered = [&](PopupFilterTarget target) {
             return hover_filter_target_ == target ? 1.0f : 0.0f;
         };
@@ -4601,17 +5311,9 @@ void PopupWindow::Paint() {
             if (hover <= 0.0f) {
                 return;
             }
-            for (int i = 4; i >= 0; --i) {
-                const float t = static_cast<float>(i) / 4.0f;
-                brush->SetColor(D2D1::ColorF(danger ? 0xF2555A : (palette.dark ? 0xAEB8C6 : 0x65DAD2),
-                                             (0.036f - t * 0.025f) * hover));
-                render_target_->FillRoundedRectangle(
-                    RoundRect(rect.left - 1.0f - t * 4.0f, rect.top - 1.0f - t * 2.5f,
-                              rect.right + 1.0f + t * 4.0f, rect.bottom + 1.0f + t * 2.5f,
-                              radius + t * 4.0f),
-                    brush);
-            }
-            brush->SetColor(D2D1::ColorF(danger ? 0xFFF1F2 : 0xF4FFFD, 0.18f * hover));
+            brush->SetColor(D2D1::ColorF(danger ? (palette.dark ? 0x3A211F : 0xF8DED8)
+                                                : PopupNeutralHoverFill(palette),
+                                         0.42f * hover));
             render_target_->FillRoundedRectangle(RoundRect(rect, radius), brush);
         };
         const auto fillCircleHover = [&](const UiRect& rect, PopupFilterTarget target, float radius, bool danger = false) {
@@ -4621,31 +5323,27 @@ void PopupWindow::Paint() {
             }
             const D2D1_POINT_2F center =
                 D2D1::Point2F((rect.left + rect.right) * 0.5f, (rect.top + rect.bottom) * 0.5f);
-            for (int i = 4; i >= 0; --i) {
-                const float t = static_cast<float>(i) / 4.0f;
-                brush->SetColor(D2D1::ColorF(danger ? 0xF2555A : (palette.dark ? 0xAEB8C6 : 0x65DAD2),
-                                             (0.036f - t * 0.025f) * hover));
-                render_target_->FillEllipse(D2D1::Ellipse(center, radius + t * 3.0f, radius + t * 3.0f), brush);
-            }
-            brush->SetColor(D2D1::ColorF(danger ? 0xFFF1F2 : 0xF4FFFD, 0.22f * hover));
+            brush->SetColor(D2D1::ColorF(danger ? (palette.dark ? 0x3A211F : 0xF8DED8)
+                                                : PopupNeutralHoverFill(palette),
+                                         0.44f * hover));
             render_target_->FillEllipse(D2D1::Ellipse(center, radius, radius), brush);
         };
         const float fx = filter.panel.left;
         const float fy = filter.panel.top;
-        brush->SetColor(ColorWithAlpha(palette.dark ? 0x1E293B : 0xFFFFFF, palette.dark ? 0.98f : 0.97f));
-        render_target_->FillRoundedRectangle(RoundRect(filter.panel, 18), brush);
-        brush->SetColor(ColorWithAlpha(palette.border, 0.78f));
-        render_target_->DrawRoundedRectangle(RoundRect(filter.panel, 18), brush, 1.0f);
+        brush->SetColor(ColorWithAlpha(palette.dark ? palette.card_fill : palette.panel_fill,
+                                       palette.dark ? 0.98f : 0.99f));
+        render_target_->FillRoundedRectangle(RoundRect(filter.panel, 12), brush);
+        drawInkPanelFrame(filter.panel, 12.0f, 0.86f, false);
         render_target_->DrawTextW(L"\u7b5b\u9009", 2, body_format_, Rect(fx + 16, fy + 12, fx + 128, fy + 34), text_brush_);
         fillCircleHover(filter.close, PopupFilterTarget::Close, 10.0f, true);
         brush->SetColor(hover_filter_target_ == PopupFilterTarget::Close
-                            ? D2D1::ColorF(0xFFF1F2, 0.94f)
-                            : ColorWithAlpha(palette.dark ? 0x334155 : 0xF8FAFC, 0.90f));
+                            ? D2D1::ColorF(palette.dark ? 0x3A211F : 0xF8DED8, 0.94f)
+                            : ColorWithAlpha(palette.dark ? PopupSurfacePressedFill(palette) : palette.card_fill, 0.90f));
         render_target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F((filter.close.left + filter.close.right) * 0.5f,
                                                                 (filter.close.top + filter.close.bottom) * 0.5f),
                                                   10.0f, 10.0f),
                                     brush);
-        brush->SetColor(hover_filter_target_ == PopupFilterTarget::Close ? D2D1::ColorF(0xE5484D, 0.95f)
+        brush->SetColor(hover_filter_target_ == PopupFilterTarget::Close ? D2D1::ColorF(palette.danger, 0.95f)
                                                                          : D2D1::ColorF(palette.muted, 0.82f));
         const float close_cx = (filter.close.left + filter.close.right) * 0.5f;
         const float close_cy = (filter.close.top + filter.close.bottom) * 0.5f;
@@ -4661,21 +5359,14 @@ void PopupWindow::Paint() {
                             PopupFilterTarget target) {
             const float hover = isFilterHovered(target);
             if (hover > 0.0f) {
-                for (int i = 4; i >= 0; --i) {
-                    const float t = static_cast<float>(i) / 4.0f;
-                    brush->SetColor(D2D1::ColorF(palette.dark ? 0xAEB8C6 : 0x65DAD2,
-                                                 (0.036f - t * 0.024f) * hover));
-                    render_target_->FillRoundedRectangle(
-                        RoundRect(rect.left - 1.0f - t * 3.5f, rect.top - 0.8f - t * 2.0f,
-                                  rect.right + 1.0f + t * 3.5f, rect.bottom + 0.8f + t * 2.0f,
-                                  15.0f + t * 4.0f),
-                        brush);
-                }
+                brush->SetColor(D2D1::ColorF(PopupNeutralHoverFill(palette), 0.38f * hover));
+                render_target_->FillRoundedRectangle(RoundRect(rect, 14), brush);
             }
             brush->SetColor(active ? D2D1::ColorF(color.r, color.g, color.b, std::min(1.0f, color.a + 0.05f * hover))
-                                   : ColorWithAlpha(palette.panel_fill, 0.68f + 0.12f * hover));
+                                   : ColorWithAlpha(hover > 0.0f ? PopupNeutralHoverFill(palette) : palette.card_fill,
+                                                    0.78f + 0.12f * hover));
             render_target_->FillRoundedRectangle(RoundRect(rect, 14), brush);
-            brush->SetColor(active ? D2D1::ColorF(0x0EA5A4, 0.42f)
+            brush->SetColor(active ? D2D1::ColorF(palette.strong_border, 0.82f)
                                    : D2D1::ColorF(palette.border, 0.50f));
             render_target_->DrawRoundedRectangle(RoundRect(rect, 14), brush, active ? 0.9f : 0.75f);
             render_target_->DrawTextW(label, static_cast<UINT32>(wcslen(label)), small_format_,
@@ -4684,18 +5375,18 @@ void PopupWindow::Paint() {
         };
         const bool all_types = filter_kinds_.empty();
         drawChip(filter.text_chip, L"文本", all_types || filter_kinds_.contains(ClipboardKind::Text),
-                 D2D1::ColorF(0xE0F7F4, 0.92f), PopupFilterTarget::TextChip);
+                 D2D1::ColorF(PopupSubtleAccentFill(palette), 0.92f), PopupFilterTarget::TextChip);
         drawChip(filter.image_chip, L"图片", all_types || filter_kinds_.contains(ClipboardKind::Image),
-                 D2D1::ColorF(0xECFDF5, 0.92f), PopupFilterTarget::ImageChip);
+                 D2D1::ColorF(PopupSubtleAccentFill(palette), 0.92f), PopupFilterTarget::ImageChip);
         drawChip(filter.file_chip, L"文件", all_types || filter_kinds_.contains(ClipboardKind::Files),
-                 D2D1::ColorF(0xF5F3FF, 0.92f), PopupFilterTarget::FileChip);
+                 D2D1::ColorF(PopupSubtleAccentFill(palette), 0.92f), PopupFilterTarget::FileChip);
         drawChip(filter.link_chip, L"链接", all_types || filter_kinds_.contains(ClipboardKind::Link),
-                 D2D1::ColorF(0xFFF7ED, 0.92f), PopupFilterTarget::LinkChip);
+                 D2D1::ColorF(PopupSubtleAccentFill(palette), 0.92f), PopupFilterTarget::LinkChip);
 
         const bool selecting_start = date_filter_.active_field == PopupDateRangeField::Start;
-        brush->SetColor(ColorWithAlpha(palette.panel_fill, 0.72f));
+        brush->SetColor(ColorWithAlpha(palette.card_fill, 0.84f));
         render_target_->FillRoundedRectangle(RoundRect(filter.date_card, 14), brush);
-        brush->SetColor(ColorWithAlpha(palette.border, 0.62f));
+        brush->SetColor(ColorWithAlpha(palette.border, 0.72f));
         render_target_->DrawRoundedRectangle(RoundRect(filter.date_card, 14), brush, 1.0f);
         render_target_->DrawTextW(L"日期范围", 4, small_format_,
                                   Rect(filter.date_card.left + 12.0f, filter.date_card.top + 10.0f,
@@ -4710,19 +5401,24 @@ void PopupWindow::Paint() {
                                PopupFilterTarget target) {
             const float hover = isFilterHovered(target);
             drawFilterHover(rect, target, 11.0f);
-            brush->SetColor(active ? D2D1::ColorF(0xDDFCF8, 0.74f)
-                                   : ColorWithAlpha(palette.panel_fill, 0.72f + 0.10f * hover));
+            brush->SetColor(active ? D2D1::ColorF(PopupSubtleAccentFill(palette), 0.80f)
+                                   : ColorWithAlpha(hover > 0.0f ? PopupNeutralHoverFill(palette) : palette.panel_fill,
+                                                    0.88f + 0.10f * hover));
             render_target_->FillRoundedRectangle(RoundRect(rect, 11), brush);
-            brush->SetColor(active ? D2D1::ColorF(0x0EA5A4, 0.86f)
-                                   : D2D1::ColorF(palette.border, 0.60f));
+            brush->SetColor(active ? D2D1::ColorF(palette.strong_border, 0.82f)
+                                   : D2D1::ColorF(hover > 0.0f ? palette.border_hover : palette.border,
+                                                  hover > 0.0f ? 0.82f : 0.60f));
             render_target_->DrawRoundedRectangle(RoundRect(rect, 11), brush,
-                                                 active ? 1.25f : 0.85f);
+                                                 active ? 1.35f : (hover > 0.0f ? 1.05f : 0.85f));
             render_target_->DrawTextW(label, static_cast<UINT32>(wcslen(label)), small_format_,
-                                      Rect(rect.left + 10.0f, rect.top + 4.0f, rect.right - 8.0f, rect.top + 17.0f),
+                                      Rect(rect.left + 10.0f, rect.top + 2.0f, rect.right - 8.0f, rect.top + 14.0f),
                                       muted_brush_);
-            render_target_->DrawTextW(value.c_str(), static_cast<UINT32>(value.size()), small_format_,
-                                      Rect(rect.left + 10.0f, rect.top + 17.0f, rect.right - 8.0f, rect.bottom - 3.0f),
-                                      text_brush_);
+            brush->SetColor(D2D1::ColorF(palette.text, 0.94f));
+            render_target_->DrawTextW(value.c_str(), static_cast<UINT32>(value.size()),
+                                      date_value_format_ ? date_value_format_ : small_format_,
+                                      Rect(rect.left + 10.0f, rect.top + 15.0f, rect.right - 8.0f,
+                                           rect.bottom - 1.0f),
+                                      brush);
         };
         drawDateBox(filter.start_date, L"\u5f00\u59cb\u65e5\u671f", FormatDateValue(date_filter_.start),
                     date_filter_.active_field == PopupDateRangeField::Start, PopupFilterTarget::StartDate);
@@ -4730,108 +5426,99 @@ void PopupWindow::Paint() {
                     date_filter_.active_field == PopupDateRangeField::End, PopupFilterTarget::EndDate);
 
         const auto calendar = filter.calendar;
-        brush->SetColor(ColorWithAlpha(palette.panel_fill, 0.70f));
+        brush->SetColor(ColorWithAlpha(palette.card_fill, 0.76f));
         render_target_->FillRoundedRectangle(RoundRect(calendar, 14), brush);
-        brush->SetColor(ColorWithAlpha(palette.border, 0.62f));
+        brush->SetColor(ColorWithAlpha(palette.border, 0.72f));
         render_target_->DrawRoundedRectangle(RoundRect(calendar, 14), brush, 1.0f);
+        fillCircleHover(filter.calendar_prev_year, PopupFilterTarget::CalendarPreviousYear, 10.0f);
         fillCircleHover(filter.calendar_prev, PopupFilterTarget::CalendarPrevious, 10.0f);
         fillCircleHover(filter.calendar_next, PopupFilterTarget::CalendarNext, 10.0f);
-        const auto drawChevron = [&](const UiRect& button, bool next) {
+        fillCircleHover(filter.calendar_next_year, PopupFilterTarget::CalendarNextYear, 10.0f);
+        const auto drawChevron = [&](const UiRect& button, bool next, PopupFilterTarget target, bool double_arrow = false) {
             const auto glyph = PopupFilterArrowGlyphRect(button);
             const float cx = (glyph.left + glyph.right) * 0.5f;
             const float cy = (glyph.top + glyph.bottom) * 0.5f;
-            const float x1 = next ? cx - 2.4f : cx + 2.4f;
-            const float x2 = next ? cx + 2.8f : cx - 2.8f;
-            brush->SetColor(D2D1::ColorF(palette.muted, 0.82f));
-            render_target_->DrawLine(D2D1::Point2F(x1, cy - 4.8f), D2D1::Point2F(x2, cy), brush, 1.55f);
-            render_target_->DrawLine(D2D1::Point2F(x2, cy), D2D1::Point2F(x1, cy + 4.8f), brush, 1.55f);
+            const float hover = isFilterHovered(target);
+            brush->SetColor(D2D1::ColorF(hover > 0.0f ? palette.text : palette.muted,
+                                         hover > 0.0f ? 0.94f : 0.82f));
+            const auto draw_one = [&](float x_offset) {
+                const float x1 = next ? cx - 2.4f + x_offset : cx + 2.4f + x_offset;
+                const float x2 = next ? cx + 2.8f + x_offset : cx - 2.8f + x_offset;
+                render_target_->DrawLine(D2D1::Point2F(x1, cy - 4.8f), D2D1::Point2F(x2, cy), brush, 1.55f);
+                render_target_->DrawLine(D2D1::Point2F(x2, cy), D2D1::Point2F(x1, cy + 4.8f), brush, 1.55f);
+            };
+            if (double_arrow) {
+                draw_one(next ? -2.4f : 2.4f);
+                draw_one(next ? 2.4f : -2.4f);
+            } else {
+                draw_one(0.0f);
+            }
         };
-        brush->SetColor(ColorWithAlpha(palette.dark ? 0x334155 : 0xF8FAFC, 0.74f));
-        render_target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F((filter.calendar_prev.left + filter.calendar_prev.right) * 0.5f,
-                                                                (filter.calendar_prev.top + filter.calendar_prev.bottom) * 0.5f),
-                                                  10.0f, 10.0f),
-                                    brush);
-        render_target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F((filter.calendar_next.left + filter.calendar_next.right) * 0.5f,
-                                                                (filter.calendar_next.top + filter.calendar_next.bottom) * 0.5f),
-                                                  10.0f, 10.0f),
-                                    brush);
-        render_target_->DrawTextW(L"\u2039", 1, small_format_, Rect(filter.calendar_prev), muted_brush_);
+        brush->SetColor(ColorWithAlpha(palette.dark ? PopupSurfacePressedFill(palette) : palette.panel_fill, 0.78f));
+        const auto drawArrowBase = [&](const UiRect& rect) {
+            render_target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F((rect.left + rect.right) * 0.5f,
+                                                                    (rect.top + rect.bottom) * 0.5f),
+                                                      10.0f, 10.0f),
+                                        brush);
+        };
+        drawArrowBase(filter.calendar_prev_year);
+        drawArrowBase(filter.calendar_prev);
+        drawArrowBase(filter.calendar_next);
+        drawArrowBase(filter.calendar_next_year);
         const auto month_title = FormatMonthTitle(calendar_year_, calendar_month_);
         render_target_->DrawTextW(month_title.c_str(), static_cast<UINT32>(month_title.size()), small_format_,
                                   Rect(filter.calendar_title), text_brush_);
-        render_target_->DrawTextW(L"\u203a", 1, small_format_, Rect(filter.calendar_next), muted_brush_);
-        brush->SetColor(ColorWithAlpha(palette.dark ? 0x334155 : 0xF8FAFC, 0.74f));
-        render_target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F((filter.calendar_prev.left + filter.calendar_prev.right) * 0.5f,
-                                                                (filter.calendar_prev.top + filter.calendar_prev.bottom) * 0.5f),
-                                                  10.0f, 10.0f),
-                                    brush);
-        render_target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F((filter.calendar_next.left + filter.calendar_next.right) * 0.5f,
-                                                                (filter.calendar_next.top + filter.calendar_next.bottom) * 0.5f),
-                                                  10.0f, 10.0f),
-                                    brush);
-        drawChevron(filter.calendar_prev, false);
-        drawChevron(filter.calendar_next, true);
+        drawChevron(filter.calendar_prev_year, false, PopupFilterTarget::CalendarPreviousYear, true);
+        drawChevron(filter.calendar_prev, false, PopupFilterTarget::CalendarPrevious);
+        drawChevron(filter.calendar_next, true, PopupFilterTarget::CalendarNext);
+        drawChevron(filter.calendar_next_year, true, PopupFilterTarget::CalendarNextYear, true);
         for (const auto& label : BuildPopupCalendarWeekdayLabels(filter)) {
             render_target_->DrawTextW(&label.text, 1, centered_small_format_, Rect(label.rect), muted_brush_);
+        }
+        for (const auto& segment : BuildPopupCalendarRangeSegments(filter, calendar_year_, calendar_month_,
+                                                                   date_filter_)) {
+            brush->SetColor(D2D1::ColorF(PopupSubtleAccentFill(palette), 0.72f));
+            render_target_->FillRoundedRectangle(RoundRect(segment.rect, 8), brush);
         }
         for (const auto& cell : BuildPopupCalendarCells(filter, calendar_year_, calendar_month_)) {
             wchar_t text[4]{};
             _itow_s(cell.date.day, text, 10);
             const bool selected_start = date_filter_.start && *date_filter_.start == cell.date;
             const bool selected_end = date_filter_.end && *date_filter_.end == cell.date;
-            const bool in_range = date_filter_.start && date_filter_.end && *date_filter_.start < cell.date &&
-                                  cell.date < *date_filter_.end;
-            if (in_range) {
-                brush->SetColor(D2D1::ColorF(0xBFEFEB, 0.46f));
-                const float range_center_y = (cell.rect.top + cell.rect.bottom) * 0.5f;
-                render_target_->FillRoundedRectangle(RoundRect(cell.rect.left + 6.0f, range_center_y - 5.0f,
-                                                               cell.rect.right - 6.0f, range_center_y + 5.0f, 5),
-                                                     brush);
-            }
             const bool date_hovered = hover_filter_date_ && *hover_filter_date_ == cell.date;
-            if (date_hovered && !selected_start && !selected_end) {
-                brush->SetColor(D2D1::ColorF(0xE0F7F4, 0.42f * hover_progress_));
-                render_target_->FillEllipse(D2D1::Ellipse(
-                                                D2D1::Point2F((cell.rect.left + cell.rect.right) * 0.5f,
-                                                              (cell.rect.top + cell.rect.bottom) * 0.5f),
-                                                9.0f, 9.0f),
-                                            brush);
-            }
             if (selected_start || selected_end) {
-                brush->SetColor(D2D1::ColorF(0x0EA5A4, 0.88f));
+                brush->SetColor(D2D1::ColorF(PopupSubtleAccentFill(palette), 0.96f));
                 render_target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F((cell.rect.left + cell.rect.right) * 0.5f,
                                                                         (cell.rect.top + cell.rect.bottom) * 0.5f),
-                                                          8.5f, 8.5f),
+                                                          9.0f, 9.0f),
                                             brush);
-                brush->SetColor(D2D1::ColorF(0xFFFFFF, 0.58f));
-                render_target_->DrawEllipse(D2D1::Ellipse(D2D1::Point2F((cell.rect.left + cell.rect.right) * 0.5f,
-                                                                        (cell.rect.top + cell.rect.bottom) * 0.5f),
-                                                          8.5f, 8.5f),
-                                            brush, 1.0f);
+                brush->SetColor(D2D1::ColorF(palette.text, 0.98f));
                 render_target_->DrawTextW(text, static_cast<UINT32>(wcslen(text)), centered_small_format_,
-                                          Rect(cell.rect.left, cell.rect.top + 1.0f, cell.rect.right,
-                                               cell.rect.bottom + 1.0f),
-                                          text_brush_);
+                                          Rect(cell.rect.left, cell.rect.top, cell.rect.right, cell.rect.bottom),
+                                          brush);
             } else {
+                brush->SetColor(D2D1::ColorF(date_hovered ? palette.text : palette.muted,
+                                             date_hovered ? 0.96f : 0.78f));
                 render_target_->DrawTextW(text, static_cast<UINT32>(wcslen(text)), centered_small_format_,
-                                          Rect(cell.rect.left, cell.rect.top + 1.0f, cell.rect.right,
-                                               cell.rect.bottom + 1.0f),
-                                          muted_brush_);
+                                          Rect(cell.rect.left, cell.rect.top, cell.rect.right, cell.rect.bottom),
+                                          brush);
             }
         }
         const auto reset_visual = PopupFilterResetVisualRect(filter);
         drawFilterHover(reset_visual, PopupFilterTarget::Reset, 9.0f, true);
         if (hover_filter_target_ == PopupFilterTarget::Reset) {
-            brush->SetColor(D2D1::ColorF(0xE5484D, 0.92f));
+            brush->SetColor(D2D1::ColorF(palette.danger, 0.92f));
             render_target_->DrawTextW(L"重置", 2, centered_small_format_, Rect(reset_visual), brush);
         } else {
             render_target_->DrawTextW(L"重置", 2, centered_small_format_, Rect(reset_visual), accent_brush_);
         }
         const float done_hover = isFilterHovered(PopupFilterTarget::Done);
-        brush->SetColor(D2D1::ColorF(done_hover > 0.0f ? 0x0D948D : 0x0EA5A4, 0.88f + 0.08f * done_hover));
+        brush->SetColor(D2D1::ColorF(done_hover > 0.0f ? palette.accent_hover : palette.accent,
+                                     0.88f + 0.08f * done_hover));
         render_target_->FillRoundedRectangle(RoundRect(filter.done, 11), brush);
         brush->SetColor(D2D1::ColorF(0xFFFFFF, 0.96f));
         render_target_->DrawTextW(L"完成", 2, centered_small_format_, Rect(filter.done), brush);
+        render_target_->SetTransform(previous_transform);
     }
     ReleasePtr(brush);
 
@@ -4841,7 +5528,34 @@ void PopupWindow::Paint() {
 }
 
 void PopupWindow::ApplyBackdrop() {
-    SetModernWindowAttributes(hwnd_);
+    SetPopupWindowChromeAttributes(hwnd_, theme_mode_);
+}
+
+void PopupWindow::ApplyWindowRegion() {
+    if (!hwnd_) {
+        return;
+    }
+    if (!PopupWindowShouldUseHardRoundedRegion()) {
+        SetWindowRgn(hwnd_, nullptr, TRUE);
+        return;
+    }
+    RECT client{};
+    if (!GetClientRect(hwnd_, &client)) {
+        return;
+    }
+    const int width = client.right - client.left;
+    const int height = client.bottom - client.top;
+    if (width <= 0 || height <= 0) {
+        return;
+    }
+    const int corner_diameter = PopupWindowRegionCornerDiameterForDpi(CurrentDpi());
+    HRGN region = CreateRoundRectRgn(0, 0, width + 1, height + 1, corner_diameter, corner_diameter);
+    if (!region) {
+        return;
+    }
+    if (!SetWindowRgn(hwnd_, region, TRUE)) {
+        DeleteObject(region);
+    }
 }
 
 bool PopupWindow::HandleFilterClick(POINT point) {
@@ -4857,13 +5571,11 @@ bool PopupWindow::HandleFilterClick(POINT point) {
         return false;
     }
     if (Contains(layout.close, point)) {
-        filter_open_ = false;
-        InvalidateRect(hwnd_, nullptr, FALSE);
+        CloseFilterPanelWithMotion();
         return true;
     }
     if (Contains(layout.done, point)) {
-        filter_open_ = false;
-        InvalidateRect(hwnd_, nullptr, FALSE);
+        CloseFilterPanelWithMotion();
         return true;
     }
 
@@ -4923,12 +5635,20 @@ bool PopupWindow::HandleFilterClick(POINT point) {
     }
 
     switch (HitTestPopupCalendarArrow(layout, static_cast<float>(point.x), static_cast<float>(point.y))) {
+    case PopupCalendarArrow::PreviousYear:
+        ShiftMonth(calendar_year_, calendar_month_, -12);
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        return true;
     case PopupCalendarArrow::PreviousMonth:
         ShiftMonth(calendar_year_, calendar_month_, -1);
         InvalidateRect(hwnd_, nullptr, FALSE);
         return true;
     case PopupCalendarArrow::NextMonth:
         ShiftMonth(calendar_year_, calendar_month_, 1);
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        return true;
+    case PopupCalendarArrow::NextYear:
+        ShiftMonth(calendar_year_, calendar_month_, 12);
         InvalidateRect(hwnd_, nullptr, FALSE);
         return true;
     case PopupCalendarArrow::None:
@@ -4967,8 +5687,7 @@ bool PopupWindow::HandleFavoriteGroupMenuClick(POINT point) {
     const auto hit = HitTestPopupFavoriteGroupMenu(layout, favorite_groups_.size(), static_cast<float>(point.x),
                                                    static_cast<float>(point.y));
     if (hit.target == PopupFavoriteGroupMenuTarget::None) {
-        favorite_group_menu_open_ = false;
-        InvalidateRect(hwnd_, nullptr, FALSE);
+        CloseFavoriteGroupMenuWithMotion();
         return true;
     }
     if (hit.target == PopupFavoriteGroupMenuTarget::Panel) {
@@ -4988,6 +5707,7 @@ bool PopupWindow::HandleFavoriteGroupMenuClick(POINT point) {
         const auto group = favorite_groups_[hit.group_index];
         pending_favorite_group_delete_ = PendingFavoriteGroupDelete{group.id, hit.group_index, group.name};
         hover_delete_confirm_target_ = PopupFavoriteGroupDeleteConfirmTarget::None;
+        StartMotion(PopupMotionTarget::DeleteConfirm);
         InvalidateRect(hwnd_, nullptr, FALSE);
         return true;
     } else if (hit.target == PopupFavoriteGroupMenuTarget::NewGroup) {
@@ -5015,9 +5735,7 @@ bool PopupWindow::HandleFavoriteGroupDeleteConfirmClick(POINT point) {
     }
     if (target == PopupFavoriteGroupDeleteConfirmTarget::Cancel ||
         target == PopupFavoriteGroupDeleteConfirmTarget::None) {
-        pending_favorite_group_delete_.reset();
-        hover_delete_confirm_target_ = PopupFavoriteGroupDeleteConfirmTarget::None;
-        InvalidateRect(hwnd_, nullptr, FALSE);
+        CloseFavoriteGroupDeleteConfirmWithMotion();
         return true;
     }
     if (target == PopupFavoriteGroupDeleteConfirmTarget::Delete) {
@@ -5130,7 +5848,8 @@ PopupWindow::UiAction PopupWindow::HitTestAction(POINT point) const {
     if (Contains(header.close, point)) return UiAction::Close;
     if (Contains(header.pin, point)) return UiAction::Pin;
     const auto toolbar = BuildPopupToolbarLayoutForWidth(multi_select_, popup_logical_width_);
-    if (point.y >= PopupToolbarTop() && point.y <= PopupToolbarTop() + 32.0f) {
+    if (point.y >= PopupToolbarTop() &&
+        point.y <= PopupToolbarTop() + static_cast<float>(PopupMetrics().toolbar_height)) {
         if (multi_select_) {
             if (Contains(toolbar.cancel_multi_select, point)) return UiAction::MultiSelect;
             if (Contains(toolbar.select_all, point)) return UiAction::SelectAll;
@@ -5235,6 +5954,7 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
     case WM_SIZE: {
         const RECT logical_before{0, 0, popup_logical_width_, popup_logical_height_};
         UpdatePopupLogicalSize();
+        ApplyWindowRegion();
         ClampScrollToCurrentPopupHeight();
         const RECT logical_after{0, 0, popup_logical_width_, popup_logical_height_};
         const bool logical_size_changed = PopupShouldApplyWindowRect(logical_before, logical_after);
@@ -5262,12 +5982,18 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
     case WM_CTLCOLOREDIT:
         if (reinterpret_cast<HWND>(lparam) == search_edit_) {
             const auto palette = ResolvePopupThemePalette(theme_mode_, IsSystemDarkTheme());
+            const COLORREF search_fill = RGB((palette.search_fill >> 16) & 0xFF,
+                                             (palette.search_fill >> 8) & 0xFF,
+                                             palette.search_fill & 0xFF);
             SetBkMode(reinterpret_cast<HDC>(wparam), TRANSPARENT);
-            SetBkColor(reinterpret_cast<HDC>(wparam), palette.dark ? RGB(34, 48, 68) : RGB(255, 255, 255));
-            const COLORREF hidden_text = palette.dark ? RGB(34, 48, 68) : RGB(255, 255, 255);
-            SetTextColor(reinterpret_cast<HDC>(wparam), hidden_text);
-            if (!search_edit_brush_) {
-                search_edit_brush_ = CreateSolidBrush(palette.dark ? RGB(34, 48, 68) : RGB(255, 255, 255));
+            SetBkColor(reinterpret_cast<HDC>(wparam), search_fill);
+            SetTextColor(reinterpret_cast<HDC>(wparam), search_fill);
+            if (!search_edit_brush_ || search_edit_brush_color_ != search_fill) {
+                if (search_edit_brush_) {
+                    DeleteObject(search_edit_brush_);
+                }
+                search_edit_brush_ = CreateSolidBrush(search_fill);
+                search_edit_brush_color_ = search_fill;
             }
             return reinterpret_cast<LRESULT>(search_edit_brush_);
         }
@@ -5288,6 +6014,7 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
             SetWindowPos(hwnd_, nullptr, suggested->left, suggested->top, suggested->right - suggested->left,
                          suggested->bottom - suggested->top, SWP_NOZORDER | SWP_NOACTIVATE);
         }
+        ApplyWindowRegion();
         if (PopupDpiChangeShouldDiscardDeviceResources()) {
             DiscardDeviceResources();
         }
@@ -5311,37 +6038,15 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
             GetCursorPos(&cursor);
             ScreenToClient(hwnd_, &cursor);
             const POINT logical_point = ClientPointToDips(cursor);
-            const int resize_edges = ResizeHitTest(logical_point);
-            if ((resize_edges & kPopupResizeLeft && resize_edges & kPopupResizeTop) ||
-                (resize_edges & kPopupResizeRight && resize_edges & kPopupResizeBottom)) {
-                SetCursor(LoadCursorW(nullptr, IDC_SIZENWSE));
-                return TRUE;
-            }
-            if ((resize_edges & kPopupResizeRight && resize_edges & kPopupResizeTop) ||
-                (resize_edges & kPopupResizeLeft && resize_edges & kPopupResizeBottom)) {
-                SetCursor(LoadCursorW(nullptr, IDC_SIZENESW));
-                return TRUE;
-            }
-            if (resize_edges & (kPopupResizeLeft | kPopupResizeRight)) {
-                SetCursor(LoadCursorW(nullptr, IDC_SIZEWE));
-                return TRUE;
-            }
-            if (resize_edges & (kPopupResizeTop | kPopupResizeBottom)) {
-                SetCursor(LoadCursorW(nullptr, IDC_SIZENS));
-                return TRUE;
-            }
-            if (Contains(BuildPopupSearchLayoutForWidth(popup_logical_width_).box, logical_point)) {
-                const auto search_layout = BuildPopupSearchLayoutForWidth(popup_logical_width_);
-                if (PopupSearchClearButtonHitTest(search_layout, !query_.empty(), logical_point)) {
-                    SetCursor(LoadCursorW(nullptr, IDC_HAND));
-                } else {
-                    SetCursor(LoadCursorW(nullptr, IDC_IBEAM));
-                }
-                return TRUE;
-            }
+            ApplyCursorForPoint(logical_point);
+            return TRUE;
         }
         break;
     case WM_TIMER:
+        if (wparam == kAnimationTimer) {
+            AdvanceMotion();
+            return 0;
+        }
         if (wparam == kOutsideClickTimer) {
             const bool left_button_down = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
             if (left_button_down) {
@@ -5389,12 +6094,13 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
                 KillTimer(hwnd_, kSearchCaretTimer);
             }
             return 0;
-        }
-        break;
+    }
+    break;
     case WM_COMMAND:
         if (LOWORD(wparam) == kSearchEditId && HIWORD(wparam) == EN_SETFOCUS && search_edit_) {
             search_focused_ = true;
             search_caret_on_ = true;
+            HideNativeSearchCaret(search_edit_);
             SetTimer(hwnd_, kSearchCaretTimer, GetCaretBlinkTime(), nullptr);
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
@@ -5407,6 +6113,7 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
             return 0;
         }
         if (LOWORD(wparam) == kSearchEditId && HIWORD(wparam) == EN_CHANGE && search_edit_) {
+            HideNativeSearchCaret(search_edit_);
             const int length = GetWindowTextLengthW(search_edit_);
             std::wstring value(static_cast<size_t>(length) + 1, L'\0');
             if (length > 0) {
@@ -5433,6 +6140,7 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
             UpdateWindowMoveOrResize();
             return 0;
         }
+        ApplyCursorForPoint(point);
         if (pressed_item_index_ >= 0) {
             constexpr int kDragCancelDistance = 6;
             const bool moved_past_cancel_distance = std::abs(point.x - press_point_.x) > kDragCancelDistance ||
@@ -5462,14 +6170,6 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
         if (search_selecting_) {
             SetSearchSelection(search_selection_anchor_, SearchTextIndexFromPoint(point));
             return 0;
-        }
-        if (Contains(BuildPopupSearchLayoutForWidth(popup_logical_width_).box, point)) {
-            const auto search_layout = BuildPopupSearchLayoutForWidth(popup_logical_width_);
-            if (PopupSearchClearButtonHitTest(search_layout, !query_.empty(), point)) {
-                SetCursor(LoadCursorW(nullptr, IDC_HAND));
-            } else {
-                SetCursor(LoadCursorW(nullptr, IDC_IBEAM));
-            }
         }
         if (!tracking_mouse_) {
             TRACKMOUSEEVENT track{sizeof(track), TME_LEAVE, hwnd_, 0};
@@ -5615,15 +6315,15 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
     case WM_KEYDOWN:
         if (wparam == VK_ESCAPE) {
             if (pending_favorite_group_delete_) {
-                pending_favorite_group_delete_.reset();
-                hover_delete_confirm_target_ = PopupFavoriteGroupDeleteConfirmTarget::None;
-                InvalidateRect(hwnd_, nullptr, FALSE);
+                CloseFavoriteGroupDeleteConfirmWithMotion();
                 return 0;
             }
-            if (filter_open_ || favorite_group_menu_open_) {
-                filter_open_ = false;
-                favorite_group_menu_open_ = false;
-                InvalidateRect(hwnd_, nullptr, FALSE);
+            if (filter_open_) {
+                CloseFilterPanelWithMotion();
+                return 0;
+            }
+            if (favorite_group_menu_open_) {
+                CloseFavoriteGroupMenuWithMotion();
                 return 0;
             }
             Hide(L"escape");
@@ -5684,9 +6384,7 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
                 return 0;
             }
             if (pending_favorite_group_delete_) {
-                pending_favorite_group_delete_.reset();
-                hover_delete_confirm_target_ = PopupFavoriteGroupDeleteConfirmTarget::None;
-                InvalidateRect(hwnd_, nullptr, FALSE);
+                CloseFavoriteGroupDeleteConfirmWithMotion();
                 return 0;
             }
             if (PopupShouldActivateForSearchFocus(true, search_edit_ != nullptr)) {
@@ -5750,9 +6448,16 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
         case UiAction::Filter:
-            filter_open_ = !filter_open_;
             if (filter_open_) {
-                favorite_group_menu_open_ = false;
+                CloseFilterPanelWithMotion();
+            } else {
+                filter_open_ = true;
+                closing_filter_panel_ = false;
+                if (favorite_group_menu_open_) {
+                    favorite_group_menu_open_ = false;
+                }
+                closing_favorite_group_menu_ = false;
+                StartMotion(PopupMotionTarget::FilterPanel);
             }
             hover_progress_ = 0.0f;
             SetTimer(hwnd_, kHoverTimer, 16, nullptr);
@@ -5790,6 +6495,7 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
                 scroll_offset_ = 0;
                 ReloadItems();
                 ResizeToCurrentItems();
+                StartMotion(PopupMotionTarget::ViewSwitch, -1);
                 InvalidateRect(hwnd_, nullptr, FALSE);
             }
             return 0;
@@ -5803,6 +6509,7 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
                 scroll_offset_ = 0;
                 ReloadItems();
                 ResizeToCurrentItems();
+                StartMotion(PopupMotionTarget::ViewSwitch, 1);
                 InvalidateRect(hwnd_, nullptr, FALSE);
             }
             return 0;
@@ -5853,10 +6560,27 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
 
 LRESULT CALLBACK PopupWindow::SearchEditSubclassProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam, UINT_PTR, DWORD_PTR ref_data) {
     auto* self = reinterpret_cast<PopupWindow*>(ref_data);
+    const auto hideNativeCaret = [&]() {
+        HideNativeSearchCaret(hwnd);
+    };
     switch (message) {
+    case WM_SETFOCUS:
+    case WM_LBUTTONDOWN:
+    case WM_LBUTTONUP:
+    case WM_MOUSEMOVE:
+    case WM_KEYDOWN:
+    case WM_KEYUP:
+    case WM_CHAR:
+    case WM_PAINT:
+    case WM_TIMER: {
+        const LRESULT result = DefSubclassProc(hwnd, message, wparam, lparam);
+        hideNativeCaret();
+        return result;
+    }
     case WM_IME_STARTCOMPOSITION: {
         self->composing_ = true;
         self->composition_text_.clear();
+        hideNativeCaret();
         InvalidateRect(self->hwnd_, nullptr, FALSE);
         break;
     }
@@ -5879,12 +6603,14 @@ LRESULT CALLBACK PopupWindow::SearchEditSubclassProc(HWND hwnd, UINT message, WP
             }
             ImmReleaseContext(hwnd, himc);
         }
+        hideNativeCaret();
         InvalidateRect(self->hwnd_, nullptr, FALSE);
         break;
     }
     case WM_IME_ENDCOMPOSITION: {
         self->composing_ = false;
         self->composition_text_.clear();
+        hideNativeCaret();
         InvalidateRect(self->hwnd_, nullptr, FALSE);
         break;
     }

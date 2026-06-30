@@ -246,7 +246,25 @@ void App::RefreshPopupTheme() {
         popup_->Refresh();
     }
     if (settings_window_) {
-        InvalidateRect(settings_window_->hwnd(), nullptr, FALSE);
+        settings_window_->RefreshTheme();
+    }
+}
+
+void App::RefreshThemeForSystemChange() {
+    if (!ThemeChangeShouldRefreshPalette(settings_.theme_mode)) {
+        if (popup_) {
+            popup_->RefreshTheme();
+        }
+        if (settings_window_) {
+            settings_window_->RefreshTheme();
+        }
+        return;
+    }
+    if (popup_) {
+        popup_->RefreshTheme();
+    }
+    if (settings_window_) {
+        settings_window_->RefreshTheme();
     }
 }
 
@@ -372,6 +390,18 @@ LRESULT App::HandleKeyboardHook(int code, WPARAM wparam, LPARAM lparam) {
         return CallNextHookEx(keyboard_hook_, code, wparam, lparam);
     }
 
+    HWND foreground = GetForegroundWindow();
+    HWND settings_window = settings_window_ ? settings_window_->hwnd() : nullptr;
+    if (HotkeyHookShouldBypassSettingsWindow(foreground, settings_window,
+                                             settings_window && IsWindowVisible(settings_window))) {
+        buffered_alt_down_ = false;
+        replayed_alt_down_ = false;
+        swallow_alt_release_ = false;
+        hook_hotkey_down_ = false;
+        hook_hotkey_vk_ = 0;
+        return CallNextHookEx(keyboard_hook_, code, wparam, lparam);
+    }
+
     if (wparam == WM_KEYUP || wparam == WM_SYSKEYUP) {
         switch (HotkeyAltReleaseActionFor(swallow_alt_release_, buffered_alt_down_, replayed_alt_down_,
                                           event->vkCode)) {
@@ -401,7 +431,6 @@ LRESULT App::HandleKeyboardHook(int code, WPARAM wparam, LPARAM lparam) {
     }
 
     const unsigned vk = static_cast<unsigned>(event->vkCode);
-    HWND foreground = GetForegroundWindow();
     const bool ctrl_down = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
     const bool alt_down = buffered_alt_down_ || (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
     const bool shift_down = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
@@ -463,8 +492,7 @@ LRESULT App::HandleKeyboardHook(int code, WPARAM wparam, LPARAM lparam) {
         break;
     }
 
-    if (!foreground || foreground == hwnd_ || (popup_ && foreground == popup_->hwnd()) ||
-        (settings_window_ && foreground == settings_window_->hwnd())) {
+    if (!foreground || foreground == hwnd_ || (popup_ && foreground == popup_->hwnd())) {
         return CallNextHookEx(keyboard_hook_, code, wparam, lparam);
     }
 
@@ -580,6 +608,10 @@ LRESULT App::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
         break;
     case WM_COMMAND:
         OnCommand(wparam);
+        return 0;
+    case WM_SETTINGCHANGE:
+    case WM_THEMECHANGED:
+        RefreshThemeForSystemChange();
         return 0;
     case WM_CLIPSOUL_TRAY:
         OnTray(lparam);

@@ -14,6 +14,7 @@ public:
     ~SettingsWindow();
     bool Create(HWND owner);
     void Show();
+    void RefreshTheme();
     HWND hwnd() const { return hwnd_; }
     LRESULT HandleMessage(UINT message, WPARAM wparam, LPARAM lparam);
 
@@ -25,6 +26,9 @@ private:
     void TogglePause();
     void ToggleStartup();
     void TogglePopupResizable();
+    void StartToggleMotion(int target, bool from_active, bool to_active);
+    float ToggleKnobPosition(int target, bool active) const;
+    void AdvanceToggleMotion();
     void ResetPopupSize();
     void BrowseStorageDirectory();
     void SetThemeMode(int mode);
@@ -58,6 +62,10 @@ private:
     bool tracking_mouse_ = false;
     int hover_target_ = 0;
     float hover_progress_ = 0.0f;
+    int toggle_motion_target_ = 0;
+    bool toggle_motion_from_active_ = false;
+    bool toggle_motion_to_active_ = false;
+    float toggle_motion_progress_ = 1.0f;
     App& app_;
 };
 

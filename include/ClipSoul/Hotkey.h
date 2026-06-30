@@ -45,6 +45,8 @@ AltReleaseAction HotkeyAltReleaseActionFor(bool swallow_alt_release, bool buffer
                                            bool replayed_alt_down, unsigned vk);
 inline constexpr ULONG_PTR kClipSoulInjectedInputExtraInfo = static_cast<ULONG_PTR>(0x43534F55);
 bool HotkeyHookShouldIgnoreInjectedEvent(bool injected, ULONG_PTR extra_info);
+bool HotkeyHookShouldBypassSettingsForeground(HWND foreground, HWND settings_window);
+bool HotkeyHookShouldBypassSettingsWindow(HWND foreground, HWND settings_window, bool settings_window_visible);
 bool HotkeyShouldRegisterSystemHotkeys(bool keyboard_hook_installed);
 bool HotkeyHookShouldSuppressRegisteredHotkeyEcho(bool handled_by_hook);
 bool HotkeyMatchesState(unsigned configured_modifiers, unsigned configured_vk, bool ctrl_down, bool alt_down,

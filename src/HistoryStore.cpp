@@ -373,45 +373,54 @@ bool HistoryStore::Add(const CapturedContent& content) {
         return false;
     }
 
-    {
-        Statement existing(impl_->db,
-                           "SELECT 1 FROM history_items WHERE kind = ? AND content_hash = ? LIMIT 1;");
-        sqlite3_bind_int(existing.get(), 1, static_cast<int>(content.kind));
-        BindText(existing.get(), 2, content.content_hash);
-        if (sqlite3_step(existing.get()) == SQLITE_ROW) {
-            return true;
+    Exec(impl_->db, "BEGIN IMMEDIATE;");
+    try {
+        {
+            Statement remove_existing(impl_->db,
+                                      "DELETE FROM history_items WHERE kind = ? AND content_hash = ? "
+                                      "AND is_favorite = 0 AND is_phrase = 0;");
+            sqlite3_bind_int(remove_existing.get(), 1, static_cast<int>(content.kind));
+            BindText(remove_existing.get(), 2, content.content_hash);
+            if (sqlite3_step(remove_existing.get()) != SQLITE_DONE) {
+                ThrowSqlite(impl_->db, "sqlite delete duplicate history failed");
+            }
         }
-    }
-    // Secondary deduplication: same text within 3 seconds (handles different hashes from rapid clipboard events)
-    if (!content.text.empty()) {
-        const auto content_time = content.created_at_unix.value_or(NowUnixSeconds());
-        const auto cutoff = content_time - 3;
-        Statement text_dup(impl_->db,
-                           "SELECT 1 FROM history_items WHERE text = ? AND created_at >= ? LIMIT 1;");
-        BindText(text_dup.get(), 1, content.text);
-        sqlite3_bind_int64(text_dup.get(), 2, cutoff);
-        if (sqlite3_step(text_dup.get()) == SQLITE_ROW) {
-            return true;
+        // Secondary deduplication: same text within 3 seconds handles different hashes from rapid clipboard events.
+        if (!content.text.empty()) {
+            const auto content_time = content.created_at_unix.value_or(NowUnixSeconds());
+            const auto cutoff = content_time - 3;
+            Statement remove_text_dup(impl_->db,
+                                      "DELETE FROM history_items WHERE text = ? AND created_at >= ? "
+                                      "AND is_favorite = 0 AND is_phrase = 0;");
+            BindText(remove_text_dup.get(), 1, content.text);
+            sqlite3_bind_int64(remove_text_dup.get(), 2, cutoff);
+            if (sqlite3_step(remove_text_dup.get()) != SQLITE_DONE) {
+                ThrowSqlite(impl_->db, "sqlite delete text duplicate history failed");
+            }
         }
-    }
 
-    Statement stmt(impl_->db,
-                   "INSERT INTO history_items(kind, created_at, text, html, files, payload_path, preview, "
-                   "search_text, content_hash, sort_order) "
-                   "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?);");
-    sqlite3_bind_int(stmt.get(), 1, static_cast<int>(content.kind));
-    sqlite3_bind_int64(stmt.get(), 2, content.created_at_unix.value_or(NowUnixSeconds()));
-    BindText(stmt.get(), 3, content.text);
-    BindText(stmt.get(), 4, content.html);
-    BindText(stmt.get(), 5, JoinFiles(content.files));
-    BindText(stmt.get(), 6, content.payload_path.wstring());
-    BindText(stmt.get(), 7, content.preview);
-    BindText(stmt.get(), 8, content.search_text);
-    BindText(stmt.get(), 9, content.content_hash);
-    sqlite3_bind_int64(stmt.get(), 10, NextSortOrder(impl_->db));
+        Statement stmt(impl_->db,
+                       "INSERT INTO history_items(kind, created_at, text, html, files, payload_path, preview, "
+                       "search_text, content_hash, sort_order) "
+                       "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?);");
+        sqlite3_bind_int(stmt.get(), 1, static_cast<int>(content.kind));
+        sqlite3_bind_int64(stmt.get(), 2, content.created_at_unix.value_or(NowUnixSeconds()));
+        BindText(stmt.get(), 3, content.text);
+        BindText(stmt.get(), 4, content.html);
+        BindText(stmt.get(), 5, JoinFiles(content.files));
+        BindText(stmt.get(), 6, content.payload_path.wstring());
+        BindText(stmt.get(), 7, content.preview);
+        BindText(stmt.get(), 8, content.search_text);
+        BindText(stmt.get(), 9, content.content_hash);
+        sqlite3_bind_int64(stmt.get(), 10, NextSortOrder(impl_->db));
 
-    if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
-        ThrowSqlite(impl_->db, "sqlite insert history failed");
+        if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
+            ThrowSqlite(impl_->db, "sqlite insert history failed");
+        }
+        Exec(impl_->db, "COMMIT;");
+    } catch (...) {
+        TryExec(impl_->db, "ROLLBACK;");
+        throw;
     }
 
     EnforceLimit();

@@ -134,6 +134,17 @@ bool HotkeyHookShouldIgnoreInjectedEvent(bool injected, ULONG_PTR extra_info) {
     return injected && extra_info == kClipSoulInjectedInputExtraInfo;
 }
 
+bool HotkeyHookShouldBypassSettingsForeground(HWND foreground, HWND settings_window) {
+    return settings_window && foreground == settings_window;
+}
+
+bool HotkeyHookShouldBypassSettingsWindow(HWND foreground, HWND settings_window, bool settings_window_visible) {
+    if (!settings_window) {
+        return false;
+    }
+    return settings_window_visible && HotkeyHookShouldBypassSettingsForeground(foreground, settings_window);
+}
+
 bool HotkeyShouldRegisterSystemHotkeys(bool keyboard_hook_installed) {
     return !keyboard_hook_installed;
 }

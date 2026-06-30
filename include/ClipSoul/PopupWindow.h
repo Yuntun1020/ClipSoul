@@ -37,6 +37,7 @@ public:
     void Hide();
     void Hide(std::wstring_view reason);
     void Refresh();
+    void RefreshTheme();
     HWND hwnd() const { return hwnd_; }
     bool IsVisible() const;
     std::optional<int64_t> SelectedItemId() const;
@@ -85,6 +86,14 @@ private:
         AddFavoriteFolderOutline,
         AddFavoriteFolderFilled,
     };
+    enum class PopupMotionTarget {
+        None,
+        ViewSwitch,
+        FilterPanel,
+        FavoriteMenu,
+        DeleteConfirm,
+        MultiSelect,
+    };
     struct PendingFavoriteGroupDelete {
         int64_t id = 0;
         size_t group_index = 0;
@@ -112,15 +121,21 @@ private:
     void CancelItemPress();
     void CompleteItemPress(POINT point);
     void HandleLongPressTimer();
+    void CloseFilterPanelWithMotion();
+    void CloseFavoriteGroupMenuWithMotion();
+    void CloseFavoriteGroupDeleteConfirmWithMotion();
     void Paint();
     void EnsureDeviceResources();
     void DiscardDeviceResources();
     void ApplyBackdrop();
+    void ApplyWindowRegion();
     ID2D1Bitmap* LoadIconBitmap(IconId icon);
+    ID2D1Bitmap* LoadInvertedIconBitmap(IconId icon);
     ID2D1Bitmap* LoadImagePreviewBitmap(const std::filesystem::path& path);
     ID2D1Bitmap* LoadImageFilePreviewBitmap(const std::filesystem::path& path);
     ID2D1Bitmap* LoadFileIconBitmap(const std::wstring& path);
     ID2D1Bitmap* CachedIconBitmap(IconId icon) const;
+    ID2D1Bitmap* CachedInvertedIconBitmap(IconId icon) const;
     ID2D1Bitmap* CachedImagePreviewBitmap(const std::filesystem::path& path) const;
     ID2D1Bitmap* CachedFileIconBitmap(const std::wstring& path) const;
     IconId ToWindowIcon(PopupIconAssetSlot slot) const;
@@ -132,7 +147,7 @@ private:
     void ResizeToCurrentItems();
     void SyncSearchEdit();
     void UpdateSearchEditBounds();
-    void UpdateThemeFromSettings();
+    void UpdateThemeFromSettings(bool force = false);
     float SearchCaretOffsetDips() const;
     float SearchTextOffsetDips(size_t text_index, bool trailing) const;
     size_t SearchTextIndexFromPoint(POINT point) const;
@@ -169,11 +184,15 @@ private:
     float ScrollOffsetToRevealSelection(float requested_offset, int selected_index) const;
     int FirstVisibleItemIndex() const;
     int ResizeHitTest(POINT point) const;
+    HCURSOR CursorForPoint(POINT point) const;
+    void ApplyCursorForPoint(POINT point) const;
     void BeginWindowMove();
     void BeginWindowResize(int edges);
     void UpdateWindowMoveOrResize();
     void EndWindowMoveOrResize();
     void UpdateScrollDrag(POINT point);
+    void StartMotion(PopupMotionTarget target, int direction = 1);
+    void AdvanceMotion();
     void DebugLog(std::wstring_view message) const;
 
     static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam);
@@ -195,6 +214,10 @@ private:
     bool pinned_open_ = false;
     bool filter_open_ = false;
     bool favorite_group_menu_open_ = false;
+    bool closing_filter_panel_ = false;
+    bool closing_favorite_group_menu_ = false;
+    bool closing_delete_confirm_ = false;
+    PendingFavoriteGroupDelete closing_delete_confirm_snapshot_;
     bool custom_position_ = false;
     bool prompt_open_ = false;
     bool tracking_mouse_ = false;
@@ -238,10 +261,15 @@ private:
     std::optional<int64_t> active_favorite_group_id_;
     std::optional<PendingFavoriteGroupDelete> pending_favorite_group_delete_;
     std::optional<int64_t> expanded_item_id_;
+    std::optional<int64_t> arrow_motion_item_id_;
     PopupDateRangeState date_filter_;
     int calendar_year_ = 0;
     int calendar_month_ = 0;
     float hover_progress_ = 0.0f;
+    PopupMotionTarget motion_target_ = PopupMotionTarget::None;
+    float motion_progress_ = 1.0f;
+    float arrow_motion_progress_ = 1.0f;
+    int motion_direction_ = 1;
     int theme_mode_ = 0;
 
     ID2D1Factory* d2d_factory_ = nullptr;
@@ -263,6 +291,16 @@ private:
     ID2D1Bitmap* add_favorite_folder_outline_icon_ = nullptr;
     ID2D1Bitmap* add_favorite_folder_filled_icon_ = nullptr;
     ID2D1Bitmap* pin_active_icon_ = nullptr;
+    ID2D1Bitmap* pin_icon_inverted_ = nullptr;
+    ID2D1Bitmap* close_icon_inverted_ = nullptr;
+    ID2D1Bitmap* filter_icon_inverted_ = nullptr;
+    ID2D1Bitmap* filter_active_icon_inverted_ = nullptr;
+    ID2D1Bitmap* multi_select_icon_inverted_ = nullptr;
+    ID2D1Bitmap* multi_select_active_icon_inverted_ = nullptr;
+    ID2D1Bitmap* trash_icon_inverted_ = nullptr;
+    ID2D1Bitmap* add_favorite_folder_outline_icon_inverted_ = nullptr;
+    ID2D1Bitmap* add_favorite_folder_filled_icon_inverted_ = nullptr;
+    ID2D1Bitmap* pin_active_icon_inverted_ = nullptr;
     std::map<std::wstring, ID2D1Bitmap*> image_preview_cache_;
     std::map<std::wstring, ID2D1Bitmap*> file_icon_cache_;
     IDWriteTextFormat* title_format_ = nullptr;
@@ -270,8 +308,10 @@ private:
     IDWriteTextFormat* small_format_ = nullptr;
     IDWriteTextFormat* detail_format_ = nullptr;
     IDWriteTextFormat* centered_small_format_ = nullptr;
+    IDWriteTextFormat* date_value_format_ = nullptr;
     IDWriteInlineObject* ellipsis_trimming_sign_ = nullptr;
     HBRUSH search_edit_brush_ = nullptr;
+    COLORREF search_edit_brush_color_ = CLR_INVALID;
     std::function<void(std::wstring_view)> debug_logger_;
 };
 

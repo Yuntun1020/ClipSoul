@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(ClipSoul VERSION 1.4.0 LANGUAGES CXX)
+project(ClipSoul VERSION 1.5.0 LANGUAGES CXX)
 
 if(MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
@@ -11,6 +11,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(clipsoul_core
+    src/ClipboardFormats.cpp
     src/ContinuousPaste.cpp
     src/HistoryStore.cpp
     src/Hotkey.cpp
@@ -79,6 +80,7 @@ enable_testing()
 
 add_executable(clipsoul_tests
     tests/AppSettingsTests.cpp
+    tests/ClipboardFormatTests.cpp
     tests/ContinuousPasteTests.cpp
     tests/HistoryStoreTests.cpp
     tests/HotkeyTests.cpp

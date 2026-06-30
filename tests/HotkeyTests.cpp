@@ -120,6 +120,19 @@ TEST_CASE(HotkeyClassifiesBareAltChords) {
     REQUIRE(!ClipSoul::HotkeyHookShouldIgnoreInjectedEvent(true, 0));
     REQUIRE(!ClipSoul::HotkeyHookShouldIgnoreInjectedEvent(false, ClipSoul::kClipSoulInjectedInputExtraInfo));
 
+    const auto settings_window = reinterpret_cast<HWND>(0x2468);
+    REQUIRE(ClipSoul::HotkeyHookShouldBypassSettingsForeground(settings_window, settings_window));
+    REQUIRE(!ClipSoul::HotkeyHookShouldBypassSettingsForeground(reinterpret_cast<HWND>(0x1357),
+                                                               settings_window));
+    REQUIRE(!ClipSoul::HotkeyHookShouldBypassSettingsForeground(settings_window, nullptr));
+    REQUIRE(ClipSoul::HotkeyHookShouldBypassSettingsWindow(settings_window, settings_window, true));
+    REQUIRE(!ClipSoul::HotkeyHookShouldBypassSettingsWindow(reinterpret_cast<HWND>(0x1357),
+                                                            settings_window, true));
+    REQUIRE(!ClipSoul::HotkeyHookShouldBypassSettingsWindow(settings_window, settings_window, false));
+    REQUIRE(!ClipSoul::HotkeyHookShouldBypassSettingsWindow(reinterpret_cast<HWND>(0x1357),
+                                                            settings_window, false));
+    REQUIRE(!ClipSoul::HotkeyHookShouldBypassSettingsWindow(settings_window, nullptr, true));
+
     REQUIRE(!ClipSoul::HotkeyShouldRegisterSystemHotkeys(true));
     REQUIRE(ClipSoul::HotkeyShouldRegisterSystemHotkeys(false));
     REQUIRE(ClipSoul::HotkeyHookShouldSuppressRegisteredHotkeyEcho(true));
