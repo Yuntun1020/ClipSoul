@@ -515,6 +515,12 @@ TEST_CASE(PopupSearchDisplayTextShowsQueryOrPlaceholder) {
     REQUIRE(!ClipSoul::PopupSearchCaretVisibleDuringComposition(true));
     REQUIRE(!ClipSoul::PopupResizeShouldDiscardDeviceResources());
     REQUIRE(ClipSoul::PopupDpiChangeShouldDiscardDeviceResources());
+    const RECT suggested_dpi_rect{120, 80, 980, 1180};
+    const auto dpi_rect = ClipSoul::PopupDpiChangedWindowRect(suggested_dpi_rect, SIZE{510, 840});
+    REQUIRE_EQ(dpi_rect.left, 120);
+    REQUIRE_EQ(dpi_rect.top, 80);
+    REQUIRE_EQ(dpi_rect.right, 630);
+    REQUIRE_EQ(dpi_rect.bottom, 920);
     REQUIRE(!ClipSoul::PopupPaintShouldUpdateLayout());
     REQUIRE(!ClipSoul::PopupShouldAnimateHoverWhileResizing(true));
     REQUIRE(ClipSoul::PopupShouldAnimateHoverWhileResizing(false));

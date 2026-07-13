@@ -775,6 +775,12 @@ bool PopupDpiChangeShouldDiscardDeviceResources() {
     return true;
 }
 
+RECT PopupDpiChangedWindowRect(RECT suggested, SIZE desired_size) {
+    suggested.right = suggested.left + desired_size.cx;
+    suggested.bottom = suggested.top + desired_size.cy;
+    return suggested;
+}
+
 bool PopupPaintShouldUpdateLayout() {
     return false;
 }

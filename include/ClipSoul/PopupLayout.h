@@ -417,6 +417,7 @@ bool PopupSearchCompositionTextColor(bool has_composition, std::wstring_view que
 bool PopupSearchCaretVisibleDuringComposition(bool has_composition);
 bool PopupResizeShouldDiscardDeviceResources();
 bool PopupDpiChangeShouldDiscardDeviceResources();
+RECT PopupDpiChangedWindowRect(RECT suggested, SIZE desired_size);
 bool PopupPaintShouldUpdateLayout();
 bool PopupShouldAnimateHoverWhileResizing(bool resizing_window);
 bool PopupShouldActivateWhenShown(bool keyboard_invocation);

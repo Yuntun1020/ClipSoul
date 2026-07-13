@@ -6011,8 +6011,11 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
     case WM_DPICHANGED: {
         auto* suggested = reinterpret_cast<RECT*>(lparam);
         if (suggested) {
-            SetWindowPos(hwnd_, nullptr, suggested->left, suggested->top, suggested->right - suggested->left,
-                         suggested->bottom - suggested->top, SWP_NOZORDER | SWP_NOACTIVATE);
+            const UINT dpi = LOWORD(wparam);
+            const SIZE size = PhysicalPopupSize(dpi ? dpi : CurrentDpi(), static_cast<int>(items_.size()));
+            const RECT next = PopupDpiChangedWindowRect(*suggested, size);
+            SetWindowPos(hwnd_, nullptr, next.left, next.top, next.right - next.left,
+                         next.bottom - next.top, SWP_NOZORDER | SWP_NOACTIVATE);
         }
         ApplyWindowRegion();
         if (PopupDpiChangeShouldDiscardDeviceResources()) {

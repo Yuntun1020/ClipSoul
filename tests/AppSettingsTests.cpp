@@ -20,7 +20,7 @@ TEST_CASE(AppSettingsDefaultsUseAltC) {
 }
 
 TEST_CASE(AppVersionLabelIsCurrentRelease) {
-    REQUIRE_EQ(std::wstring(ClipSoul::kClipSoulVersion), std::wstring(L"v1.5.0"));
+    REQUIRE_EQ(std::wstring(ClipSoul::kClipSoulVersion), std::wstring(L"v1.5.1"));
 }
 
 TEST_CASE(AppProjectUrlPointsToOpenSourceRepository) {
