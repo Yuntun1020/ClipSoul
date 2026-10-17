@@ -13,7 +13,9 @@ class ClipboardCapture {
 public:
     explicit ClipboardCapture(std::filesystem::path cache_dir);
 
-    std::optional<CapturedContent> Capture(HWND owner);
+    // Returns std::nullopt when nothing could be captured. When the clipboard could not be opened
+    // because another process holds it, *clipboard_busy is set so the caller can retry later.
+    std::optional<CapturedContent> Capture(HWND owner, bool* clipboard_busy = nullptr);
 
 private:
     std::optional<CapturedContent> CaptureText(UINT format, UINT code_page) const;

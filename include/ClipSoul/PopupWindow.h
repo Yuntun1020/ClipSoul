@@ -127,6 +127,7 @@ private:
     void Paint();
     void EnsureDeviceResources();
     void DiscardDeviceResources();
+    void PruneImagePreviewCache();
     void ApplyBackdrop();
     void ApplyWindowRegion();
     ID2D1Bitmap* LoadIconBitmap(IconId icon);
@@ -194,6 +195,7 @@ private:
     void StartMotion(PopupMotionTarget target, int direction = 1);
     void AdvanceMotion();
     void DebugLog(std::wstring_view message) const;
+    bool DebugEnabled() const { return static_cast<bool>(debug_logger_); }
 
     static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam);
     static LRESULT CALLBACK SearchEditSubclassProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam, UINT_PTR id_ptr, DWORD_PTR ref_data);

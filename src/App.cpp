@@ -12,6 +12,12 @@
 namespace ClipSoul {
 namespace {
 constexpr wchar_t kAppWindowClass[] = L"ClipSoul.HiddenAppWindow";
+constexpr UINT_PTR kClipboardCaptureTimer = 1;
+// Wait a moment after WM_CLIPBOARDUPDATE before reading: many apps (Office, browsers, IDEs) fire
+// several updates per copy and keep the clipboard open while still rendering formats.
+constexpr UINT kClipboardCaptureDelayMs = 30;
+constexpr UINT kClipboardRetryDelayMs = 50;
+constexpr int kClipboardMaxRetries = 10;
 
 std::wstring WidenAscii(std::string_view value) {
     return std::wstring(value.begin(), value.end());
@@ -64,6 +70,7 @@ int App::Run(int) {
 
 bool App::Initialize() {
     initialization_error_.clear();
+    debug_log_enabled_ = DebugHotkeyLoggingEnabled();
     auto fail = [this](std::wstring step) {
         const DWORD error = GetLastError();
         initialization_error_ = std::move(step);
@@ -87,11 +94,15 @@ bool App::Initialize() {
             return fail(L"注册后台窗口类失败");
         }
 
-        hwnd_ = CreateWindowExW(0, kAppWindowClass, L"ClipSoul", 0, 0, 0, 0, 0, HWND_MESSAGE,
+        // A hidden top-level window (not HWND_MESSAGE): message-only windows never receive broadcast
+        // messages such as TaskbarCreated (tray icon recovery after Explorer restarts),
+        // WM_SETTINGCHANGE or WM_THEMECHANGED.
+        hwnd_ = CreateWindowExW(WS_EX_TOOLWINDOW, kAppWindowClass, L"ClipSoul", WS_POPUP, 0, 0, 0, 0, nullptr,
                                 nullptr, instance_, this);
         if (!hwnd_) {
             return fail(L"创建后台消息窗口失败");
         }
+        taskbar_created_message_ = RegisterWindowMessageW(L"TaskbarCreated");
 
         storage_dir_ = LoadStorageDir();
         store_.Open(storage_dir_ / L"clipsoul.db");
@@ -102,7 +113,9 @@ bool App::Initialize() {
 
         capture_ = std::make_unique<ClipboardCapture>(storage_dir_ / L"cache");
         popup_ = std::make_unique<PopupWindow>(instance_, store_, paste_controller_);
-        popup_->SetDebugLogger([this](std::wstring_view message) { DebugLog(message); });
+        if (debug_log_enabled_) {
+            popup_->SetDebugLogger([this](std::wstring_view message) { DebugLog(message); });
+        }
         if (!popup_->Create(nullptr)) {
             return fail(L"创建历史弹窗失败");
         }
@@ -159,7 +172,7 @@ bool App::InstallKeyboardHook() {
 }
 
 void App::DebugLog(std::wstring_view message) const {
-    if (!DebugHotkeyLoggingEnabled()) {
+    if (!debug_log_enabled_) {
         return;
     }
     std::wofstream file(StorageDirectory() / L"clipsoul-debug.log", std::ios::app);
@@ -276,18 +289,58 @@ void App::ResetPopupSize() {
 }
 
 void App::OnClipboardUpdate() {
+    // Debounce: restart the timer on every update so bursts of notifications for one copy
+    // result in a single capture once the source application is done writing.
+    clipboard_retry_count_ = 0;
+    SetTimer(hwnd_, kClipboardCaptureTimer, kClipboardCaptureDelayMs, nullptr);
+}
+
+void App::CaptureClipboard() {
+    KillTimer(hwnd_, kClipboardCaptureTimer);
+    const DWORD sequence = GetClipboardSequenceNumber();
+    if (sequence != 0 && sequence == last_captured_sequence_) {
+        return;
+    }
     if (monitor_.IsSelfWrite()) {
-        monitor_.ClearSelfWrite();
+        last_captured_sequence_ = sequence;
         return;
     }
     if (settings_.paused || !capture_) {
+        last_captured_sequence_ = sequence;
         return;
     }
-    if (auto content = capture_->Capture(hwnd_)) {
-        if (store_.Add(*content) && popup_) {
-            popup_->Refresh();
+
+    bool clipboard_busy = false;
+    try {
+        if (auto content = capture_->Capture(hwnd_, &clipboard_busy)) {
+            last_captured_sequence_ = sequence;
+            // Pasting from history must not reorder it, even if another program re-wrote the
+            // clipboard right after our paste (which gives it a new sequence number).
+            if (monitor_.IsRecentSelfWriteContent(content->content_hash)) {
+                return;
+            }
+            if (store_.Add(*content) && popup_) {
+                popup_->Refresh();
+            }
+            return;
         }
+    } catch (const std::exception& ex) {
+        // Never let a single failed capture (locked database, disk full, bad data...) take the
+        // whole app down; log it and keep listening.
+        DebugLog(L"clipboard capture failed: " + WidenAscii(ex.what()));
+        last_captured_sequence_ = sequence;
+        return;
     }
+
+    if (clipboard_busy && clipboard_retry_count_ < kClipboardMaxRetries) {
+        ++clipboard_retry_count_;
+        SetTimer(hwnd_, kClipboardCaptureTimer, kClipboardRetryDelayMs, nullptr);
+        return;
+    }
+    if (clipboard_busy) {
+        DebugLog(L"clipboard capture gave up: clipboard stayed locked by another process");
+    }
+    last_captured_sequence_ = sequence;
 }
 
 void App::OnHotkey(HWND target) {
@@ -508,11 +561,13 @@ LRESULT App::HandleKeyboardHook(int code, WPARAM wparam, LPARAM lparam) {
         return CallNextHookEx(keyboard_hook_, code, wparam, lparam);
     }
     last_input_target_ = foreground;
-    std::wstring log = popup_hotkey ? L"hook popup hotkey target=" : L"hook continuous hotkey target=";
-    log += HexWindow(foreground);
-    log += L" vk=";
-    log += std::to_wstring(vk);
-    DebugLog(log);
+    if (debug_log_enabled_) {
+        std::wstring log = popup_hotkey ? L"hook popup hotkey target=" : L"hook continuous hotkey target=";
+        log += HexWindow(foreground);
+        log += L" vk=";
+        log += std::to_wstring(vk);
+        DebugLog(log);
+    }
     if (HotkeyHookShouldSuppressRegisteredHotkeyEcho(true) && popup_hotkey) {
         ++suppress_popup_hotkey_count_;
     } else if (HotkeyHookShouldSuppressRegisteredHotkeyEcho(true)) {
@@ -567,6 +622,12 @@ void App::OnCommand(WPARAM wparam) {
 }
 
 LRESULT App::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
+    if (taskbar_created_message_ != 0 && message == taskbar_created_message_) {
+        // Explorer restarted: the notification area lost our icon, add it again.
+        tray_.Remove();
+        tray_.Add(hwnd_, WM_CLIPSOUL_TRAY);
+        return 0;
+    }
     HWND foreground = GetForegroundWindow();
     if (foreground && foreground != hwnd_ && (!popup_ || foreground != popup_->hwnd())) {
         last_input_target_ = foreground;
@@ -575,6 +636,12 @@ LRESULT App::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
     case WM_CLIPBOARDUPDATE:
         OnClipboardUpdate();
         return 0;
+    case WM_TIMER:
+        if (wparam == kClipboardCaptureTimer) {
+            CaptureClipboard();
+            return 0;
+        }
+        break;
     case WM_HOTKEY:
         if (ConsumeSuppressedRegisteredHotkey(wparam)) {
             return 0;
@@ -610,6 +677,11 @@ LRESULT App::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
         OnCommand(wparam);
         return 0;
     case WM_SETTINGCHANGE:
+        // Only light/dark theme switches matter here; ignore the many unrelated setting broadcasts.
+        if (lparam && lstrcmpiW(reinterpret_cast<const wchar_t*>(lparam), L"ImmersiveColorSet") == 0) {
+            RefreshThemeForSystemChange();
+        }
+        return 0;
     case WM_THEMECHANGED:
         RefreshThemeForSystemChange();
         return 0;

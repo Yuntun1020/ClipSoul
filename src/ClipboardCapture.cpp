@@ -34,11 +34,14 @@ std::wstring ReadGlobalWideText(UINT format) {
     if (!handle) {
         return {};
     }
+    const SIZE_T bytes = GlobalSize(handle);
     const wchar_t* text = static_cast<const wchar_t*>(GlobalLock(handle));
     if (!text) {
         return {};
     }
-    std::wstring result(text);
+    // Do not trust the source app to null-terminate: bound the read by the allocation size.
+    const wchar_t* end = text + bytes / sizeof(wchar_t);
+    std::wstring result(text, std::find(text, end, L'\0'));
     GlobalUnlock(handle);
     return result;
 }
@@ -210,14 +213,19 @@ std::wstring JoinPreviewFiles(const std::vector<std::wstring>& files) {
     return preview;
 }
 
+std::wstring TruncatePreview(std::wstring preview) {
+    constexpr size_t kPreviewChars = 180;
+    if (preview.size() > kPreviewChars) {
+        preview.resize(kPreviewChars);
+        preview += L"...";
+    }
+    return preview;
+}
+
 void FinalizeTextContent(CapturedContent& content) {
     content.kind = LooksLikeUrl(content.text) ? ClipboardKind::Link : ClipboardKind::Text;
     content.search_text = NormalizeWhitespace(content.text);
-    content.preview = content.search_text;
-    if (content.preview.size() > 180) {
-        content.preview.resize(180);
-        content.preview += L"...";
-    }
+    content.preview = TruncatePreview(content.search_text);
     content.content_hash = StableHash(content.text);
 }
 
@@ -237,7 +245,11 @@ std::filesystem::path SaveDibBytes(const std::filesystem::path& cache_dir, const
 std::filesystem::path SaveDibPayload(const std::filesystem::path& cache_dir, HGLOBAL handle) {
     const SIZE_T size = GlobalSize(handle);
     const void* data = GlobalLock(handle);
-    if (!data || size == 0) {
+    if (!data) {
+        return {};
+    }
+    if (size < sizeof(BITMAPINFOHEADER)) {
+        GlobalUnlock(handle);
         return {};
     }
 
@@ -291,7 +303,11 @@ std::filesystem::path SavePngPayload(const std::filesystem::path& cache_dir, HGL
     }
     const SIZE_T size = GlobalSize(handle);
     const void* data = GlobalLock(handle);
-    if (!data || size == 0) {
+    if (!data) {
+        return {};
+    }
+    if (size == 0) {
+        GlobalUnlock(handle);
         return {};
     }
 
@@ -348,15 +364,22 @@ ClipboardCapture::ClipboardCapture(std::filesystem::path cache_dir)
     std::filesystem::create_directories(cache_dir_);
 }
 
-std::optional<CapturedContent> ClipboardCapture::Capture(HWND owner) {
-    OpenClipboardScope clipboard(owner);
-    if (!clipboard.opened()) {
-        return std::nullopt;
+std::optional<CapturedContent> ClipboardCapture::Capture(HWND owner, bool* clipboard_busy) {
+    if (clipboard_busy) {
+        *clipboard_busy = false;
     }
 
-    const UINT html_format = RegisterClipboardFormatW(L"HTML Format");
-    const UINT rtf_format = RegisterClipboardFormatW(L"Rich Text Format");
-    const UINT png_format = RegisterClipboardFormatW(L"PNG");
+    static const UINT html_format = RegisterClipboardFormatW(L"HTML Format");
+    static const UINT rtf_format = RegisterClipboardFormatW(L"Rich Text Format");
+    static const UINT png_format = RegisterClipboardFormatW(L"PNG");
+    // Convention used by password managers etc. to ask clipboard tools not to record the content.
+    static const UINT exclude_format = RegisterClipboardFormatW(L"ExcludeClipboardContentFromMonitorProcessing");
+
+    // IsClipboardFormatAvailable does not require the clipboard to be open, so check the cheap
+    // things first and only open the clipboard when there is something worth reading.
+    if (exclude_format != 0 && IsClipboardFormatAvailable(exclude_format)) {
+        return std::nullopt;
+    }
 
     ClipboardFormatAvailability formats;
     formats.has_files = IsClipboardFormatAvailable(CF_HDROP) != FALSE;
@@ -370,27 +393,60 @@ std::optional<CapturedContent> ClipboardCapture::Capture(HWND owner) {
     formats.has_bitmap = IsClipboardFormatAvailable(CF_BITMAP) != FALSE;
     formats.has_png = png_format != 0 && IsClipboardFormatAvailable(png_format) != FALSE;
 
-    switch (ChooseClipboardCapturePlan(formats)) {
-    case ClipboardCapturePlan::Files:
-        return CaptureFiles();
-    case ClipboardCapturePlan::Html:
-        return CaptureHtml(html_format);
-    case ClipboardCapturePlan::UnicodeText:
-        return CaptureText();
-    case ClipboardCapturePlan::AnsiText:
-        return CaptureText(CF_TEXT, CP_ACP);
-    case ClipboardCapturePlan::OemText:
-        return CaptureText(CF_OEMTEXT, CP_OEMCP);
-    case ClipboardCapturePlan::Rtf:
-        return CaptureRtf(rtf_format);
-    case ClipboardCapturePlan::Dib:
-        return CaptureImage();
-    case ClipboardCapturePlan::Bitmap:
-        return CaptureBitmap();
-    case ClipboardCapturePlan::Png:
-        return CapturePng(png_format);
-    case ClipboardCapturePlan::None:
+    if (ChooseClipboardCapturePlan(formats) == ClipboardCapturePlan::None) {
         return std::nullopt;
+    }
+
+    OpenClipboardScope clipboard(owner);
+    if (!clipboard.opened()) {
+        // Another process still holds the clipboard (very common right after a copy, e.g. the
+        // source app or another clipboard tool). Let the caller retry instead of dropping the copy.
+        if (clipboard_busy) {
+            *clipboard_busy = true;
+        }
+        return std::nullopt;
+    }
+
+    // Try the preferred format first; if reading it fails (delayed rendering failed, empty data,
+    // HTML without visible text...), fall back to the next available format instead of losing the copy.
+    for (auto plan = ChooseClipboardCapturePlan(formats); plan != ClipboardCapturePlan::None;
+         plan = ChooseClipboardCapturePlan(formats)) {
+        std::optional<CapturedContent> content;
+        switch (plan) {
+        case ClipboardCapturePlan::Files:
+            content = CaptureFiles();
+            break;
+        case ClipboardCapturePlan::Html:
+            content = CaptureHtml(html_format);
+            break;
+        case ClipboardCapturePlan::UnicodeText:
+            content = CaptureText();
+            break;
+        case ClipboardCapturePlan::AnsiText:
+            content = CaptureText(CF_TEXT, CP_ACP);
+            break;
+        case ClipboardCapturePlan::OemText:
+            content = CaptureText(CF_OEMTEXT, CP_OEMCP);
+            break;
+        case ClipboardCapturePlan::Rtf:
+            content = CaptureRtf(rtf_format);
+            break;
+        case ClipboardCapturePlan::Dib:
+            content = CaptureImage();
+            break;
+        case ClipboardCapturePlan::Bitmap:
+            content = CaptureBitmap();
+            break;
+        case ClipboardCapturePlan::Png:
+            content = CapturePng(png_format);
+            break;
+        case ClipboardCapturePlan::None:
+            break;
+        }
+        if (content) {
+            return content;
+        }
+        MarkClipboardCapturePlanUnavailable(formats, plan);
     }
     return std::nullopt;
 }
@@ -479,20 +535,28 @@ std::optional<CapturedContent> ClipboardCapture::CaptureHtml(UINT html_format) c
     CapturedContent content;
     content.kind = ClipboardKind::Html;
     content.html = ReadGlobalBytesAsString(html_format);
+    if (content.html.empty()) {
+        return std::nullopt; // fall back to plain text
+    }
     content.text = ReadGlobalWideText(CF_UNICODETEXT);
-    const auto html_text = HtmlClipboardToPlainText(content.html);
-    content.search_text = NormalizeWhitespace(content.text.empty() ? html_text : content.text);
-    const auto visible_text = NormalizeWhitespace(content.text.empty() ? html_text : content.text);
+    const auto visible_text = NormalizeWhitespace(content.text.empty() ? HtmlClipboardToPlainText(content.html)
+                                                                       : content.text);
+    if (visible_text.empty()) {
+        // e.g. a browser "copy image" puts an <img> fragment plus a bitmap; let the image path handle it.
+        return std::nullopt;
+    }
+    if (content.text.empty()) {
+        content.text = visible_text;
+    }
+    content.search_text = visible_text;
     if (LooksLikeUrl(visible_text)) {
         content.kind = ClipboardKind::Link;
     }
-    content.preview = content.search_text.empty() ? L"HTML content" : content.search_text;
-    if (content.preview.size() > 180) {
-        content.preview.resize(180);
-        content.preview += L"...";
-    }
-    content.content_hash = StableHash(Utf8ToWide(content.html) + content.text);
-    return content.content_hash.empty() ? std::nullopt : std::optional<CapturedContent>(std::move(content));
+    content.preview = TruncatePreview(content.search_text);
+    // Hash only the visible text: the CF_HTML header (offsets / SourceURL) differs between copies of
+    // the same content, which used to produce duplicate history entries.
+    content.content_hash = StableHash(content.text);
+    return content;
 }
 
 std::optional<CapturedContent> ClipboardCapture::CaptureRtf(UINT rtf_format) const {
@@ -513,14 +577,14 @@ std::optional<CapturedContent> ClipboardCapture::CaptureText() const {
     CapturedContent content;
     content.text = ReadGlobalWideText(CF_UNICODETEXT);
     FinalizeTextContent(content);
-    return content.text.empty() ? std::nullopt : std::optional<CapturedContent>(std::move(content));
+    return content.search_text.empty() ? std::nullopt : std::optional<CapturedContent>(std::move(content));
 }
 
 std::optional<CapturedContent> ClipboardCapture::CaptureText(UINT format, UINT code_page) const {
     CapturedContent content;
     content.text = ReadGlobalText(format, code_page);
     FinalizeTextContent(content);
-    return content.text.empty() ? std::nullopt : std::optional<CapturedContent>(std::move(content));
+    return content.search_text.empty() ? std::nullopt : std::optional<CapturedContent>(std::move(content));
 }
 
 } // namespace ClipSoul

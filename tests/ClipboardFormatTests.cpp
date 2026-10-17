@@ -55,3 +55,21 @@ TEST_CASE(ClipboardCapturePlanIgnoresUnknownOnlyFormats) {
 
     REQUIRE_EQ(ClipSoul::ChooseClipboardCapturePlan(formats), ClipSoul::ClipboardCapturePlan::None);
 }
+
+TEST_CASE(ClipboardCapturePlanFallsBackWhenPreferredFormatFails) {
+    ClipSoul::ClipboardFormatAvailability formats;
+    formats.has_html = true;
+    formats.has_unicode_text = true;
+    formats.has_dib = true;
+
+    auto plan = ClipSoul::ChooseClipboardCapturePlan(formats);
+    REQUIRE_EQ(plan, ClipSoul::ClipboardCapturePlan::Html);
+    ClipSoul::MarkClipboardCapturePlanUnavailable(formats, plan);
+    plan = ClipSoul::ChooseClipboardCapturePlan(formats);
+    REQUIRE_EQ(plan, ClipSoul::ClipboardCapturePlan::UnicodeText);
+    ClipSoul::MarkClipboardCapturePlanUnavailable(formats, plan);
+    plan = ClipSoul::ChooseClipboardCapturePlan(formats);
+    REQUIRE_EQ(plan, ClipSoul::ClipboardCapturePlan::Dib);
+    ClipSoul::MarkClipboardCapturePlanUnavailable(formats, plan);
+    REQUIRE_EQ(ClipSoul::ChooseClipboardCapturePlan(formats), ClipSoul::ClipboardCapturePlan::None);
+}

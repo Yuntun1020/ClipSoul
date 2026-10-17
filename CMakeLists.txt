@@ -49,11 +49,16 @@ add_executable(clipsoul WIN32
     src/ClipSoul.manifest
     src/PasteController.cpp
     src/PopupWindow.cpp
+    src/popup/CaretLocator.cpp
+    src/popup/PopupWin32Helpers.cpp
+    src/popup/PromptDialogs.cpp
     src/SettingsWindow.cpp
     src/TrayIcon.cpp
     src/Win32Util.cpp
     src/main.cpp
 )
+
+target_include_directories(clipsoul PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 target_link_libraries(clipsoul PRIVATE
     clipsoul_core

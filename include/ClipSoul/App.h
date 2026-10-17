@@ -52,6 +52,7 @@ private:
     void RefreshHotkeyRegistration();
     void DebugLog(std::wstring_view message) const;
     void OnClipboardUpdate();
+    void CaptureClipboard();
     void OnHotkey(HWND target);
     void OnContinuousPasteHotkey(HWND target);
     std::optional<int64_t> SelectedPopupItemId() const;
@@ -89,6 +90,12 @@ private:
     bool replayed_alt_down_ = false;
     bool swallow_alt_release_ = false;
     bool hotkey_keyboard_invocation_ = false;
+    UINT taskbar_created_message_ = 0;
+    // Cached once at startup: checking the environment / clipsoul.debug file on every log call
+    // costs a filesystem hit even when logging is off.
+    bool debug_log_enabled_ = false;
+    DWORD last_captured_sequence_ = 0;
+    int clipboard_retry_count_ = 0;
     static App* keyboard_hook_app_;
 };
 

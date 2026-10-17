@@ -128,12 +128,94 @@ void BindOptionalInt64(sqlite3_stmt* stmt, int index, std::optional<int64_t> val
     }
 }
 
+// Image items store their pixels in a cache file (payload_path). Rows are deleted in several places
+// (limit rotation, delete, clear, dedup); collect their payload paths first, then remove the files
+// that are no longer referenced by any remaining row. Previously these files were never deleted,
+// so the cache directory grew without bound.
+template <typename Binder>
+std::vector<std::wstring> CollectPayloadPaths(sqlite3* db, const char* sql, Binder bind) {
+    std::vector<std::wstring> paths;
+    Statement stmt(db, sql);
+    bind(stmt.get());
+    while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+        auto path = DbText(stmt.get(), 0);
+        if (!path.empty()) {
+            paths.push_back(std::move(path));
+        }
+    }
+    return paths;
+}
+
+std::vector<std::wstring> CollectPayloadPaths(sqlite3* db, const char* sql) {
+    return CollectPayloadPaths(db, sql, [](sqlite3_stmt*) {});
+}
+
+void RemoveUnreferencedPayloads(sqlite3* db, const std::vector<std::wstring>& paths) {
+    if (paths.empty()) {
+        return;
+    }
+    Statement stmt(db, "SELECT 1 FROM history_items WHERE payload_path = ? LIMIT 1;");
+    for (const auto& path : paths) {
+        sqlite3_reset(stmt.get());
+        sqlite3_clear_bindings(stmt.get());
+        BindText(stmt.get(), 1, path);
+        if (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+            continue; // still referenced (favorite, or the re-inserted duplicate)
+        }
+        std::error_code ec;
+        std::filesystem::remove(std::filesystem::path(path), ec);
+    }
+}
+
 int64_t NextSortOrder(sqlite3* db) {
     Statement stmt(db, "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM history_items;");
     if (sqlite3_step(stmt.get()) == SQLITE_ROW) {
         return sqlite3_column_int64(stmt.get(), 0);
     }
     return 1;
+}
+
+// v1: HTML entries used to hash the raw CF_HTML block (header offsets / SourceURL included), so the
+// same content copied twice never matched. Re-hash them by visible text once, like new captures do.
+void MigrateLegacyHtmlHashes(sqlite3* db) {
+    int version = 0;
+    {
+        Statement stmt(db, "PRAGMA user_version;");
+        if (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+            version = sqlite3_column_int(stmt.get(), 0);
+        }
+    }
+    if (version >= 1) {
+        return;
+    }
+    Exec(db, "BEGIN IMMEDIATE;");
+    try {
+        std::vector<std::pair<int64_t, std::wstring>> rows;
+        {
+            Statement read(db, "SELECT id, text FROM history_items WHERE kind = ? AND is_phrase = 0;");
+            sqlite3_bind_int(read.get(), 1, static_cast<int>(ClipboardKind::Html));
+            while (sqlite3_step(read.get()) == SQLITE_ROW) {
+                rows.emplace_back(sqlite3_column_int64(read.get(), 0), DbText(read.get(), 1));
+            }
+        }
+        Statement update(db, "UPDATE history_items SET content_hash = ? WHERE id = ?;");
+        for (const auto& [id, text] : rows) {
+            if (text.empty()) {
+                continue;
+            }
+            sqlite3_reset(update.get());
+            BindText(update.get(), 1, StableHash(text));
+            sqlite3_bind_int64(update.get(), 2, id);
+            if (sqlite3_step(update.get()) != SQLITE_DONE) {
+                ThrowSqlite(db, "sqlite migrate html hash failed");
+            }
+        }
+        Exec(db, "PRAGMA user_version = 1;");
+        Exec(db, "COMMIT;");
+    } catch (...) {
+        TryExec(db, "ROLLBACK;");
+        throw;
+    }
 }
 
 std::wstring NormalizeSearchNeedle(std::wstring_view input) {
@@ -282,6 +364,10 @@ void HistoryStore::Open(const std::filesystem::path& database_path) {
     Exec(impl_->db, "UPDATE history_items SET sort_order = id WHERE sort_order = 0;");
     Exec(impl_->db,
          "CREATE INDEX IF NOT EXISTS idx_history_sort ON history_items(is_pinned DESC, sort_order DESC, id DESC);");
+    // Used by the per-copy duplicate checks in Add(); without them every copy scans the whole table.
+    Exec(impl_->db, "CREATE INDEX IF NOT EXISTS idx_history_hash ON history_items(content_hash);");
+    Exec(impl_->db, "CREATE INDEX IF NOT EXISTS idx_history_created ON history_items(created_at);");
+    MigrateLegacyHtmlHashes(impl_->db);
     Exec(impl_->db,
          "CREATE TABLE IF NOT EXISTS favorite_groups ("
          "id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -373,49 +459,97 @@ bool HistoryStore::Add(const CapturedContent& content) {
         return false;
     }
 
+    const int64_t created_at = content.created_at_unix.value_or(NowUnixSeconds());
     Exec(impl_->db, "BEGIN IMMEDIATE;");
+    std::vector<std::wstring> replaced_payloads;
     try {
+        // Copying something that is already in the history moves that entry to the top (newest copy wins)
+        // instead of being ignored. The existing row is updated in place so its id, pin state and note
+        // survive; any further duplicates are removed.
+        std::optional<int64_t> existing_id;
+        {
+            Statement find(impl_->db,
+                           "SELECT id FROM history_items WHERE kind = ? AND content_hash = ? "
+                           "AND is_favorite = 0 AND is_phrase = 0 ORDER BY sort_order DESC, id DESC LIMIT 1;");
+            sqlite3_bind_int(find.get(), 1, static_cast<int>(content.kind));
+            BindText(find.get(), 2, content.content_hash);
+            if (sqlite3_step(find.get()) == SQLITE_ROW) {
+                existing_id = sqlite3_column_int64(find.get(), 0);
+            }
+        }
+        const int64_t keep_id = existing_id.value_or(0);
+
+        // Payload files of rows we are about to drop or overwrite (removed later if unreferenced).
+        replaced_payloads = CollectPayloadPaths(
+            impl_->db,
+            "SELECT payload_path FROM history_items WHERE is_favorite = 0 AND is_phrase = 0 AND ("
+            "(kind = ? AND content_hash = ?) OR (? <> '' AND text = ? AND created_at >= ?));",
+            [&](sqlite3_stmt* stmt) {
+                sqlite3_bind_int(stmt, 1, static_cast<int>(content.kind));
+                BindText(stmt, 2, content.content_hash);
+                BindText(stmt, 3, content.text);
+                BindText(stmt, 4, content.text);
+                sqlite3_bind_int64(stmt, 5, created_at - 3);
+            });
+
         {
             Statement remove_existing(impl_->db,
                                       "DELETE FROM history_items WHERE kind = ? AND content_hash = ? "
-                                      "AND is_favorite = 0 AND is_phrase = 0;");
+                                      "AND is_favorite = 0 AND is_phrase = 0 AND id <> ?;");
             sqlite3_bind_int(remove_existing.get(), 1, static_cast<int>(content.kind));
             BindText(remove_existing.get(), 2, content.content_hash);
+            sqlite3_bind_int64(remove_existing.get(), 3, keep_id);
             if (sqlite3_step(remove_existing.get()) != SQLITE_DONE) {
                 ThrowSqlite(impl_->db, "sqlite delete duplicate history failed");
             }
         }
         // Secondary deduplication: same text within 3 seconds handles different hashes from rapid clipboard events.
         if (!content.text.empty()) {
-            const auto content_time = content.created_at_unix.value_or(NowUnixSeconds());
-            const auto cutoff = content_time - 3;
             Statement remove_text_dup(impl_->db,
                                       "DELETE FROM history_items WHERE text = ? AND created_at >= ? "
-                                      "AND is_favorite = 0 AND is_phrase = 0;");
+                                      "AND is_favorite = 0 AND is_phrase = 0 AND id <> ?;");
             BindText(remove_text_dup.get(), 1, content.text);
-            sqlite3_bind_int64(remove_text_dup.get(), 2, cutoff);
+            sqlite3_bind_int64(remove_text_dup.get(), 2, created_at - 3);
+            sqlite3_bind_int64(remove_text_dup.get(), 3, keep_id);
             if (sqlite3_step(remove_text_dup.get()) != SQLITE_DONE) {
                 ThrowSqlite(impl_->db, "sqlite delete text duplicate history failed");
             }
         }
 
-        Statement stmt(impl_->db,
-                       "INSERT INTO history_items(kind, created_at, text, html, files, payload_path, preview, "
-                       "search_text, content_hash, sort_order) "
-                       "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?);");
-        sqlite3_bind_int(stmt.get(), 1, static_cast<int>(content.kind));
-        sqlite3_bind_int64(stmt.get(), 2, content.created_at_unix.value_or(NowUnixSeconds()));
-        BindText(stmt.get(), 3, content.text);
-        BindText(stmt.get(), 4, content.html);
-        BindText(stmt.get(), 5, JoinFiles(content.files));
-        BindText(stmt.get(), 6, content.payload_path.wstring());
-        BindText(stmt.get(), 7, content.preview);
-        BindText(stmt.get(), 8, content.search_text);
-        BindText(stmt.get(), 9, content.content_hash);
-        sqlite3_bind_int64(stmt.get(), 10, NextSortOrder(impl_->db));
-
-        if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
-            ThrowSqlite(impl_->db, "sqlite insert history failed");
+        if (existing_id) {
+            Statement stmt(impl_->db,
+                           "UPDATE history_items SET created_at = ?, text = ?, html = ?, files = ?, payload_path = ?, "
+                           "preview = ?, search_text = ?, sort_order = ? WHERE id = ?;");
+            sqlite3_bind_int64(stmt.get(), 1, created_at);
+            BindText(stmt.get(), 2, content.text);
+            BindText(stmt.get(), 3, content.html);
+            BindText(stmt.get(), 4, JoinFiles(content.files));
+            BindText(stmt.get(), 5, content.payload_path.wstring());
+            BindText(stmt.get(), 6, content.preview);
+            BindText(stmt.get(), 7, content.search_text);
+            sqlite3_bind_int64(stmt.get(), 8, NextSortOrder(impl_->db));
+            sqlite3_bind_int64(stmt.get(), 9, *existing_id);
+            if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
+                ThrowSqlite(impl_->db, "sqlite move history item to top failed");
+            }
+        } else {
+            Statement stmt(impl_->db,
+                           "INSERT INTO history_items(kind, created_at, text, html, files, payload_path, preview, "
+                           "search_text, content_hash, sort_order) "
+                           "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?);");
+            sqlite3_bind_int(stmt.get(), 1, static_cast<int>(content.kind));
+            sqlite3_bind_int64(stmt.get(), 2, created_at);
+            BindText(stmt.get(), 3, content.text);
+            BindText(stmt.get(), 4, content.html);
+            BindText(stmt.get(), 5, JoinFiles(content.files));
+            BindText(stmt.get(), 6, content.payload_path.wstring());
+            BindText(stmt.get(), 7, content.preview);
+            BindText(stmt.get(), 8, content.search_text);
+            BindText(stmt.get(), 9, content.content_hash);
+            sqlite3_bind_int64(stmt.get(), 10, NextSortOrder(impl_->db));
+            if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
+                ThrowSqlite(impl_->db, "sqlite insert history failed");
+            }
         }
         Exec(impl_->db, "COMMIT;");
     } catch (...) {
@@ -424,6 +558,7 @@ bool HistoryStore::Add(const CapturedContent& content) {
     }
 
     EnforceLimit();
+    RemoveUnreferencedPayloads(impl_->db, replaced_payloads);
     return true;
 }
 
@@ -692,7 +827,11 @@ bool HistoryStore::DeleteFavoriteGroup(int64_t group_id) {
     }
 
     Exec(impl_->db, "BEGIN IMMEDIATE;");
+    std::vector<std::wstring> removed_payloads;
     try {
+        removed_payloads = CollectPayloadPaths(impl_->db,
+                                               "SELECT payload_path FROM history_items WHERE favorite_group_id = ?;",
+                                               [&](sqlite3_stmt* stmt) { sqlite3_bind_int64(stmt, 1, group_id); });
         {
             Statement delete_items(impl_->db, "DELETE FROM history_items WHERE favorite_group_id = ?;");
             sqlite3_bind_int64(delete_items.get(), 1, group_id);
@@ -708,6 +847,7 @@ bool HistoryStore::DeleteFavoriteGroup(int64_t group_id) {
         }
         const bool deleted = sqlite3_changes(impl_->db) > 0;
         Exec(impl_->db, "COMMIT;");
+        RemoveUnreferencedPayloads(impl_->db, removed_payloads);
         return deleted;
     } catch (...) {
         TryExec(impl_->db, "ROLLBACK;");
@@ -778,32 +918,50 @@ bool HistoryStore::SwapSortOrder(int64_t first_id, int64_t second_id) {
 }
 
 bool HistoryStore::Delete(int64_t id) {
+    const auto payloads = CollectPayloadPaths(impl_->db, "SELECT payload_path FROM history_items WHERE id = ?;",
+                                              [&](sqlite3_stmt* stmt) { sqlite3_bind_int64(stmt, 1, id); });
     Statement stmt(impl_->db, "DELETE FROM history_items WHERE id = ?;");
     sqlite3_bind_int64(stmt.get(), 1, id);
     if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
         ThrowSqlite(impl_->db, "sqlite delete history failed");
     }
-    return sqlite3_changes(impl_->db) > 0;
+    const bool deleted = sqlite3_changes(impl_->db) > 0;
+    RemoveUnreferencedPayloads(impl_->db, payloads);
+    return deleted;
 }
 
 void HistoryStore::Clear() {
     if (!impl_->db) {
         throw std::runtime_error("database is not open");
     }
+    const auto payloads =
+        CollectPayloadPaths(impl_->db, "SELECT payload_path FROM history_items WHERE is_favorite = 0;");
     Exec(impl_->db, "DELETE FROM history_items WHERE is_favorite = 0;");
+    RemoveUnreferencedPayloads(impl_->db, payloads);
 }
 
 void HistoryStore::EnforceLimit() {
-    const int limit = LoadSettings().history_limit;
-    Statement stmt(impl_->db,
-                   "DELETE FROM history_items WHERE is_favorite = 0 AND id NOT IN ("
-                   "SELECT id FROM history_items WHERE is_favorite = 0 "
-                   "ORDER BY is_pinned DESC, sort_order DESC, id DESC LIMIT ?"
-                   ");");
-    sqlite3_bind_int(stmt.get(), 1, std::max(1, limit));
+    // Read only the one setting we need instead of parsing the whole settings table on every copy.
+    int limit = AppSettings{}.history_limit;
+    {
+        Statement setting(impl_->db, "SELECT value FROM settings WHERE key = 'history_limit';");
+        if (sqlite3_step(setting.get()) == SQLITE_ROW) {
+            limit = std::max(1, sqlite3_column_int(setting.get(), 0));
+        }
+    }
+    static constexpr char kOverflowFilter[] =
+        "FROM history_items WHERE is_favorite = 0 AND id NOT IN ("
+        "SELECT id FROM history_items WHERE is_favorite = 0 "
+        "ORDER BY is_pinned DESC, sort_order DESC, id DESC LIMIT ?);";
+    const auto payloads = CollectPayloadPaths(impl_->db,
+                                              (std::string("SELECT payload_path ") + kOverflowFilter).c_str(),
+                                              [&](sqlite3_stmt* stmt) { sqlite3_bind_int(stmt, 1, limit); });
+    Statement stmt(impl_->db, (std::string("DELETE ") + kOverflowFilter).c_str());
+    sqlite3_bind_int(stmt.get(), 1, limit);
     if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
         ThrowSqlite(impl_->db, "sqlite enforce limit failed");
     }
+    RemoveUnreferencedPayloads(impl_->db, payloads);
 }
 
 void HistorySelection::Toggle(int64_t id) {

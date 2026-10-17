@@ -45,14 +45,24 @@ HGLOBAL AllocWideText(std::wstring_view text) {
     return handle;
 }
 
+// The clipboard may be briefly held by another process (source app, other clipboard tools,
+// remote desktop...). Retry a few times instead of failing the paste immediately.
+bool OpenClipboardWithRetry(HWND owner) {
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        if (OpenClipboard(owner)) {
+            return true;
+        }
+        Sleep(10);
+    }
+    return false;
+}
+
 } // namespace
 
 PasteController::PasteController(ClipboardMonitor& monitor) : monitor_(monitor) {}
 
 bool PasteController::RestoreToClipboard(const HistoryItem& item, HWND owner) {
-    monitor_.MarkSelfWrite();
-    if (!OpenClipboard(owner)) {
-        monitor_.ClearSelfWrite();
+    if (!OpenClipboardWithRetry(owner)) {
         return false;
     }
 
@@ -72,6 +82,7 @@ bool PasteController::RestoreToClipboard(const HistoryItem& item, HWND owner) {
         break;
     }
     CloseClipboard();
+    monitor_.RecordSelfWrite({item.content_hash});
     return ok;
 }
 
@@ -80,9 +91,7 @@ bool PasteController::RestoreMultipleToClipboard(const std::vector<HistoryItem>&
         return false;
     }
 
-    monitor_.MarkSelfWrite();
-    if (!OpenClipboard(owner)) {
-        monitor_.ClearSelfWrite();
+    if (!OpenClipboardWithRetry(owner)) {
         return false;
     }
 
@@ -100,6 +109,15 @@ bool PasteController::RestoreMultipleToClipboard(const std::vector<HistoryItem>&
     }
 
     CloseClipboard();
+    std::vector<std::wstring> hashes;
+    hashes.reserve(items.size() + 1);
+    for (const auto& item : items) {
+        hashes.push_back(item.content_hash);
+    }
+    if (!payload.text.empty()) {
+        hashes.push_back(StableHash(payload.text));
+    }
+    monitor_.RecordSelfWrite(std::move(hashes));
     return ok;
 }
 
@@ -216,15 +234,26 @@ bool PasteController::SetImage(const HistoryItem& item) const {
         return false;
     }
     const auto size = static_cast<size_t>(file.tellg());
+    if (size < sizeof(BITMAPINFOHEADER)) {
+        return false;
+    }
     file.seekg(0);
     std::vector<char> bytes(size);
     file.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    if (!file) {
+        return false;
+    }
+
+    // Cached payloads may be either CF_DIB or CF_DIBV5 data; restore them in their original format
+    // so the header (and alpha / color masks) is interpreted correctly by the receiving app.
+    const auto* header = reinterpret_cast<const BITMAPINFOHEADER*>(bytes.data());
+    const UINT format = header->biSize >= sizeof(BITMAPV5HEADER) ? CF_DIBV5 : CF_DIB;
 
     HGLOBAL handle = AllocMoveableBytes(bytes.data(), bytes.size());
     if (!handle) {
         return false;
     }
-    if (!SetClipboardData(CF_DIB, handle)) {
+    if (!SetClipboardData(format, handle)) {
         GlobalFree(handle);
         return false;
     }

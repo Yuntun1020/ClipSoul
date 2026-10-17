@@ -4,6 +4,7 @@
 #include "ClipSoul/TextUtil.h"
 
 #include <filesystem>
+#include <fstream>
 
 namespace {
 std::filesystem::path TempDbPath(const wchar_t* name) {
@@ -64,7 +65,7 @@ TEST_CASE(HistoryStoreDeduplicatesRepeatedCopiesAcrossHistory) {
     REQUIRE_EQ(items.size(), static_cast<size_t>(2));
     REQUIRE_EQ(items[0].text, std::wstring(L"alpha"));
     REQUIRE_EQ(items[0].created_at_unix, static_cast<int64_t>(1002));
-    REQUIRE(items[0].id != first_alpha_id);
+    REQUIRE_EQ(items[0].id, first_alpha_id); // moved to top in place, not re-inserted
     REQUIRE_EQ(items[1].text, std::wstring(L"beta"));
 }
 
@@ -587,4 +588,65 @@ TEST_CASE(HistoryStoreDeduplicatesSameTextWithinThreeSeconds) {
         REQUIRE_EQ(items.front().created_at_unix, static_cast<int64_t>(1001));
     }
     std::filesystem::remove(db_path);
+}
+
+TEST_CASE(HistoryStoreRemovesImagePayloadFilesOfRotatedOutItems) {
+    ClipSoul::HistoryStore store;
+    store.Open(TempDbPath(L"payload-cleanup.db"));
+    auto settings = store.LoadSettings();
+    settings.history_limit = 1;
+    store.SaveSettings(settings);
+
+    const auto dir = std::filesystem::temp_directory_path() / L"ClipSoulTests" / L"payloads";
+    std::filesystem::create_directories(dir);
+    auto make_image = [&](const wchar_t* name) {
+        const auto path = dir / name;
+        { std::ofstream(path, std::ios::binary) << "x"; }
+        ClipSoul::CapturedContent content;
+        content.kind = ClipSoul::ClipboardKind::Image;
+        content.payload_path = path;
+        content.preview = L"image";
+        content.content_hash = ClipSoul::StableHash(path.wstring());
+        return content;
+    };
+
+    const auto first = make_image(L"first.dib");
+    const auto second = make_image(L"second.dib");
+    REQUIRE(store.Add(first));
+    REQUIRE(store.Add(first)); // duplicate re-copy must keep the shared file
+    REQUIRE(std::filesystem::exists(first.payload_path));
+    REQUIRE(store.Add(second));
+    REQUIRE(!std::filesystem::exists(first.payload_path));
+    REQUIRE(std::filesystem::exists(second.payload_path));
+
+    store.Clear();
+    REQUIRE(!std::filesystem::exists(second.payload_path));
+}
+
+TEST_CASE(HistoryStoreRepeatedCopyMovesExistingItemToTopKeepingIdAndNote) {
+    ClipSoul::HistoryStore store;
+    store.Open(TempDbPath(L"repeat-copy-moves-top.db"));
+
+    auto alpha = TextContent(L"alpha");
+    alpha.created_at_unix = 1000;
+    REQUIRE(store.Add(alpha));
+    const auto alpha_id = store.Recent(10, L"").front().id;
+    REQUIRE(store.SetNote(alpha_id, L"keep me"));
+
+    auto beta = TextContent(L"beta");
+    beta.created_at_unix = 1010;
+    REQUIRE(store.Add(beta));
+    REQUIRE_EQ(store.Recent(10, L"").front().text, std::wstring(L"beta"));
+
+    auto alpha_again = TextContent(L"alpha");
+    alpha_again.created_at_unix = 1020;
+    REQUIRE(store.Add(alpha_again));
+
+    const auto items = store.Recent(10, L"");
+    REQUIRE_EQ(items.size(), static_cast<size_t>(2));
+    REQUIRE_EQ(items[0].text, std::wstring(L"alpha"));
+    REQUIRE_EQ(items[0].id, alpha_id);
+    REQUIRE_EQ(items[0].created_at_unix, static_cast<int64_t>(1020));
+    REQUIRE_EQ(items[0].note, std::wstring(L"keep me"));
+    REQUIRE_EQ(items[1].text, std::wstring(L"beta"));
 }

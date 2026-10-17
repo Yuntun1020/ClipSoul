@@ -30,4 +30,8 @@ enum class ClipboardCapturePlan {
 
 ClipboardCapturePlan ChooseClipboardCapturePlan(const ClipboardFormatAvailability& formats);
 
+// Clears the availability flags behind `plan`, so the next ChooseClipboardCapturePlan call
+// yields the next best fallback format.
+void MarkClipboardCapturePlanUnavailable(ClipboardFormatAvailability& formats, ClipboardCapturePlan plan);
+
 } // namespace ClipSoul
