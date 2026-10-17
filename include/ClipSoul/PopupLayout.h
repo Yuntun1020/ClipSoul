@@ -127,6 +127,14 @@ struct PopupFilterLayout {
     UiRect calendar_title;
     UiRect reset;
     UiRect done;
+    // Ink Ledger 筛选面板：时间预设分段条 + 底部匹配计数
+    UiRect type_bar;
+    UiRect preset_bar;
+    UiRect presets[5];
+    UiRect footer_divider;
+    UiRect count_text;
+    UiRect calendar_grid;
+    bool custom_range = true;
 };
 
 struct PopupFavoriteGroupMenuLayout {
@@ -288,6 +296,11 @@ enum class PopupFilterTarget {
     CalendarDate,
     Reset,
     Done,
+    PresetAll,
+    PresetToday,
+    PresetWeek,
+    PresetMonth,
+    PresetCustom,
 };
 
 enum class PopupFavoriteGroupMenuTarget {
@@ -461,6 +474,10 @@ float PopupSearchTop();
 float PopupToolbarTop();
 float PopupTabsTop();
 float PopupListTop();
+float PopupFooterHeight();
+float PopupListBottomForHeight(int logical_height);
+float PopupSectionHeaderHeight();
+UiRect PopupFooterRectForSize(int logical_width, int logical_height);
 PopupHeaderLayout BuildPopupHeaderLayout();
 PopupHeaderLayout BuildPopupHeaderLayoutForWidth(int logical_width);
 PopupSearchLayout BuildPopupSearchLayout();
@@ -474,6 +491,9 @@ PopupTabsLayout BuildPopupTabsLayout(bool favorites_active);
 PopupTabsLayout BuildPopupTabsLayoutForWidth(bool favorites_active, int logical_width);
 UiRect PopupFavoriteGroupIconRect(const PopupTabsLayout& tabs);
 PopupFilterLayout BuildPopupFilterLayout();
+PopupFilterLayout BuildPopupFilterLayout(bool custom_range, int calendar_rows);
+int PopupCalendarRowCount(int year, int month);
+int PopupFilterPresetIndex(PopupFilterTarget target);
 size_t PopupFavoriteGroupMenuVisibleGroupCount(size_t group_count);
 PopupFavoriteGroupMenuLayout BuildPopupFavoriteGroupMenuLayout(size_t group_count);
 UiRect PopupFavoriteGroupMenuGroupRect(const PopupFavoriteGroupMenuLayout& layout, size_t index);

@@ -19,23 +19,20 @@ void RequireNear(float actual, float expected, float tolerance = 0.01f) {
 } // namespace
 
 TEST_CASE(PopupToolbarButtonsFitCompactPanel) {
+    const auto metrics = ClipSoul::PopupMetrics();
     const auto layout = ClipSoul::BuildPopupToolbarLayout(false);
-    const float gap = layout.multi_select.left - layout.filter.right;
+    const auto tabs = ClipSoul::BuildPopupTabsLayout(false);
 
-    RequireInsidePanel(layout.filter);
-    RequireInsidePanel(layout.multi_select);
-    RequireInsidePanel(layout.clear_all);
     REQUIRE(!ClipSoul::RectsOverlap(layout.filter, layout.multi_select));
     REQUIRE(!ClipSoul::RectsOverlap(layout.multi_select, layout.clear_all));
-    REQUIRE(layout.filter.Width() >= 88.0f);
-    REQUIRE(layout.clear_all.Width() >= 86.0f);
-    RequireNear(gap, 8.0f);
-    RequireNear(layout.clear_all.left - layout.multi_select.right, gap);
-    RequireNear(layout.filter.Width(), layout.multi_select.Width());
-    RequireNear(layout.multi_select.Width(), layout.clear_all.Width(), 16.0f);
-    REQUIRE(layout.filter.left == static_cast<float>(ClipSoul::PopupMetrics().margin));
-    REQUIRE(layout.clear_all.right == static_cast<float>(ClipSoul::PopupMetrics().width -
-                                                         ClipSoul::PopupMetrics().margin));
+    REQUIRE_EQ(layout.filter.Width(), 28.0f);
+    REQUIRE_EQ(layout.multi_select.Width(), 28.0f);
+    REQUIRE_EQ(layout.clear_all.Width(), 28.0f);
+    RequireNear(layout.multi_select.left - layout.filter.right, 2.0f);
+    RequireNear(layout.clear_all.left - layout.multi_select.right, 2.0f);
+    REQUIRE_EQ(layout.clear_all.right, static_cast<float>(metrics.width - 10));
+    REQUIRE(layout.filter.left > tabs.favorites.right);
+    RequireNear((layout.filter.top + layout.filter.bottom) * 0.5f, (tabs.history.top + tabs.history.bottom) * 0.5f, 1.0f);
 }
 
 TEST_CASE(PopupMetricsScaleToPhysicalPixelsForDpiAwareWindow) {
@@ -52,11 +49,11 @@ TEST_CASE(PopupMetricsScaleToPhysicalPixelsForDpiAwareWindow) {
 TEST_CASE(PopupWindowEdgeUsesDwmCornersAndEdgeAlignedStroke) {
     const auto metrics = ClipSoul::PopupMetrics();
 
-    REQUIRE_EQ(metrics.corner_radius, 18);
+    REQUIRE_EQ(metrics.corner_radius, 14);
     REQUIRE_EQ(metrics.glass_tint_opacity, 1.0f);
-    REQUIRE_EQ(ClipSoul::ScalePopupMetricForDpi(metrics.corner_radius, 96), 18);
-    REQUIRE_EQ(ClipSoul::ScalePopupMetricForDpi(metrics.corner_radius, 144), 27);
-    REQUIRE_EQ(ClipSoul::ScalePopupMetricForDpi(metrics.corner_radius, 192), 36);
+    REQUIRE_EQ(ClipSoul::ScalePopupMetricForDpi(metrics.corner_radius, 96), 14);
+    REQUIRE_EQ(ClipSoul::ScalePopupMetricForDpi(metrics.corner_radius, 144), 21);
+    REQUIRE_EQ(ClipSoul::ScalePopupMetricForDpi(metrics.corner_radius, 192), 28);
     REQUIRE(!ClipSoul::PopupWindowShouldUseHardRoundedRegion());
     REQUIRE(!ClipSoul::PopupWindowShouldDrawClientEdge());
     REQUIRE(ClipSoul::PopupWindowShouldUseDwmAntialiasedFrame());
@@ -113,49 +110,49 @@ TEST_CASE(PopupThemePaletteUsesQuietPaperEfficiencyColors) {
     REQUIRE_EQ(dark.window_opacity, 1.0f);
     REQUIRE_EQ(dark.panel_opacity, 1.0f);
     REQUIRE_EQ(dark.card_opacity, 1.0f);
-    REQUIRE_EQ(light.accent, 0x73826B);
-    REQUIRE_EQ(dark.accent, 0x8FA08B);
-    REQUIRE_EQ(light.window_tint, 0xF6F1E8);
-    REQUIRE_EQ(light.border, 0xD8D0C5);
+    REQUIRE_EQ(light.accent, 0x1C1B19);
+    REQUIRE_EQ(dark.accent, 0xECE6DA);
+    REQUIRE_EQ(light.window_tint, 0xF7F4EE);
+    REQUIRE_EQ(light.border, 0xE3E0DB);
 }
 
 TEST_CASE(PopupThemePaletteUsesDesignSystemUtilityTokens) {
     const auto light = ClipSoul::ResolvePopupThemePalette(1, false);
     const auto dark = ClipSoul::ResolvePopupThemePalette(2, false);
 
-    REQUIRE_EQ(light.window_tint, 0xF6F1E8);
-    REQUIRE_EQ(light.panel_fill, 0xFBF8F2);
-    REQUIRE_EQ(light.card_fill, 0xFBF8F2);
-    REQUIRE_EQ(light.search_fill, 0xFBF8F2);
-    REQUIRE_EQ(light.text, 0x211E19);
-    REQUIRE_EQ(light.muted, 0x69645B);
-    REQUIRE_EQ(light.border, 0xD8D0C5);
-    REQUIRE_EQ(light.strong_border, 0xB9A995);
-    REQUIRE_EQ(light.accent, 0x73826B);
-    REQUIRE_EQ(light.accent_hover, 0x66725F);
-    REQUIRE_EQ(light.text_tertiary, 0x8D867C);
-    REQUIRE_EQ(light.danger, 0xA95148);
-    REQUIRE_EQ(dark.window_tint, 0x151412);
-    REQUIRE_EQ(dark.panel_fill, 0x1F1C18);
-    REQUIRE_EQ(dark.card_fill, 0x28231C);
-    REQUIRE_EQ(dark.search_fill, 0x1C1A16);
-    REQUIRE_EQ(dark.text, 0xEEE9DF);
-    REQUIRE_EQ(dark.muted, 0xAAA397);
-    REQUIRE_EQ(dark.text_tertiary, 0x81786A);
-    REQUIRE_EQ(dark.border, 0x5A5348);
-    REQUIRE_EQ(dark.strong_border, 0x6D665A);
-    REQUIRE_EQ(dark.accent, 0x8FA08B);
-    REQUIRE_EQ(dark.accent_hover, 0xA8B7A4);
-    REQUIRE_EQ(dark.danger, 0xC4685E);
-    REQUIRE_EQ(dark.paper_hover, 0x302D28);
-    REQUIRE_EQ(dark.paper_selected, 0x39342D);
-    REQUIRE_EQ(dark.border_hover, 0x6D665A);
-    REQUIRE_EQ(dark.border_selected, 0x8A7F6E);
-    REQUIRE_EQ(dark.active_tab, 0xA8B7A4);
-    REQUIRE_EQ(dark.scrollbar_track, 0x2B2823);
-    REQUIRE_EQ(dark.scrollbar_thumb, 0x737D6D);
-    REQUIRE_EQ(dark.scrollbar_pressed, 0x8FA08B);
-    REQUIRE_EQ(dark.focus_outline, 0x8FA08B);
+    REQUIRE_EQ(light.window_tint, 0xF7F4EE);
+    REQUIRE_EQ(light.panel_fill, 0xFBF9F5);
+    REQUIRE_EQ(light.card_fill, 0xEFEAE0);
+    REQUIRE_EQ(light.search_fill, 0xF7F4EE);
+    REQUIRE_EQ(light.text, 0x1C1B19);
+    REQUIRE_EQ(light.muted, 0x5E5A52);
+    REQUIRE_EQ(light.border, 0xE3E0DB);
+    REQUIRE_EQ(light.strong_border, 0xD4D1CC);
+    REQUIRE_EQ(light.accent, 0x1C1B19);
+    REQUIRE_EQ(light.accent_hover, 0x34322E);
+    REQUIRE_EQ(light.text_tertiary, 0xA39D92);
+    REQUIRE_EQ(light.danger, 0xC8402F);
+    REQUIRE_EQ(dark.window_tint, 0x171614);
+    REQUIRE_EQ(dark.panel_fill, 0x1C1B18);
+    REQUIRE_EQ(dark.card_fill, 0x22201C);
+    REQUIRE_EQ(dark.search_fill, 0x171614);
+    REQUIRE_EQ(dark.text, 0xECE6DA);
+    REQUIRE_EQ(dark.muted, 0xA69F92);
+    REQUIRE_EQ(dark.text_tertiary, 0x6A645A);
+    REQUIRE_EQ(dark.border, 0x262522);
+    REQUIRE_EQ(dark.strong_border, 0x353330);
+    REQUIRE_EQ(dark.accent, 0xECE6DA);
+    REQUIRE_EQ(dark.accent_hover, 0xF7F2E8);
+    REQUIRE_EQ(dark.danger, 0xE0583F);
+    REQUIRE_EQ(dark.paper_hover, 0x22201C);
+    REQUIRE_EQ(dark.paper_selected, 0x262420);
+    REQUIRE_EQ(dark.border_hover, 0x353330);
+    REQUIRE_EQ(dark.border_selected, 0x353330);
+    REQUIRE_EQ(dark.active_tab, 0xECE6DA);
+    REQUIRE_EQ(dark.scrollbar_track, 0x171614);
+    REQUIRE_EQ(dark.scrollbar_thumb, 0x6A645A);
+    REQUIRE_EQ(dark.scrollbar_pressed, 0xA69F92);
+    REQUIRE_EQ(dark.focus_outline, 0xECE6DA);
 }
 
 TEST_CASE(PopupDarkToolbarUsesLowSaturationReadableIconAndLabelColors) {
@@ -206,9 +203,7 @@ TEST_CASE(PopupHeaderButtonsUseCompactIconTargets) {
     const auto metrics = ClipSoul::PopupMetrics();
     const auto layout = ClipSoul::BuildPopupHeaderLayout();
 
-    RequireInsidePanel(layout.title);
-    RequireInsidePanel(layout.pin);
-    RequireInsidePanel(layout.close);
+    REQUIRE(layout.title.left == static_cast<float>(metrics.margin));
     REQUIRE(!ClipSoul::RectsOverlap(layout.pin, layout.close));
     REQUIRE_EQ(metrics.header_button_size, 28);
     REQUIRE(layout.pin.Width() <= static_cast<float>(metrics.header_button_size));
@@ -216,6 +211,8 @@ TEST_CASE(PopupHeaderButtonsUseCompactIconTargets) {
     REQUIRE(layout.pin.Height() >= 22.0f);
     REQUIRE(layout.close.Width() <= static_cast<float>(metrics.header_button_size));
     REQUIRE(layout.close.right > layout.pin.right);
+    REQUIRE(layout.close.right <= static_cast<float>(metrics.width - 10));
+    REQUIRE(layout.close.bottom <= static_cast<float>(metrics.header_height));
 
     const auto pin_icon = ClipSoul::BuildPopupHeaderPinIconRect(layout);
     REQUIRE_EQ(pin_icon.Width(), 16.0f);
@@ -234,43 +231,43 @@ TEST_CASE(PopupDesignSystemLayoutPrioritizesSearchAndCompactRows) {
     const auto metrics = ClipSoul::PopupMetrics();
     const auto header = ClipSoul::BuildPopupHeaderLayout();
     const auto search = ClipSoul::BuildPopupSearchLayout();
-    const auto toolbar = ClipSoul::BuildPopupToolbarLayout(false);
     const auto tabs = ClipSoul::BuildPopupTabsLayout(false);
     const auto card = ClipSoul::BuildPopupCardLayout(false, ClipSoul::PopupListTop());
 
     REQUIRE_EQ(metrics.width, 340);
-    REQUIRE_EQ(metrics.margin, 16);
-    REQUIRE_EQ(metrics.search_height, 44);
-    REQUIRE_EQ(metrics.tab_height, 34);
-    REQUIRE_EQ(metrics.card_height, 72);
-    REQUIRE_EQ(metrics.card_gap, 8);
+    REQUIRE_EQ(metrics.margin, 18);
+    REQUIRE_EQ(metrics.search_height, 40);
+    REQUIRE_EQ(metrics.tab_height, 40);
+    REQUIRE_EQ(metrics.card_height, 58);
+    REQUIRE_EQ(metrics.card_gap, 0);
     REQUIRE_EQ(metrics.toolbar_icon_size, 16);
-    REQUIRE(search.box.top < toolbar.filter.top);
-    REQUIRE(search.box.Height() == 44.0f);
-    REQUIRE(header.title.bottom <= search.box.top - 6.0f);
-    REQUIRE(tabs.active_indicator.Height() == 3.0f);
-    REQUIRE(tabs.divider.bottom <= ClipSoul::PopupListTop() - 10.0f);
-    REQUIRE(card.card.Height() == 72.0f);
+    REQUIRE(search.box.Height() == 40.0f);
+    REQUIRE(header.title.bottom <= search.box.top);
+    REQUIRE(search.box.bottom <= tabs.history.top);
+    REQUIRE(tabs.active_indicator.Height() == 1.5f);
+    REQUIRE(tabs.divider.bottom <= ClipSoul::PopupListTop());
+    REQUIRE(card.card.Height() == 58.0f);
     REQUIRE(card.stripe.Width() == 0.0f);
-    REQUIRE(card.stripe.left == card.card.left + 4.0f);
-    REQUIRE(card.title.left >= card.card.left + 78.0f);
+    // 左对齐：搜索图标、标签、行内正文起点共用内容左线
+    REQUIRE_EQ(search.icon.left, static_cast<float>(metrics.margin));
+    REQUIRE_EQ(tabs.history.left, static_cast<float>(metrics.margin));
+    REQUIRE(card.title.left >= card.card.left + 52.0f);
     REQUIRE(card.title.right <= card.time.left - 8.0f);
 }
 
 TEST_CASE(PopupTopRhythmKeepsToolbarTabsAndListCompact) {
     const auto metrics = ClipSoul::PopupMetrics();
-    const auto tokens = ClipSoul::PopupDesignTokens();
     const auto toolbar = ClipSoul::BuildPopupToolbarLayout(false);
     const auto tabs = ClipSoul::BuildPopupTabsLayout(false);
 
-    RequireNear(ClipSoul::PopupTabsTop() - (ClipSoul::PopupToolbarTop() + metrics.toolbar_height),
-                static_cast<float>(tokens.toolbar_to_tab_gap));
-    REQUIRE_EQ(metrics.tab_height, 34);
-    RequireNear(tabs.divider.bottom, ClipSoul::PopupTabsTop() + static_cast<float>(metrics.tab_height));
-    RequireNear(ClipSoul::PopupListTop(),
-                ClipSoul::PopupTabsTop() + static_cast<float>(metrics.tab_height + tokens.tab_to_list_gap));
-    REQUIRE(toolbar.filter.bottom + 6.0f <= tabs.history.top);
-    REQUIRE(ClipSoul::PopupListTop() < 190.0f);
+    RequireNear(ClipSoul::PopupTabsTop(), ClipSoul::PopupSearchTop() + static_cast<float>(metrics.search_height));
+    REQUIRE_EQ(metrics.tab_height, 40);
+    RequireNear(tabs.divider.bottom, ClipSoul::PopupTabsTop() + static_cast<float>(metrics.tab_height) + 0.5f);
+    REQUIRE(toolbar.filter.top >= ClipSoul::PopupTabsTop());
+    REQUIRE(toolbar.filter.bottom <= ClipSoul::PopupTabsTop() + static_cast<float>(metrics.tab_height));
+    REQUIRE(ClipSoul::PopupListTop() < 140.0f);
+    REQUIRE_EQ(ClipSoul::PopupFooterHeight(), 30.0f);
+    RequireNear(ClipSoul::PopupListBottomForHeight(metrics.height), static_cast<float>(metrics.height) - 30.0f);
 }
 
 TEST_CASE(PopupToolbarIconsUseStableCompactSize) {
@@ -278,9 +275,9 @@ TEST_CASE(PopupToolbarIconsUseStableCompactSize) {
     const auto layout = ClipSoul::BuildPopupToolbarLayout(false);
 
     REQUIRE_EQ(metrics.toolbar_icon_size, 16);
-    REQUIRE(layout.filter.Width() >= metrics.toolbar_icon_size + 50.0f);
-    REQUIRE(layout.multi_select.Width() >= metrics.toolbar_icon_size + 38.0f);
-    REQUIRE(layout.clear_all.Width() >= metrics.toolbar_icon_size + 66.0f);
+    REQUIRE(layout.filter.Width() >= metrics.toolbar_icon_size + 10.0f);
+    REQUIRE(layout.multi_select.Width() >= metrics.toolbar_icon_size + 10.0f);
+    REQUIRE(layout.clear_all.Width() >= metrics.toolbar_icon_size + 10.0f);
 }
 
 TEST_CASE(PopupIconSlotsUseOutlinedIdleAndFilledActiveStates) {
@@ -422,10 +419,10 @@ TEST_CASE(PopupHeaderAndSearchControlsAdaptToCurrentWindowWidth) {
     const auto header = ClipSoul::BuildPopupHeaderLayoutForWidth(resized_width);
     const auto search = ClipSoul::BuildPopupSearchLayoutForWidth(resized_width);
 
-    REQUIRE_EQ(header.close.right, static_cast<float>(resized_width - 16));
-    REQUIRE_EQ(header.pin.right, static_cast<float>(resized_width - 52));
+    REQUIRE_EQ(header.close.right, static_cast<float>(resized_width - 10));
+    REQUIRE_EQ(header.pin.right, static_cast<float>(resized_width - 40));
     REQUIRE_EQ(search.box.right, static_cast<float>(resized_width - metrics.margin));
-    REQUIRE_EQ(search.text.right, static_cast<float>(resized_width - metrics.margin - 40));
+    REQUIRE_EQ(search.text.right, static_cast<float>(resized_width - metrics.margin - 28));
     REQUIRE(!ClipSoul::RectsOverlap(header.pin, header.close));
 }
 
@@ -634,69 +631,53 @@ TEST_CASE(PopupToolbarButtonsAdaptToCurrentWindowWidth) {
     const auto default_multi = ClipSoul::BuildPopupToolbarLayout(true);
 
     const auto normal = ClipSoul::BuildPopupToolbarLayoutForWidth(false, resized_width);
-    REQUIRE(normal.filter.Width() > default_normal.filter.Width());
-    REQUIRE(normal.multi_select.Width() > default_normal.multi_select.Width());
-    REQUIRE(normal.clear_all.Width() > default_normal.clear_all.Width());
-    RequireNear(normal.multi_select.left - normal.filter.right, 8.0f);
-    RequireNear(normal.clear_all.left - normal.multi_select.right, 8.0f);
-    RequireNear(normal.filter.Width(), normal.multi_select.Width());
+    RequireNear(normal.filter.left, default_normal.filter.left + 120.0f);
+    RequireNear(normal.clear_all.left, default_normal.clear_all.left + 120.0f);
+    REQUIRE_EQ(normal.filter.Width(), default_normal.filter.Width());
     REQUIRE(!ClipSoul::RectsOverlap(normal.multi_select, normal.clear_all));
 
     const auto multi = ClipSoul::BuildPopupToolbarLayoutForWidth(true, resized_width);
-    REQUIRE(multi.cancel_multi_select.Width() > default_multi.cancel_multi_select.Width());
-    REQUIRE(multi.select_all.Width() > default_multi.select_all.Width());
-    REQUIRE(multi.delete_selected.Width() > default_multi.delete_selected.Width());
-    REQUIRE(multi.paste_selected.Width() > default_multi.paste_selected.Width());
-    RequireNear(multi.select_all.left - multi.cancel_multi_select.right, 4.0f);
-    RequireNear(multi.delete_selected.left - multi.select_all.right, 4.0f);
-    RequireNear(multi.paste_selected.left - multi.delete_selected.right, 4.0f);
-    REQUIRE_EQ(multi.paste_selected.right, static_cast<float>(resized_width - metrics.margin));
+    RequireNear(multi.paste_selected.left, default_multi.paste_selected.left + 120.0f);
+    RequireNear(multi.cancel_multi_select.left, default_multi.cancel_multi_select.left + 120.0f);
+    RequireNear(multi.select_all.left - multi.cancel_multi_select.right, 2.0f);
+    RequireNear(multi.delete_selected.left - multi.select_all.right, 2.0f);
+    RequireNear(multi.paste_selected.left - multi.delete_selected.right, 2.0f);
+    REQUIRE_EQ(multi.paste_selected.right, static_cast<float>(resized_width - 10));
     REQUIRE(!ClipSoul::RectsOverlap(multi.delete_selected, multi.paste_selected));
 }
 
 TEST_CASE(PopupTabsButtonsAdaptToCurrentWindowWidth) {
     const auto metrics = ClipSoul::PopupMetrics();
     const int resized_width = metrics.width + 120;
-    const float center_delta = static_cast<float>(resized_width - metrics.width) * 0.5f;
-    const float right_delta = static_cast<float>(resized_width - metrics.width);
 
     const auto default_tabs = ClipSoul::BuildPopupTabsLayout(true);
     const auto resized_tabs = ClipSoul::BuildPopupTabsLayoutForWidth(true, resized_width);
 
     REQUIRE_EQ(resized_tabs.history.Width(), default_tabs.history.Width());
-    REQUIRE_EQ(resized_tabs.history.left, default_tabs.history.left + center_delta);
-    REQUIRE_EQ(resized_tabs.favorites.Width(), default_tabs.favorites.Width());
-    REQUIRE_EQ(resized_tabs.favorites.left, default_tabs.favorites.left + center_delta);
-    REQUIRE_EQ(resized_tabs.favorite_group.Width(), default_tabs.favorite_group.Width());
-    REQUIRE_EQ(resized_tabs.favorite_group.left, default_tabs.favorite_group.left + right_delta);
-    REQUIRE_EQ(resized_tabs.add_favorite_phrase.Width(), default_tabs.add_favorite_phrase.Width());
-    REQUIRE_EQ(resized_tabs.add_favorite_phrase.left, default_tabs.add_favorite_phrase.left + right_delta);
-    REQUIRE_EQ(resized_tabs.divider.right, static_cast<float>(resized_width - metrics.margin));
+    REQUIRE_EQ(resized_tabs.history.left, default_tabs.history.left);
+    REQUIRE_EQ(resized_tabs.favorites.left, default_tabs.favorites.left);
+    REQUIRE_EQ(resized_tabs.favorite_group.left, default_tabs.favorite_group.left);
+    REQUIRE(resized_tabs.favorite_group.Width() >= default_tabs.favorite_group.Width());
+    REQUIRE_EQ(resized_tabs.divider.right, static_cast<float>(resized_width));
 }
 
 TEST_CASE(PopupMultiSelectToolbarButtonsFitCompactPanel) {
+    const auto metrics = ClipSoul::PopupMetrics();
     const auto layout = ClipSoul::BuildPopupToolbarLayout(true);
+    const auto tabs = ClipSoul::BuildPopupTabsLayout(false);
 
-    RequireInsidePanel(layout.cancel_multi_select);
-    RequireInsidePanel(layout.select_all);
-    RequireInsidePanel(layout.delete_selected);
-    RequireInsidePanel(layout.paste_selected);
     REQUIRE(!ClipSoul::RectsOverlap(layout.cancel_multi_select, layout.select_all));
     REQUIRE(!ClipSoul::RectsOverlap(layout.select_all, layout.delete_selected));
-    REQUIRE(!ClipSoul::RectsOverlap(layout.cancel_multi_select, layout.delete_selected));
     REQUIRE(!ClipSoul::RectsOverlap(layout.delete_selected, layout.paste_selected));
-    REQUIRE(layout.cancel_multi_select.Width() >= 58.0f);
-    REQUIRE(layout.select_all.Width() >= 58.0f);
-    REQUIRE(layout.delete_selected.Width() >= 88.0f);
-    REQUIRE(layout.paste_selected.Width() >= 90.0f);
-    REQUIRE(ClipSoul::PopupToolbarLabelRect(layout.delete_selected, false).Width() >= 58.0f);
-    REQUIRE(ClipSoul::PopupToolbarLabelRect(layout.paste_selected, false).Width() >= 60.0f);
-    RequireNear(layout.select_all.left - layout.cancel_multi_select.right, 4.0f);
-    RequireNear(layout.delete_selected.left - layout.select_all.right, 4.0f);
-    RequireNear(layout.paste_selected.left - layout.delete_selected.right, 4.0f);
-    REQUIRE_EQ(layout.cancel_multi_select.left, static_cast<float>(ClipSoul::PopupMetrics().margin));
-    REQUIRE_EQ(layout.paste_selected.right, static_cast<float>(ClipSoul::PopupMetrics().width -
-                                                              ClipSoul::PopupMetrics().margin));
+    REQUIRE(layout.cancel_multi_select.Width() >= 36.0f);
+    REQUIRE(layout.select_all.Width() >= 36.0f);
+    REQUIRE(layout.delete_selected.Width() >= 36.0f);
+    REQUIRE(layout.paste_selected.Width() >= 56.0f);
+    RequireNear(layout.select_all.left - layout.cancel_multi_select.right, 2.0f);
+    RequireNear(layout.delete_selected.left - layout.select_all.right, 2.0f);
+    RequireNear(layout.paste_selected.left - layout.delete_selected.right, 2.0f);
+    REQUIRE(layout.cancel_multi_select.left > tabs.favorites.right);
+    REQUIRE_EQ(layout.paste_selected.right, static_cast<float>(metrics.width - 10));
 }
 
 TEST_CASE(PopupCardTextReservesTimeAndMenuArea) {
@@ -715,16 +696,17 @@ TEST_CASE(PopupCardMediaRectsSupportImagePreviewAndFileIcon) {
     const auto normal = ClipSoul::BuildPopupCardLayout(false, 168.0f);
     const auto multi = ClipSoul::BuildPopupCardLayout(true, 168.0f);
 
-    REQUIRE_EQ(normal.image_preview.Width(), 40.0f);
-    REQUIRE_EQ(normal.image_preview.Height(), 40.0f);
-    REQUIRE(normal.image_preview.left > normal.stripe.right);
+    REQUIRE_EQ(normal.image_preview.Width(), 34.0f);
+    REQUIRE_EQ(normal.image_preview.Height(), 34.0f);
+    REQUIRE(normal.image_preview.left > normal.card.left);
     REQUIRE(normal.title.left >= normal.image_preview.right + 6.0f);
-    REQUIRE_EQ(normal.file_icon.Width(), 30.0f);
-    REQUIRE_EQ(normal.file_icon.Height(), 30.0f);
+    REQUIRE_EQ(normal.file_icon.Width(), 26.0f);
+    REQUIRE_EQ(normal.file_icon.Height(), 26.0f);
     REQUIRE(normal.file_icon.left > normal.image_preview.left);
     REQUIRE(normal.file_icon.right < normal.image_preview.right);
     REQUIRE(multi.image_preview.left > normal.image_preview.left);
     REQUIRE(multi.title.left > normal.title.left);
+    REQUIRE(multi.checkbox.right <= multi.image_preview.left);
 }
 
 TEST_CASE(PopupCardKindIconRectIsVisuallyCenteredInsideMediaSlot) {
@@ -737,8 +719,8 @@ TEST_CASE(PopupCardKindIconRectIsVisuallyCenteredInsideMediaSlot) {
     REQUIRE(icon.top > card.image_preview.top);
     REQUIRE(icon.right < card.image_preview.right);
     REQUIRE(icon.bottom < card.image_preview.bottom);
-    REQUIRE_EQ(icon.Width(), 20.0f);
-    REQUIRE_EQ(icon.Height(), 20.0f);
+    REQUIRE_EQ(icon.Width(), 16.0f);
+    REQUIRE_EQ(icon.Height(), 16.0f);
     REQUIRE(std::abs(center_x(icon) - center_x(card.image_preview)) <= 0.01f);
     REQUIRE(std::abs(center_y(icon) - center_y(card.image_preview)) <= 0.01f);
 }
@@ -787,38 +769,37 @@ TEST_CASE(PopupWindowHeightStaysFixedForEmptyFavorites) {
 
 TEST_CASE(PopupFixedHeightShowsFourCompactCards) {
     const auto metrics = ClipSoul::PopupMetrics();
-    const int available = metrics.height - static_cast<int>(ClipSoul::PopupListTop());
-    const int four_cards = metrics.card_height * 4 + metrics.card_gap * 3;
+    const float available = ClipSoul::PopupListBottomForHeight(metrics.height) - ClipSoul::PopupListTop();
+    const int six_rows = metrics.card_height * 6;
 
-    REQUIRE(available >= four_cards);
-    REQUIRE_EQ(ClipSoul::PopupVisibleCardCapacity(), 4);
+    REQUIRE(available >= static_cast<float>(six_rows));
+    REQUIRE_EQ(ClipSoul::PopupVisibleCardCapacity(), 6);
 }
 
 TEST_CASE(PopupToolbarAndTabsFitLegacyCompactWindowWidth) {
     constexpr int legacy_width = 340;
     const auto toolbar = ClipSoul::BuildPopupToolbarLayoutForWidth(false, legacy_width);
     const auto multi_toolbar = ClipSoul::BuildPopupToolbarLayoutForWidth(true, legacy_width);
-    const auto tabs = ClipSoul::BuildPopupTabsLayoutForWidth(false, legacy_width);
+    const auto tabs = ClipSoul::BuildPopupTabsLayoutForWidth(true, legacy_width);
 
     REQUIRE(!ClipSoul::RectsOverlap(toolbar.filter, toolbar.multi_select));
     REQUIRE(!ClipSoul::RectsOverlap(toolbar.multi_select, toolbar.clear_all));
-    REQUIRE(toolbar.filter.left >= 16.0f);
-    REQUIRE(toolbar.clear_all.right <= 324.0f);
+    REQUIRE(toolbar.clear_all.right <= 330.0f);
     REQUIRE(!ClipSoul::RectsOverlap(multi_toolbar.cancel_multi_select, multi_toolbar.select_all));
     REQUIRE(!ClipSoul::RectsOverlap(multi_toolbar.select_all, multi_toolbar.delete_selected));
     REQUIRE(!ClipSoul::RectsOverlap(multi_toolbar.delete_selected, multi_toolbar.paste_selected));
-    REQUIRE(multi_toolbar.paste_selected.right <= 324.0f);
-    REQUIRE(tabs.history.left >= 90.0f);
-    REQUIRE(tabs.favorites.right <= 250.0f);
+    REQUIRE(multi_toolbar.paste_selected.right <= 330.0f);
+    REQUIRE(tabs.history.left >= 18.0f);
     REQUIRE(!ClipSoul::RectsOverlap(tabs.history, tabs.favorites));
+    REQUIRE(tabs.add_favorite_phrase.right <= toolbar.filter.left);
+    REQUIRE(!ClipSoul::RectsOverlap(tabs.favorite_group, tabs.add_favorite_phrase));
 }
 
 TEST_CASE(PopupVisibleCapacityTracksCurrentWindowHeight) {
     const auto metrics = ClipSoul::PopupMetrics();
-    const int compact_height =
-        static_cast<int>(ClipSoul::PopupListTop()) + metrics.card_height * 3 + metrics.card_gap * 2;
-    const int tall_height =
-        static_cast<int>(ClipSoul::PopupListTop()) + metrics.card_height * 8 + metrics.card_gap * 7;
+    const int footer = static_cast<int>(ClipSoul::PopupFooterHeight());
+    const int compact_height = static_cast<int>(ClipSoul::PopupListTop()) + metrics.card_height * 3 + footer;
+    const int tall_height = static_cast<int>(ClipSoul::PopupListTop()) + metrics.card_height * 8 + footer;
 
     REQUIRE_EQ(ClipSoul::PopupVisibleCardCapacityForHeight(metrics.height), ClipSoul::PopupVisibleCardCapacity());
     REQUIRE_EQ(ClipSoul::PopupVisibleCardCapacityForHeight(compact_height), 3);
@@ -826,16 +807,17 @@ TEST_CASE(PopupVisibleCapacityTracksCurrentWindowHeight) {
 }
 
 TEST_CASE(PopupListScrollOffsetClampsToAvailableRows) {
-    REQUIRE_EQ(ClipSoul::ClampPopupScrollOffset(5, 4), 1);
-    REQUIRE_EQ(ClipSoul::ClampPopupScrollOffset(9, 0), 0);
-    REQUIRE_EQ(ClipSoul::ClampPopupScrollOffset(9, 99), 5);
-    REQUIRE_EQ(ClipSoul::ClampPopupScrollOffset(9, -2), 0);
+    const int capacity = ClipSoul::PopupVisibleCardCapacity();
+    REQUIRE_EQ(ClipSoul::ClampPopupScrollOffset(capacity + 1, 4), 1);
+    REQUIRE_EQ(ClipSoul::ClampPopupScrollOffset(capacity + 5, 0), 0);
+    REQUIRE_EQ(ClipSoul::ClampPopupScrollOffset(capacity + 5, 99), 5);
+    REQUIRE_EQ(ClipSoul::ClampPopupScrollOffset(capacity + 5, -2), 0);
 }
 
 TEST_CASE(PopupScrollOffsetClampsToCurrentWindowHeight) {
     const auto metrics = ClipSoul::PopupMetrics();
-    const int tall_height =
-        static_cast<int>(ClipSoul::PopupListTop()) + metrics.card_height * 8 + metrics.card_gap * 7;
+    const int tall_height = static_cast<int>(ClipSoul::PopupListTop()) + metrics.card_height * 8 +
+                            static_cast<int>(ClipSoul::PopupFooterHeight());
 
     REQUIRE_EQ(ClipSoul::ClampPopupScrollOffsetForHeight(9, 99, tall_height), 1);
     REQUIRE_EQ(ClipSoul::PopupScrollOffsetToRevealSelectionForHeight(9, 0, 7, tall_height), 0);
@@ -843,9 +825,10 @@ TEST_CASE(PopupScrollOffsetClampsToCurrentWindowHeight) {
 }
 
 TEST_CASE(PopupMouseWheelMovesVisibleHistoryWindow) {
-    REQUIRE_EQ(ClipSoul::PopupScrollOffsetAfterWheel(9, 0, -120), 1);
-    REQUIRE_EQ(ClipSoul::PopupScrollOffsetAfterWheel(9, 1, 120), 0);
-    REQUIRE_EQ(ClipSoul::PopupScrollOffsetAfterWheel(9, 4, -120), 5);
+    const int count = ClipSoul::PopupVisibleCardCapacity() + 5;
+    REQUIRE_EQ(ClipSoul::PopupScrollOffsetAfterWheel(count, 0, -120), 1);
+    REQUIRE_EQ(ClipSoul::PopupScrollOffsetAfterWheel(count, 1, 120), 0);
+    REQUIRE_EQ(ClipSoul::PopupScrollOffsetAfterWheel(count, 4, -120), 5);
 }
 
 TEST_CASE(PopupMouseWheelMovesBySmoothPixelsWithinRows) {
@@ -872,10 +855,11 @@ TEST_CASE(PopupSelectionStaysBoundToItemWhenListScrolls) {
 }
 
 TEST_CASE(PopupContinuousPasteMovesHighlightToNextItemAndRevealsIt) {
+    const int capacity = ClipSoul::PopupVisibleCardCapacity();
     REQUIRE_EQ(ClipSoul::PopupNextSelectedIndex(4, 1), 2);
     REQUIRE_EQ(ClipSoul::PopupNextSelectedIndex(4, 3), 0);
-    REQUIRE_EQ(ClipSoul::PopupScrollOffsetToRevealSelection(9, 0, 7), 4);
-    REQUIRE_EQ(ClipSoul::PopupScrollOffsetToRevealSelection(9, 3, 2), 2);
+    REQUIRE_EQ(ClipSoul::PopupScrollOffsetToRevealSelection(capacity + 5, 0, capacity + 3), 4);
+    REQUIRE_EQ(ClipSoul::PopupScrollOffsetToRevealSelection(capacity + 5, 3, 2), 2);
 }
 
 TEST_CASE(PopupContinuousPasteUsesCurrentHighlightThenAdvances) {
@@ -895,8 +879,9 @@ TEST_CASE(PopupContinuousPasteUsesCurrentHighlightThenAdvances) {
 TEST_CASE(PopupSmoothRevealKeepsSelectionVisibleWithoutRowJump) {
     const auto metrics = ClipSoul::PopupMetrics();
     const float row_pitch = static_cast<float>(metrics.card_height + metrics.card_gap);
+    const int capacity = ClipSoul::PopupVisibleCardCapacity();
 
-    const float offset = ClipSoul::PopupScrollOffsetToRevealSelectionForHeight(12, 0.0f, 5, metrics.height);
+    const float offset = ClipSoul::PopupScrollOffsetToRevealSelectionForHeight(capacity + 8, 0.0f, capacity + 1, metrics.height);
     REQUIRE(offset > 8.0f);
     REQUIRE(offset < row_pitch * 2.0f);
 }
@@ -912,41 +897,45 @@ TEST_CASE(PopupSmoothViewportClampDoesNotSnapBackToSelection) {
 TEST_CASE(PopupRevealRangeKeepsCurrentHighlightVisibleInsteadOfResettingToTop) {
     const auto metrics = ClipSoul::PopupMetrics();
     const float row_pitch = static_cast<float>(metrics.card_height + metrics.card_gap);
-    const float content_height = row_pitch * 9.0f - static_cast<float>(metrics.card_gap);
-    const float viewport_height = static_cast<float>(metrics.height) - ClipSoul::PopupListTop() - 4.0f;
-    const float seventh_top = row_pitch * 7.0f;
-    const float seventh_bottom = seventh_top + static_cast<float>(metrics.card_height);
+    const int count = ClipSoul::PopupVisibleCardCapacity() + 3;
+    const int target = count - 2;
+    const float content_height = row_pitch * static_cast<float>(count) - static_cast<float>(metrics.card_gap);
+    const float viewport_height = ClipSoul::PopupListBottomForHeight(metrics.height) - ClipSoul::PopupListTop();
+    const float target_top = row_pitch * static_cast<float>(target);
+    const float target_bottom = target_top + static_cast<float>(metrics.card_height);
 
-    REQUIRE_EQ(ClipSoul::PopupScrollOffsetToRevealRange(0.0f, seventh_top, seventh_bottom,
+    REQUIRE_EQ(ClipSoul::PopupScrollOffsetToRevealRange(0.0f, target_top, target_bottom,
                                                         content_height, viewport_height),
-               ClipSoul::PopupScrollOffsetToRevealSelectionForHeight(9, 0.0f, 7, metrics.height));
+               ClipSoul::PopupScrollOffsetToRevealSelectionForHeight(count, 0.0f, target, metrics.height));
     REQUIRE_EQ(ClipSoul::PopupScrollOffsetToRevealRange(120.0f, 0.0f, static_cast<float>(metrics.card_height),
                                                         content_height, viewport_height), 0.0f);
     REQUIRE_EQ(ClipSoul::PopupScrollOffsetToRevealRange(120.0f, 20.0f, 92.0f, 300.0f, 360.0f), 0.0f);
 }
 
 TEST_CASE(PopupScrollbarThumbMapsDragPositionToScrollOffset) {
+    const int capacity = ClipSoul::PopupVisibleCardCapacity();
+    const int count = capacity + 6;
     const auto track = ClipSoul::PopupScrollbarTrackRect();
     const auto hit = ClipSoul::PopupScrollbarHitRect();
-    const auto top_thumb = ClipSoul::PopupScrollbarThumbRect(10, 0);
-    const auto bottom_thumb = ClipSoul::PopupScrollbarThumbRect(10, 5);
+    const auto top_thumb = ClipSoul::PopupScrollbarThumbRect(count, 0);
+    const auto bottom_thumb = ClipSoul::PopupScrollbarThumbRect(count, 5);
 
-    REQUIRE_EQ(track.Width(), 6.0f);
-    REQUIRE(track.left >= ClipSoul::PopupMetrics().width - 14.0f);
+    REQUIRE_EQ(track.Width(), 4.0f);
+    REQUIRE(track.left >= ClipSoul::PopupMetrics().width - 8.0f);
     REQUIRE(hit.left < track.left);
     REQUIRE(hit.right >= track.right);
-    REQUIRE(hit.Width() >= 14.0f);
+    REQUIRE(hit.Width() >= 12.0f);
     REQUIRE(top_thumb.top >= track.top);
     REQUIRE(bottom_thumb.bottom <= track.bottom);
     REQUIRE(bottom_thumb.top > top_thumb.top);
-    REQUIRE_EQ(ClipSoul::PopupScrollOffsetForThumbCenterY(10, (track.top + track.bottom) * 0.5f), 3);
-    REQUIRE_EQ(ClipSoul::PopupScrollOffsetForThumbCenterY(10, track.bottom + 200.0f), 6);
+    REQUIRE_EQ(ClipSoul::PopupScrollOffsetForThumbCenterY(count, (track.top + track.bottom) * 0.5f), 3);
+    REQUIRE_EQ(ClipSoul::PopupScrollOffsetForThumbCenterY(count, track.bottom + 200.0f), 6);
 }
 
 TEST_CASE(PopupScrollbarThumbMapsToCurrentWindowHeight) {
     const auto metrics = ClipSoul::PopupMetrics();
-    const int tall_height =
-        static_cast<int>(ClipSoul::PopupListTop()) + metrics.card_height * 8 + metrics.card_gap * 7 + 10;
+    const int tall_height = static_cast<int>(ClipSoul::PopupListTop()) + metrics.card_height * 8 +
+                            static_cast<int>(ClipSoul::PopupFooterHeight()) + 10;
     const auto default_track = ClipSoul::PopupScrollbarTrackRect();
     const auto tall_track = ClipSoul::PopupScrollbarTrackRectForHeight(tall_height);
     const auto tall_thumb = ClipSoul::PopupScrollbarThumbRectForHeight(10, 0, tall_height);
@@ -966,12 +955,12 @@ TEST_CASE(PopupScrollbarTrackAndHitRectAdaptToCurrentWindowSize) {
     const auto default_track = ClipSoul::PopupScrollbarTrackRect();
     const auto resized_track = ClipSoul::PopupScrollbarTrackRectForSize(resized_width, resized_height);
     const auto resized_hit = ClipSoul::PopupScrollbarHitRectForSize(resized_width, resized_height);
-    const auto resized_thumb = ClipSoul::PopupScrollbarThumbRectForSize(12, 80.0f, resized_width, resized_height);
+    const auto resized_thumb = ClipSoul::PopupScrollbarThumbRectForSize(30, 80.0f, resized_width, resized_height);
 
     REQUIRE(resized_track.left > default_track.left);
-    REQUIRE_EQ(resized_track.Width(), 6.0f);
-    REQUIRE_EQ(resized_track.right, static_cast<float>(resized_width - 8));
-    REQUIRE_EQ(resized_track.bottom, static_cast<float>(resized_height - 10));
+    REQUIRE_EQ(resized_track.Width(), 4.0f);
+    REQUIRE_EQ(resized_track.right, static_cast<float>(resized_width - 3));
+    REQUIRE_EQ(resized_track.bottom, ClipSoul::PopupListBottomForHeight(resized_height) - 4.0f);
     REQUIRE_EQ(resized_hit.right, static_cast<float>(resized_width));
     REQUIRE(resized_hit.left < resized_track.left);
     REQUIRE_EQ(resized_thumb.left, resized_track.left);
@@ -998,10 +987,10 @@ TEST_CASE(PopupScrollToTopButtonAppearsAfterAnySmallScrollAndAvoidsScrollbar) {
     const auto rect = ClipSoul::PopupScrollToTopButtonRectForSize(resized_width, resized_height);
     const auto scrollbar_hit = ClipSoul::PopupScrollbarHitRectForSize(resized_width, resized_height);
 
-    REQUIRE_EQ(rect.Width(), 40.0f);
-    REQUIRE_EQ(rect.Height(), 40.0f);
+    REQUIRE_EQ(rect.Width(), 30.0f);
+    REQUIRE_EQ(rect.Height(), 30.0f);
     REQUIRE(rect.top >= ClipSoul::PopupListTop());
-    REQUIRE(rect.bottom <= static_cast<float>(resized_height - 16));
+    REQUIRE(rect.bottom <= ClipSoul::PopupListBottomForHeight(resized_height) - 12.0f);
     REQUIRE(rect.right < scrollbar_hit.left);
 }
 
@@ -1128,12 +1117,14 @@ TEST_CASE(PopupToggleKnobUsesAnimatedTravelBetweenStates) {
 TEST_CASE(PopupListClipRectStartsAtListAndEndsBeforeWindowBottom) {
     const auto metrics = ClipSoul::PopupMetrics();
     const auto clip = ClipSoul::PopupListClipRectForHeight(metrics.width + 120, metrics.height + 80);
+    const auto footer = ClipSoul::PopupFooterRectForSize(metrics.width + 120, metrics.height + 80);
 
     REQUIRE_EQ(clip.left, 0.0f);
     REQUIRE_EQ(clip.top, ClipSoul::PopupListTop());
     REQUIRE_EQ(clip.right, static_cast<float>(metrics.width + 120));
-    REQUIRE_EQ(clip.bottom, static_cast<float>(metrics.height + 80 - 4));
-    REQUIRE(clip.top > ClipSoul::BuildPopupTabsLayout(false).divider.bottom);
+    REQUIRE_EQ(clip.bottom, footer.top);
+    REQUIRE_EQ(footer.bottom, static_cast<float>(metrics.height + 80));
+    REQUIRE(clip.top >= ClipSoul::BuildPopupTabsLayout(false).divider.bottom);
 }
 
 TEST_CASE(PopupExpandedCardHeightUsesMeasuredTextHeight) {
@@ -1197,10 +1188,11 @@ TEST_CASE(PopupExpandedCardHeightLeavesRoomForWrappedDetailText) {
 TEST_CASE(PopupCardExpandButtonUsesRightSideChevronSlot) {
     const auto card = ClipSoul::BuildPopupCardLayout(false, 168.0f);
 
-    REQUIRE(card.expand.Width() >= 22.0f);
-    REQUIRE(card.expand.Height() >= 22.0f);
+    REQUIRE(card.expand.Width() >= 20.0f);
+    REQUIRE(card.expand.Height() >= 18.0f);
     REQUIRE(card.expand.right <= card.card.right - 8.0f);
-    REQUIRE(card.expand.left > card.menu.left);
+    REQUIRE_EQ(card.expand.right, card.time.right);
+    REQUIRE(card.expand.top >= card.time.bottom);
     REQUIRE(!ClipSoul::RectsOverlap(card.expand, card.time));
 }
 
@@ -1220,33 +1212,32 @@ TEST_CASE(PopupWindowTintUsesOpaqueSolidSurface) {
     const auto palette = ClipSoul::ResolvePopupThemePalette(1, false);
 
     REQUIRE_EQ(palette.window_opacity, 1.0f);
-    REQUIRE_EQ(palette.window_tint, 0xF6F1E8);
+    REQUIRE_EQ(palette.window_tint, 0xF7F4EE);
 }
 
 TEST_CASE(PopupTabsUseSegmentedTextLayoutNotButtons) {
     const auto metrics = ClipSoul::PopupMetrics();
     const auto history = ClipSoul::BuildPopupTabsLayout(false);
     const auto favorites = ClipSoul::BuildPopupTabsLayout(true);
+    const auto toolbar = ClipSoul::BuildPopupToolbarLayout(false);
 
     RequireInsidePanel(history.history);
     RequireInsidePanel(history.favorites);
     REQUIRE(!ClipSoul::RectsOverlap(history.history, history.favorites));
-    REQUIRE(history.history.Width() >= 64.0f);
-    REQUIRE(history.favorites.Width() >= 70.0f);
-    REQUIRE(history.history.right == history.favorites.left);
-    const float group_center = (history.history.left + history.favorites.right) / 2.0f;
-    REQUIRE(std::abs(group_center - metrics.width / 2.0f) <= 1.0f);
+    REQUIRE(history.history.Width() >= 40.0f);
+    REQUIRE(history.favorites.Width() >= 40.0f);
+    REQUIRE_EQ(history.history.left, static_cast<float>(metrics.margin));
     REQUIRE(history.active_indicator.bottom <= history.divider.bottom);
-    REQUIRE(history.active_indicator.left > history.history.left);
-    REQUIRE(history.active_indicator.right < history.history.right);
-    REQUIRE(history.divider.left == static_cast<float>(metrics.margin));
-    REQUIRE(history.divider.right == static_cast<float>(metrics.width - metrics.margin));
+    REQUIRE_EQ(history.active_indicator.left, history.history.left);
+    REQUIRE_EQ(history.active_indicator.right, history.history.right);
+    REQUIRE_EQ(history.divider.left, 0.0f);
+    REQUIRE_EQ(history.divider.right, static_cast<float>(metrics.width));
     REQUIRE(favorites.active_indicator.left > history.active_indicator.left);
     RequireInsidePanel(favorites.favorite_group);
     REQUIRE(!ClipSoul::RectsOverlap(favorites.favorite_group, favorites.favorites));
     REQUIRE(!ClipSoul::RectsOverlap(favorites.favorite_group, favorites.add_favorite_phrase));
     REQUIRE(favorites.add_favorite_phrase.Width() >= 24.0f);
-    REQUIRE(favorites.add_favorite_phrase.right <= static_cast<float>(metrics.width - metrics.margin));
+    REQUIRE(favorites.add_favorite_phrase.right <= toolbar.filter.left);
     REQUIRE(!ClipSoul::RectsOverlap(favorites.add_favorite_phrase, favorites.favorites));
 }
 
@@ -1274,11 +1265,13 @@ TEST_CASE(PopupTabIndicatorInterpolatesBetweenActiveTabs) {
 TEST_CASE(PopupFavoriteGroupMenuUsesInWindowPopoverLayout) {
     const auto metrics = ClipSoul::PopupMetrics();
     const auto layout = ClipSoul::BuildPopupFavoriteGroupMenuLayout(3);
+    const auto tabs = ClipSoul::BuildPopupTabsLayout(true);
 
-    RequireInsidePanel(layout.panel);
+    REQUIRE(layout.panel.left >= 12.0f);
+    REQUIRE(layout.panel.right <= static_cast<float>(metrics.width - 12));
     REQUIRE(layout.panel.Width() >= 170.0f);
-    REQUIRE(layout.panel.right == static_cast<float>(metrics.width - metrics.margin));
-    REQUIRE(layout.panel.top > ClipSoul::PopupTabsTop());
+    REQUIRE(layout.panel.left <= tabs.favorite_group.left);
+    REQUIRE(layout.panel.top > tabs.favorite_group.bottom);
     REQUIRE(layout.panel.bottom < ClipSoul::PopupListTop() + 220.0f);
     REQUIRE(layout.all_favorites.top > layout.panel.top);
     REQUIRE(layout.first_divider.top > layout.all_favorites.bottom);
@@ -1354,32 +1347,50 @@ TEST_CASE(PopupFavoriteGroupMenuHitTestFindsRowsAndCreateAction) {
 }
 
 TEST_CASE(PopupFilterPopoverContainsDateCalendarAndReset) {
+    const auto metrics = ClipSoul::PopupMetrics();
     const auto layout = ClipSoul::BuildPopupFilterLayout();
+    const auto compact = ClipSoul::BuildPopupFilterLayout(false, 5);
 
-    RequireInsidePanel(layout.panel);
+    REQUIRE(layout.panel.left >= 12.0f);
+    REQUIRE(layout.panel.right <= static_cast<float>(metrics.width - 12));
     REQUIRE(layout.panel.Width() >= 300.0f);
-    REQUIRE(layout.panel.Height() <= 396.0f);
-    REQUIRE(layout.panel.bottom <= static_cast<float>(ClipSoul::PopupMetrics().height - 12));
-    REQUIRE(layout.type_section.top > layout.panel.top);
-    REQUIRE(layout.text_chip.top > layout.type_section.top);
+    REQUIRE(layout.panel.bottom <= ClipSoul::PopupListBottomForHeight(metrics.height));
+    // 统一左右边线：类型条、时间条、日历、底部分隔线都贴同一内容边线
+    REQUIRE_EQ(layout.type_bar.left, layout.panel.left + 14.0f);
+    REQUIRE_EQ(layout.type_bar.right, layout.panel.right - 14.0f);
+    REQUIRE_EQ(layout.preset_bar.left, layout.type_bar.left);
+    REQUIRE_EQ(layout.preset_bar.right, layout.type_bar.right);
+    REQUIRE_EQ(layout.calendar_grid.left, layout.type_bar.left);
+    REQUIRE_EQ(layout.calendar_grid.right, layout.type_bar.right);
+    REQUIRE_EQ(layout.footer_divider.left, layout.type_bar.left);
+    REQUIRE_EQ(layout.done.right, layout.type_bar.right);
+    // 类型四等分
     REQUIRE(layout.image_chip.left > layout.text_chip.right);
-    REQUIRE(layout.file_chip.top > layout.text_chip.bottom);
+    REQUIRE(layout.file_chip.left > layout.image_chip.right);
     REQUIRE(layout.link_chip.left > layout.file_chip.right);
-    RequireNear(layout.date_card.top - layout.file_chip.bottom, 10.0f);
-    REQUIRE(layout.start_date.top > layout.date_card.top);
+    RequireNear(layout.text_chip.Width(), layout.link_chip.Width());
+    REQUIRE_EQ(layout.text_chip.top, layout.link_chip.top);
+    // 五段时间预设
+    for (int i = 1; i < 5; ++i) {
+        REQUIRE(layout.presets[i].left > layout.presets[i - 1].right);
+        RequireNear(layout.presets[i].Width(), layout.presets[0].Width());
+    }
+    REQUIRE(layout.preset_bar.top > layout.type_bar.bottom);
+    // 起止日期内嵌在"时间"标签行右侧
     REQUIRE(layout.end_date.left > layout.start_date.right);
-    RequireNear(layout.calendar.top - layout.date_card.bottom, 10.0f);
-    REQUIRE(layout.calendar.Height() >= 150.0f);
-    REQUIRE(layout.reset.top > layout.calendar.bottom);
-    REQUIRE(layout.done.left > layout.reset.right);
-    REQUIRE(layout.done.bottom <= layout.panel.bottom);
-
-    const auto reset_visual = ClipSoul::PopupFilterResetVisualRect(layout);
-    REQUIRE(reset_visual.left == layout.reset.left);
-    REQUIRE(reset_visual.Width() <= 52.0f);
-    REQUIRE(reset_visual.Height() >= 20.0f);
-    REQUIRE(reset_visual.top >= layout.calendar.bottom);
-    REQUIRE(reset_visual.right < layout.done.left);
+    REQUIRE(layout.start_date.bottom <= layout.preset_bar.top);
+    // 日历仅自定义时展开
+    REQUIRE(layout.calendar.top > layout.preset_bar.bottom);
+    REQUIRE(layout.footer_divider.top >= layout.calendar_grid.bottom);
+    REQUIRE(compact.panel.Height() < layout.panel.Height() - 100.0f);
+    REQUIRE(!compact.custom_range);
+    REQUIRE(ClipSoul::BuildPopupCalendarCells(compact, 2026, 5).empty());
+    // 重置在头部，完成在底部
+    REQUIRE(layout.reset.bottom < layout.type_bar.top);
+    REQUIRE(layout.reset.right <= layout.close.left);
+    REQUIRE(layout.done.top > layout.footer_divider.bottom);
+    REQUIRE(layout.count_text.right <= layout.done.left);
+    REQUIRE_EQ(ClipSoul::PopupFilterResetVisualRect(layout).left, layout.reset.left);
 }
 
 TEST_CASE(PopupCalendarHitTestUsesRealMonthGrid) {
@@ -1410,7 +1421,7 @@ TEST_CASE(PopupCalendarDateCellsLeaveRoomForSelectionDots) {
     for (size_t index = 7; index < cells.size(); ++index) {
         REQUIRE(cells[index].rect.top - cells[index - 7].rect.top >= 16.0f);
     }
-    REQUIRE(cells.back().rect.bottom <= layout.calendar.bottom - 12.0f);
+    REQUIRE(cells.back().rect.bottom <= layout.calendar.bottom - 6.0f);
 }
 
 TEST_CASE(PopupCalendarDateCellsAreWideEnoughForCenteredNumbers) {
