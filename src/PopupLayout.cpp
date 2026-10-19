@@ -1973,6 +1973,28 @@ bool ShouldHidePopupAfterOutsideClick(bool pinned_open, bool prompt_open, bool m
            !transient_hide_suppressed && new_mouse_press && !click_inside_popup;
 }
 
+bool PopupShouldHideWhenForegroundChanges(bool pinned_open, bool prompt_open, bool moving_window, bool visible,
+                                          bool transient_hide_suppressed, HWND popup, HWND baseline_foreground,
+                                          HWND foreground) {
+    if (!visible || pinned_open || prompt_open || moving_window || transient_hide_suppressed) {
+        return false;
+    }
+    // 前台落在弹窗自己或它的子窗口上（点搜索框时顶层父窗口会被激活）：这是「还在弹窗里」，
+    // 不能算离开。
+    if (foreground && popup && (foreground == popup || IsChild(popup, foreground))) {
+        return false;
+    }
+    // 没有基准（呼出时前台未知）就不做判断，避免误收。
+    if (!baseline_foreground) {
+        return false;
+    }
+    // 前台没变，或者变成了空（切换桌面/锁屏的瞬间），都不算离开。
+    if (!foreground || foreground == baseline_foreground) {
+        return false;
+    }
+    return true;
+}
+
 bool ShouldHidePopupAfterInactive(bool pinned_open, bool prompt_open, bool moving_window,
                                   bool transient_hide_suppressed, bool visible, bool next_active_inside_popup,
                                   bool shell_surface_raise_active) {

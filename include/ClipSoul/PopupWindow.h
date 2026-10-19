@@ -240,6 +240,10 @@ private:
     static PopupMotionKind MotionKindForTarget(PopupMotionTarget target);
     void FinishMotionIfSettled();
     void DebugLog(std::wstring_view message) const;
+    // Foreground window captured when the popup was shown. The popup is WS_EX_NOACTIVATE and
+    // never becomes foreground itself, so "foreground changed away from this" is how we detect
+    // that the user clicked outside (works for elevated windows too).
+    HWND popup_foreground_at_show_ = nullptr;
     bool DebugEnabled() const { return static_cast<bool>(debug_logger_); }
 
     static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam);

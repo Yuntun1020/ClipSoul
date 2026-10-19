@@ -2775,3 +2775,36 @@ TEST_CASE(PopupDefaultSelectionAndPasteAgree) {
     const auto first_paste = ClipSoul::PopupContinuousPasteSelectionStep(1 + 4, default_index);
     REQUIRE_EQ(first_paste.paste_index, default_index);
 }
+
+TEST_CASE(PopupHidesWhenForegroundLeavesBaseline) {
+    // 弹窗是 WS_EX_NOACTIVATE，自身永远不会成为前台：只能拿"呼出瞬间的前台窗口"作基准，
+    // 一旦前台换成别的窗口就收起。这条判据对提权窗口（任务管理器）同样成立，
+    // 不依赖鼠标状态或低级输入钩子。
+    const auto should_hide = [](bool pinned, bool prompt, bool moving, bool visible, bool suppressed,
+                                std::uintptr_t baseline, std::uintptr_t foreground) {
+        return ClipSoul::PopupShouldHideWhenForegroundChanges(
+            pinned, prompt, moving, visible, suppressed, reinterpret_cast<HWND>(0x9999),
+            reinterpret_cast<HWND>(baseline), reinterpret_cast<HWND>(foreground));
+    };
+
+    // 正常情况：前台从微信换成任务管理器 -> 收起。
+    REQUIRE(should_hide(false, false, false, true, false, 0x1111, 0x2222));
+
+    // 前台没变 -> 不收起（用户还在原窗口里打字）。
+    REQUIRE(!should_hide(false, false, false, true, false, 0x1111, 0x1111));
+
+    // 固定窗口（pinned）时不自动收起。
+    REQUIRE(!should_hide(true, false, false, true, false, 0x1111, 0x2222));
+
+    // 有对话框、正在拖动/缩放窗口时不收起。
+    REQUIRE(!should_hide(false, true, false, true, false, 0x1111, 0x2222));
+    REQUIRE(!should_hide(false, false, true, true, false, 0x1111, 0x2222));
+
+    // 粘贴后的短暂抑制期内不收起。
+    REQUIRE(!should_hide(false, false, false, true, true, 0x1111, 0x2222));
+
+    // 弹窗不可见、没有基准前台、前台为空（切换桌面瞬间）都不收起。
+    REQUIRE(!should_hide(false, false, false, false, false, 0x1111, 0x2222));
+    REQUIRE(!should_hide(false, false, false, true, false, 0, 0x2222));
+    REQUIRE(!should_hide(false, false, false, true, false, 0x1111, 0));
+}

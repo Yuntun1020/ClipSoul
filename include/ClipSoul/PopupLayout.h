@@ -632,6 +632,13 @@ bool ShouldHidePopupAfterContinuousPaste(bool pinned_open);
 bool ShouldHidePopupAfterOutsideClick(bool pinned_open, bool prompt_open, bool moving_window,
                                       bool mouse_down_started_inside_popup, bool transient_hide_suppressed,
                                       bool visible, bool new_mouse_press, bool click_inside_popup);
+// The popup is WS_EX_NOACTIVATE, so it never receives WM_ACTIVATE/WM_ACTIVATEAPP. Detect
+// "user clicked another window" by watching the foreground window instead. This also works
+// when the new foreground belongs to an elevated process (Task Manager), where a low-level
+// input hook or mouse-state polling can be unreliable.
+bool PopupShouldHideWhenForegroundChanges(bool pinned_open, bool prompt_open, bool moving_window, bool visible,
+                                          bool transient_hide_suppressed, HWND popup, HWND baseline_foreground,
+                                          HWND foreground);
 bool ShouldHidePopupAfterInactive(bool pinned_open, bool prompt_open, bool moving_window,
                                   bool transient_hide_suppressed, bool visible, bool next_active_inside_popup,
                                   bool shell_surface_raise_active = false);

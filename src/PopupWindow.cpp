@@ -642,6 +642,12 @@ void PopupWindow::Show(HWND target) {
     if (shell_topmost_raise_ && target && IsWindow(target)) {
         SetWindowLongPtrW(hwnd_, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(target));
     }
+    // 记下呼出瞬间的前台窗口：弹窗是 NOACTIVATE，不会自己变成前台，
+    // 只能靠「它有没有被别人换掉」来判断用户是否点到了外面。
+    popup_foreground_at_show_ = GetForegroundWindow();
+    if (popup_foreground_at_show_ == hwnd_) {
+        popup_foreground_at_show_ = nullptr;
+    }
     ReloadItems();
     // 每次呼出都从「最近」分组的第一条开始高亮：置顶区只是快捷区，不参与默认选中，
     // 也不恢复上一次停在哪条旧记录上（那会让回车粘贴到一条很旧的记录）。
@@ -5140,22 +5146,44 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
             return 0;
         }
         if (wparam == kOutsideClickTimer) {
+            // 弹窗是 WS_EX_NOACTIVATE：点击别的窗口时它收不到 WM_ACTIVATE / WM_ACTIVATEAPP，
+            // 所以「点到外面就收起」只能靠这里轮询。两条判据都要有：
+            //   1) 左键在弹窗矩形之外被按下（普通程序、桌面、任务栏都能覆盖）
+            //   2) 前台窗口换成了别的窗口（提权窗口如任务管理器不让普通进程读到鼠标事件的
+            //      某些状态，但前台窗口变化依然可靠）
             const bool left_button_down = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+
+            // 弹窗是 NOACTIVATE，自身永远不会成为前台：只能记住「呼出那一刻的前台窗口」，
+            // 之后它一旦变成别的窗口，就说明用户点到了弹窗之外。
+            // 提权窗口（任务管理器）作为新前台时，鼠标状态相关的判据不一定可靠，
+            // 但「前台窗口变了」这个信号依然准确。
+            const HWND foreground = GetForegroundWindow();
+            const bool foreground_left = PopupShouldHideWhenForegroundChanges(
+                pinned_open_, prompt_open_, moving_window_, IsVisible(), IsTransientHideSuppressed(), hwnd_,
+                popup_foreground_at_show_, foreground);
+            if (foreground_left) {
+                Hide(L"outside-foreground");
+                return 0;
+            }
+
             if (left_button_down) {
-                if (mouse_down_started_inside_popup_ || left_button_was_down_) {
-                    left_button_was_down_ = true;
-                    return 0;
-                }
+                // 只在「这一次按下」的第一帧判断。之前用 mouse_down_started_inside_popup_ 直接
+                // return，只要那一次点击是在弹窗内开始的、而抬起没走完（比如被右键菜单或子控件
+                // 吃掉），这个标志就会一直为真，之后点外面再也不收起。
                 POINT cursor{};
                 GetCursorPos(&cursor);
                 const bool inside_popup = ScreenPointInsideWindow(hwnd_, cursor);
-                const bool new_mouse_press = !left_button_was_down_;
-                if (ShouldHidePopupAfterOutsideClick(pinned_open_, prompt_open_, moving_window_,
-                                                     mouse_down_started_inside_popup_, IsTransientHideSuppressed(),
-                                                     IsVisible(), new_mouse_press, inside_popup)) {
-                    Hide(L"outside-click");
+                if (!left_button_was_down_) {
+                    // 新的一次按下：位置在弹窗外就直接收起。
+                    if (ShouldHidePopupAfterOutsideClick(pinned_open_, prompt_open_, moving_window_,
+                                                         mouse_down_started_inside_popup_ && inside_popup,
+                                                         IsTransientHideSuppressed(), IsVisible(), true,
+                                                         inside_popup)) {
+                        Hide(L"outside-click");
+                    }
                 }
             } else {
+                // 左键已松开：弹窗内的按下状态到这里一定结束，避免标志残留。
                 mouse_down_started_inside_popup_ = false;
             }
             left_button_was_down_ = left_button_down;
