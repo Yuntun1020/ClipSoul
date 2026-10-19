@@ -151,9 +151,32 @@ void ActivatePopupWindow(HWND hwnd) {
     if (!hwnd) {
         return;
     }
+    // 原来为了让 SetForegroundWindow 一定成功，会先 AttachThreadInput 当前线程和前台线程。
+    // 但热键是「Alt 还按着」的时候处理的（钩子把 Alt 的按下吞掉了），此时把两个进程的输入
+    // 队列接在一起，会让对方进程把 Alt 记成一直按住 —— 游戏（永劫无间）对修饰键的状态跟踪
+    // 比普通程序严格，于是呼出一次剪贴板后 Alt 就卡在长按，必须再按一次 Alt 才解锁。
+    //
+    // 现在先直接 SetForegroundWindow：ClipSoul 刚收到用户输入（热键），按 Windows 的前台
+    // 激活规则本来就允许它把自己的窗口提到前台，不需要借别人的输入队列。
+    BringWindowToTop(hwnd);
+    const bool activated = SetForegroundWindow(hwnd) != FALSE;
+    SetActiveWindow(hwnd);
+    SetFocus(hwnd);
+    if (activated) {
+        return;
+    }
+    // 兜底：前台锁（游戏常设）不让抢时，只有修饰键没按着才允许借输入队列，
+    // 避免又回到「Alt 卡长按」那个问题。
+    const bool modifier_held = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0 ||
+                               (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0 ||
+                               (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0 ||
+                               (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0;
+    if (!PopupActivationMayAttachThreadInput(modifier_held)) {
+        SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        return;
+    }
     const DWORD current_thread = GetCurrentThreadId();
-    DWORD foreground_process = 0;
-    const DWORD foreground_thread = GetWindowThreadProcessId(GetForegroundWindow(), &foreground_process);
+    const DWORD foreground_thread = GetWindowThreadProcessId(GetForegroundWindow(), nullptr);
     const bool attach = foreground_thread != 0 && foreground_thread != current_thread;
     if (attach) {
         AttachThreadInput(current_thread, foreground_thread, TRUE);

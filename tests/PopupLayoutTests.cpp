@@ -2811,3 +2811,11 @@ TEST_CASE(PopupHidesWhenForegroundLeavesBaseline) {
     REQUIRE(!should_hide(false, false, false, true, false, 0, 0x2222));
     REQUIRE(!should_hide(false, false, false, true, false, 0x1111, 0));
 }
+
+TEST_CASE(PopupActivationAvoidsAttachThreadInputWhileModifierHeld) {
+    // 永劫无间里呼出一次剪贴板后 Alt 卡长按：热键在 Alt 仍按住时处理，此时若
+    // AttachThreadInput 把两个进程的输入队列并在一起，对方会把 Alt 记成一直按住。
+    // 因此任何有可能按住修饰键的时机都不允许借输入队列。
+    REQUIRE(!ClipSoul::PopupActivationMayAttachThreadInput(true));
+    REQUIRE(ClipSoul::PopupActivationMayAttachThreadInput(false));
+}

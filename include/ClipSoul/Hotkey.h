@@ -20,8 +20,9 @@ enum class OpenPopupHotkeyAction {
 
 enum class AltReleaseAction {
     PassThrough,
-    Swallow,
-    SwallowAndClearBuffered,
+    // 只丢掉一次「孤立」的 Alt 抬起（它的按下已经被我们吐掉了，放行会变成一次凭空出现的
+    // Alt 轻按）。按键状态本身仍要清掉，否则下一步会误判成「已回放」。
+    SwallowAndClearAll,
     ReplayBufferedAltUp,
 };
 

@@ -989,6 +989,13 @@ bool PopupShouldActivateWhenShown(bool keyboard_invocation) {
     return true;
 }
 
+bool PopupActivationMayAttachThreadInput(bool modifier_held) {
+    // 有修饰键按着时绝不借用输入队列。AttachThreadInput 会把两个进程的键盘状态并到一起，
+    // 而此时 Alt 的按下已经被钩子吞掉（对方进程没收到），对方仍可能因为共用队列把修饰键
+    // 记成一直按住。游戏（永劫无间）对修饰键状态跟踪很严，表现就是呼出剪贴板后 Alt 卡长按。
+    return !modifier_held;
+}
+
 bool PopupShouldActivateForShellSurface(bool shell_surface) {
     return shell_surface;
 }

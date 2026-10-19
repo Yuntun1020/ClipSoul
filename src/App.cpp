@@ -467,12 +467,10 @@ LRESULT App::HandleKeyboardHook(int code, WPARAM wparam, LPARAM lparam) {
     if (wparam == WM_KEYUP || wparam == WM_SYSKEYUP) {
         switch (HotkeyAltReleaseActionFor(swallow_alt_release_, buffered_alt_down_, replayed_alt_down_,
                                           event->vkCode)) {
-        case AltReleaseAction::SwallowAndClearBuffered:
+        case AltReleaseAction::SwallowAndClearAll:
             swallow_alt_release_ = false;
             buffered_alt_down_ = false;
-            return 1;
-        case AltReleaseAction::Swallow:
-            swallow_alt_release_ = false;
+            replayed_alt_down_ = false;
             return 1;
         case AltReleaseAction::ReplayBufferedAltUp:
             ReplayBufferedAltUp();

@@ -115,14 +115,11 @@ AltReleaseAction HotkeyAltReleaseActionFor(bool swallow_alt_release, bool buffer
     if (!HotkeyIsAltKey(vk)) {
         return AltReleaseAction::PassThrough;
     }
-    if (swallow_alt_release && buffered_alt_down) {
-        return AltReleaseAction::SwallowAndClearBuffered;
-    }
-    if (swallow_alt_release) {
-        return AltReleaseAction::Swallow;
-    }
-    if (buffered_alt_down) {
-        return AltReleaseAction::SwallowAndClearBuffered;
+    // 只要是「被我们吞掉过按下」的 Alt，它的抬起就必须丢掉：放行的话目标程序会收到一次
+    // 没有配对按下的 Alt 抬起，反而把修饰键状态搞乱。两个缓冲标志无条件清掉，
+    // 否则下一次按键状态会错位。
+    if (swallow_alt_release || buffered_alt_down) {
+        return AltReleaseAction::SwallowAndClearAll;
     }
     if (replayed_alt_down) {
         return AltReleaseAction::ReplayBufferedAltUp;

@@ -105,14 +105,17 @@ TEST_CASE(HotkeyClassifiesBareAltChords) {
     REQUIRE(ClipSoul::HotkeyShouldSwallowAltReleaseAfterHandledHotkey(true, VK_LMENU));
     REQUIRE(!ClipSoul::HotkeyShouldSwallowAltReleaseAfterHandledHotkey(false, VK_MENU));
     REQUIRE(!ClipSoul::HotkeyShouldSwallowAltReleaseAfterHandledHotkey(true, 'C'));
+    // 只要按下的 Alt 被吞过，它的抬起就必须丢掉（否则目标程序会收到没配对的抬起），
+    // 并且两个缓冲标志都要清干净 —— 残留会让下一次按键状态错位。
     REQUIRE_EQ(ClipSoul::HotkeyAltReleaseActionFor(true, true, false, VK_MENU),
-               ClipSoul::AltReleaseAction::SwallowAndClearBuffered);
+               ClipSoul::AltReleaseAction::SwallowAndClearAll);
     REQUIRE_EQ(ClipSoul::HotkeyAltReleaseActionFor(true, false, false, VK_MENU),
-               ClipSoul::AltReleaseAction::Swallow);
+               ClipSoul::AltReleaseAction::SwallowAndClearAll);
     REQUIRE_EQ(ClipSoul::HotkeyAltReleaseActionFor(false, true, false, VK_MENU),
-               ClipSoul::AltReleaseAction::SwallowAndClearBuffered);
+               ClipSoul::AltReleaseAction::SwallowAndClearAll);
     REQUIRE_EQ(ClipSoul::HotkeyAltReleaseActionFor(false, false, true, VK_MENU),
                ClipSoul::AltReleaseAction::ReplayBufferedAltUp);
+    // 与 Alt 无关的按键不受影响。
     REQUIRE_EQ(ClipSoul::HotkeyAltReleaseActionFor(true, true, false, 'V'),
                ClipSoul::AltReleaseAction::PassThrough);
 
