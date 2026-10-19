@@ -146,7 +146,16 @@ bool HotkeyHookShouldBypassSettingsWindow(HWND foreground, HWND settings_window,
 }
 
 bool HotkeyShouldRegisterSystemHotkeys(bool keyboard_hook_installed) {
-    return !keyboard_hook_installed;
+    // 两者必须同时存在，不能二选一。
+    //
+    // 低层键盘钩子（WH_KEYBOARD_LL）受 UIPI 限制：当后台是提权窗口（任务管理器、管理员
+    // PowerShell、以管理员运行的各种工具）时，普通权限进程根本收不到按键 —— 热键整体失灵。
+    // RegisterHotKey 由 user32 在系统层匹配，不受 UIPI 影响，这种场景下仍然可用。
+    //
+    // 反过来，钩子能拿到更准确的前台窗口（用来判断粘贴目标、屏蔽重复触发），所以也要保留。
+    // 同时启用时用 suppress_*_hotkey_count_ 吃掉钩子已经处理过的那次 WM_HOTKEY 回声。
+    (void)keyboard_hook_installed;
+    return true;
 }
 
 bool HotkeyHookShouldSuppressRegisteredHotkeyEcho(bool handled_by_hook) {

@@ -133,7 +133,9 @@ TEST_CASE(HotkeyClassifiesBareAltChords) {
                                                             settings_window, false));
     REQUIRE(!ClipSoul::HotkeyHookShouldBypassSettingsWindow(settings_window, nullptr, true));
 
-    REQUIRE(!ClipSoul::HotkeyShouldRegisterSystemHotkeys(true));
+    // 系统热键必须始终注册：提权窗口（任务管理器）在前台时低层键盘钩子收不到按键，
+    // 只有 RegisterHotKey 还能用。钩子保留是为了拿准确的前台窗口。
+    REQUIRE(ClipSoul::HotkeyShouldRegisterSystemHotkeys(true));
     REQUIRE(ClipSoul::HotkeyShouldRegisterSystemHotkeys(false));
     REQUIRE(ClipSoul::HotkeyHookShouldSuppressRegisteredHotkeyEcho(true));
     REQUIRE(!ClipSoul::HotkeyHookShouldSuppressRegisteredHotkeyEcho(false));

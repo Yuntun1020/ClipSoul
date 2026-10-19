@@ -47,6 +47,10 @@ inline constexpr ULONG_PTR kClipSoulInjectedInputExtraInfo = static_cast<ULONG_P
 bool HotkeyHookShouldIgnoreInjectedEvent(bool injected, ULONG_PTR extra_info);
 bool HotkeyHookShouldBypassSettingsForeground(HWND foreground, HWND settings_window);
 bool HotkeyHookShouldBypassSettingsWindow(HWND foreground, HWND settings_window, bool settings_window_visible);
+// Always true: the low-level keyboard hook cannot see keys while an elevated window
+// (Task Manager, admin console...) is in the foreground (UIPI), so the system hotkey
+// registration must stay active as the reliable path. The hook is still kept for its
+// richer foreground-window information.
 bool HotkeyShouldRegisterSystemHotkeys(bool keyboard_hook_installed);
 bool HotkeyHookShouldSuppressRegisteredHotkeyEcho(bool handled_by_hook);
 bool HotkeyMatchesState(unsigned configured_modifiers, unsigned configured_vk, bool ctrl_down, bool alt_down,
