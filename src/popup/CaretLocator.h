@@ -22,6 +22,9 @@ enum class TextAvoidSource {
     AutomationTextSelection,
     AutomationTerminalVisibleLine,
     AutomationElementRect,
+    // Qt 自绘输入框（微信 mmui::ChatInputField 等）：不暴露 Text/Value pattern、
+    // 也不上报 HasKeyboardFocus，只能靠控件自身的矩形推断插入符所在行。
+    AutomationInputFieldRect,
 };
 
 struct FocusedTextContext {
@@ -40,6 +43,9 @@ FocusedTextContext GetFocusedTextContext();
 bool FocusedTextContextAllowsCaret(const FocusedTextContext& context, RECT avoid, UINT dpi);
 bool TryGetAutomationCaretAvoidRect(UINT dpi, RECT& avoid, TextAvoidSource& source);
 bool TryGetAutomationAvoidRectFromWindow(HWND target, UINT dpi, RECT& avoid, TextAvoidSource& source);
+// Walks the target's UIA subtree for a focusable edit-like control that reports no text pattern
+// (Qt/QML self-drawn inputs, e.g. WeChat's mmui::ChatInputField) and returns its rectangle.
+bool TryGetAutomationInputFieldRect(HWND target, UINT dpi, RECT& avoid, TextAvoidSource& source);
 // Expensive (walks the UIA tree); only call when debug logging is enabled.
 std::wstring AutomationFocusedElementDebugInfo();
 

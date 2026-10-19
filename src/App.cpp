@@ -372,8 +372,12 @@ void App::OnContinuousPasteHotkey(HWND target) {
         return;
     }
 
+    // 这里的列表必须和弹窗里看到的是同一份，否则「按一下粘贴的是哪条」会和对不齐：
+    // PopupWindow::BuildQuery() 用的是 limit=max(60, history_limit) 且 include_favorites=true，
+    // 早先这里用的是 limit=history_limit + include_favorites=false，两边的下标/条目集合不同。
     HistoryQuery query;
-    query.limit = settings_.history_limit;
+    query.limit = std::max(60, settings_.history_limit);
+    query.include_favorites = true;
     const auto items = store_.Query(query);
     const auto selected_id = popup_ ? popup_->SelectedItemId() : std::nullopt;
     if (const auto item = continuous_paste_.NextFromSelection(items, selected_id)) {

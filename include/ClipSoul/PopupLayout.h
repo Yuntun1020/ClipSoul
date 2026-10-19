@@ -617,6 +617,9 @@ bool PopupTargetRequiresExplicitTextInputFocus(std::wstring_view class_name, std
 bool PopupShouldUseTextAvoidForTarget(bool has_text_avoid, std::wstring_view class_name, std::wstring_view title);
 bool PopupTargetCanUseConsoleAnchor(std::wstring_view class_name);
 POINT PopupWindowRectFallback(RECT target, SIZE size, RECT work, unsigned dpi);
+// Fallback when no caret could be located: keep the popup inside the target window
+// (bottom-right of that window) instead of docking to the screen corner.
+POINT PopupTargetWindowFallback(RECT target, SIZE size, RECT work, unsigned dpi);
 POINT PopupTargetCenterFallback(RECT target, SIZE size, RECT work, unsigned dpi);
 POINT PopupConsoleCellAnchor(POINT client_origin_screen, COORD cell, SMALL_RECT viewport, COORD font_size);
 COORD PopupConsoleAnchorCell(CONSOLE_SELECTION_INFO selection, COORD cursor_position);

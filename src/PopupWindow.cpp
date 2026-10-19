@@ -1253,24 +1253,30 @@ void PopupWindow::MoveSelection(int delta) {
 }
 
 void PopupWindow::AdvanceSelectionAfterContinuousPaste() {
-    if(!IsVisible())return;
+    // 这里不能因为窗口不可见就跳过推进：连续粘贴的第一次粘贴会先把弹窗隐藏掉
+    // （ShouldHidePopupAfterPaste），如果此处 early-return，selected_index_ 就永远停在
+    // 原来那一行 —— 表现就是「每次粘贴的都是同一条」，以及「高亮在 A、粘出来的是 B」。
     if (items_.empty()) {
         return;
     }
+    // 连续粘贴后高亮下移一行，立刻重绘：用户按第二下之前看到的就必须是下一条。
     selected_index_ =
         PopupContinuousPasteSelectionStep(static_cast<int>(items_.size()), selected_index_).next_selected_index;
     scroll_offset_ = ScrollOffsetToRevealSelection(scroll_offset_, selected_index_);
     KickSlipAnimation();
     InvalidateRect(hwnd_, nullptr, FALSE);
+    // 连续粘贴的间隔只有几十毫秒：必须立刻把高亮推上屏，否则用户看到的下一条是滞后的。
+    UpdateWindow(hwnd_);
 }
 
 bool PopupWindow::PasteSelectedForContinuousPaste() {
     if (items_.empty()) {
         return false;
     }
-    const auto step = PopupContinuousPasteSelectionStep(static_cast<int>(items_.size()), selected_index_);
-    selected_index_ = step.paste_index;
-    const auto item = items_[step.paste_index];
+    // 连续粘贴粘贴的永远是「当前高亮」那一条，和回车粘贴走同一套索引，
+    // 不能各自算一份，否则高亮和实际粘贴的内容会差一条。
+    selected_index_ = ClampPopupSelectedIndex(static_cast<int>(items_.size()), selected_index_);
+    const auto item = items_[selected_index_];
     auto load_full = [this](int64_t id) { return store_.Get(id); };
     if (!paste_controller_.RestoreToClipboard(item, hwnd_, load_full)) {
         return false;
@@ -1278,6 +1284,8 @@ bool PopupWindow::PasteSelectedForContinuousPaste() {
     BeginTransientHideSuppression();
     paste_controller_.SendPaste(paste_target_, PasteShortcutOptions{false});
     EndTransientHideSuppressionSoon();
+    // 粘贴完立刻把高亮推到下一条：这样「下一次按下去会粘贴哪一条」和屏幕上的高亮
+    // 永远是同一条。少了这一步就会一直重复粘贴同一条，高亮也不再跟着走。
     AdvanceSelectionAfterContinuousPaste();
     stamp_item_id_ = item.id;
     stamp_start_ms_ = static_cast<double>(GetTickCount64());
@@ -1385,6 +1393,9 @@ void PopupWindow::CloseFavoriteGroupDeleteConfirmWithMotion() {
 
 void PopupWindow::ActivateSelection() {
     if (items_.empty()) return;
+    // selected_index_ 是「屏幕上高亮的那一条」的唯一真相。任何让它越界或指向正在移除的行的
+    // 情况都必须在这里先纠正，否则会出现「高亮第 1 条、粘贴第 2 条」这种错位。
+    selected_index_ = ClampPopupSelectedIndex(static_cast<int>(items_.size()), selected_index_);
     const auto& item = items_[selected_index_];
     if(row_transitions_.contains(item.id) && row_transitions_.at(item.id).removing)return;
     if (multi_select_) {
@@ -1792,6 +1803,30 @@ POINT PopupWindow::ResolvePopupPosition(HWND target, SIZE size, RECT monitor, RE
         DebugLog(position_log);
         return position;
     };
+    // 目标窗口矩形：下面每条「插入符 / 焦点元素」路径都必须落在这个范围里。
+    // 全局焦点元素可能属于别的程序（弹窗抢焦点、用户刚切过窗口），拿它的矩形定位会让
+    // 弹窗飞到不相干的位置。
+    RECT target_window{};
+    const bool has_target_window =
+        target && IsWindow(target) && GetWindowRect(target, &target_window) && target_window.right > target_window.left;
+    const auto avoid_within_target = [&](RECT rect) {
+        if (!has_target_window) {
+            return true;
+        }
+        // 「中心在窗口内」不够严：屏幕上另一个程序的高个子控件，中心也可能落在目标窗口范围内。
+        // 这里改成要求 avoid 有足够比例的面积压在目标窗口内 —— 真正的输入框一定满足，
+        // 别的程序残留的矩形一定不满足。
+        const long ix = std::max<long>(0, std::min<long>(rect.right, target_window.right) -
+                                              std::max<long>(rect.left, target_window.left));
+        const long iy = std::max<long>(0, std::min<long>(rect.bottom, target_window.bottom) -
+                                              std::max<long>(rect.top, target_window.top));
+        const long long area = static_cast<long long>(rect.right - rect.left) * (rect.bottom - rect.top);
+        if (area <= 0) {
+            return false;
+        }
+        const long long overlap = static_cast<long long>(ix) * iy;
+        return overlap * 2 >= area; // 至少一半面积在目标窗口里
+    };
     const FocusedTextContext focused_text = GetFocusedTextContext();
     const auto trusted_text_position = [&](const wchar_t* path, TextAvoidSource source, RECT resolved_avoid,
                                            bool require_focused_text_gate) -> std::optional<POINT> {
@@ -1842,7 +1877,7 @@ POINT PopupWindow::ResolvePopupPosition(HWND target, SIZE size, RECT monitor, RE
         visual_caret_status != L"visual-terminal-caret-not-java-window") {
         DebugLog(L"popup position: " + visual_caret_status);
     }
-    if (TryGetAutomationCaretAvoidRect(dpi, avoid, avoid_source) &&
+    if (TryGetAutomationCaretAvoidRect(dpi, avoid, avoid_source) && avoid_within_target(avoid) &&
         PopupShouldUseTextAvoidForTarget(true, target_class, target_title)) {
         return text_position(L"automation focus avoid", avoid_source, avoid);
     }
@@ -1850,12 +1885,28 @@ POINT PopupWindow::ResolvePopupPosition(HWND target, SIZE size, RECT monitor, RE
         PopupShouldUseTextAvoidForTarget(true, target_class, target_title)) {
         return text_position(L"automation window avoid", avoid_source, avoid);
     }
+    // 最后一根救命稻草：Qt/QML 自绘输入框（微信 mmui::ChatInputField 等）既不暴露
+    // Text/Value pattern，也不上报焦点，上面所有路径都拿不到插入符。这里直接找它的矩形。
+    if (TryGetAutomationInputFieldRect(target, dpi, avoid, avoid_source) &&
+        PopupShouldUseTextAvoidForTarget(true, target_class, target_title)) {
+        return text_position(L"automation input field", avoid_source, avoid);
+    }
     if (DebugEnabled() && PopupTargetNeedsShellTopmostRaise(target_class, target_title, target_process)) {
         // UIA tree dump is expensive; only do it when logging.
         DebugLog(L"popup position: automation unavailable " + AutomationFocusedElementDebugInfo());
     }
-    const POINT fallback = keyboard_invocation_ ? PopupKeyboardInvocationPosition(false, RECT{}, size, monitor, work, dpi)
-                                                : PopupBottomRightFallback(size, work, dpi);
+    // 所有插入符路径都失败时的兜底。以前这里直接把弹窗丢到屏幕右下角（Win+V 的位置），
+    // 在微信这种自绘输入框的程序里就会离光标非常远。现在优先贴着目标窗口走：
+    // 弹窗放在目标窗口内靠下、但整块落在窗口里的位置 —— 至少「在同一个窗口里」，
+    // 而不是跑到屏幕另一头的角落。
+    POINT fallback{};
+    if (keyboard_invocation_ && has_target_window) {
+        fallback = PopupTargetWindowFallback(target_window, size, work, dpi);
+    } else if (keyboard_invocation_) {
+        fallback = PopupKeyboardInvocationPosition(false, RECT{}, size, monitor, work, dpi);
+    } else {
+        fallback = PopupBottomRightFallback(size, work, dpi);
+    }
     std::wstring fallback_log =
         keyboard_invocation_ ? L"popup position: windows clipboard dock fallback pos=("
                              : L"popup position: bottom right fallback pos=(";

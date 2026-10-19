@@ -1701,7 +1701,9 @@ RECT PopupTextCharacterCaretRect(RECT rect, bool after_character) {
 bool PopupTextInputRectUsable(RECT rect) {
     constexpr int kMinInputWidth = 24;
     constexpr int kMinInputHeight = 8;
-    constexpr int kMaxInputHeight = 120;
+    // 上限放到 480：多行输入框（微信聊天框实测 670x159）本来就比单行输入框高得多，
+    // 原来的 120 会把这类 Qt 自绘输入框直接判成「不是输入框」，于是只能退回屏幕角落。
+    constexpr int kMaxInputHeight = 480;
     return rect.right > rect.left &&
            rect.bottom > rect.top &&
            rect.right - rect.left >= kMinInputWidth &&
@@ -1712,9 +1714,12 @@ bool PopupTextInputRectUsable(RECT rect) {
 }
 
 POINT PopupTextInputRectAnchor(RECT rect, unsigned dpi) {
+    // 多行输入框（微信聊天框实测 670x159）的文字从顶部内边距开始排，
+    // 所以「光标所在行」≈ rect.top + 10dip；原来的锚点直接用 rect.top，
+    // 对高输入框会把弹窗顶到框外太远处。
     const int text_inset = ScalePopupMetricForDpi(8, dpi);
-    const int right_padding = ScalePopupMetricForDpi(48, dpi);
-    return POINT{ClampToRange(rect.left + text_inset, rect.left, rect.right - right_padding), rect.top};
+    const int vertical_inset = ScalePopupMetricForDpi(10, dpi);
+    return POINT{rect.left + text_inset, rect.top + vertical_inset};
 }
 
 bool PopupCaretAnchorAllowedByFocusedText(bool focused_text_editable, RECT focused_rect, bool has_focused_rect,
@@ -1773,25 +1778,44 @@ bool PopupVisualCaretRectUsable(RECT caret_rect, RECT window_rect, unsigned dpi)
 POINT PopupTextAvoidRectPosition(RECT avoid, SIZE size, RECT work, unsigned dpi) {
     const int corner_gap = ScalePopupMetricForDpi(8, dpi);
     const int work_gap = ScalePopupMetricForDpi(16, dpi);
-    const bool wide_input_fallback =
-        PopupTextInputRectUsable(avoid) && avoid.right - avoid.left > ScalePopupMetricForDpi(420, dpi);
-    const int horizontal_anchor = wide_input_fallback ? PopupTextInputRectAnchor(avoid, dpi).x : avoid.right;
+    // 输入框往往是整个可编辑区域（微信聊天框 670x159）。这时锚点要收进框内，
+    // 而不是拿整个框的右边当锚，否则弹窗会飘到输入框外侧很远。
+    const bool input_rect = PopupTextInputRectUsable(avoid);
+    const bool wide_input = input_rect && avoid.right - avoid.left > ScalePopupMetricForDpi(420, dpi);
+    const POINT input_anchor = input_rect ? PopupTextInputRectAnchor(avoid, dpi) : POINT{avoid.right, avoid.top};
+    const int horizontal_anchor = wide_input ? input_anchor.x : avoid.right;
+
     const int soft_min_x = work.left + work_gap;
     const int soft_max_x = work.right - size.cx - work_gap;
     const int hard_min_y = work.top;
     const int hard_max_y = work.bottom - size.cy;
 
     const int right_x = horizontal_anchor + corner_gap;
-    const int above_y = avoid.top - size.cy - corner_gap;
-    const int below_y = avoid.bottom + corner_gap;
     const int x = ClampToRange(right_x, soft_min_x, soft_max_x);
 
-    const int clamped_above_y = ClampToRange(above_y, hard_min_y, hard_max_y);
-    const int clamped_below_y = ClampToRange(below_y, hard_min_y, hard_max_y);
-    const int above_overlap =
-        std::max(0, clamped_above_y + static_cast<int>(size.cy) + corner_gap - static_cast<int>(avoid.top));
-    const int below_overlap = std::max(0, static_cast<int>(avoid.bottom) + corner_gap - clamped_below_y);
-    const int y = above_overlap <= below_overlap ? clamped_above_y : clamped_below_y;
+    // 优先贴在光标行「上方」（和原生 Win+V 一致，不遮住正在输入的内容），
+    // 上方放不下再放「下方」。之前是对上下两个候选都先 clamp 再比重叠，
+    // 结果两种都被挤到同一个贴边位置，看起来就像固定在屏幕中间。
+    const int anchor_top = input_rect ? input_anchor.y : avoid.top;
+    const int anchor_bottom = input_rect ? std::min(avoid.bottom, input_anchor.y + ScalePopupMetricForDpi(28, dpi))
+                                         : avoid.bottom;
+    const int above_y = anchor_top - size.cy - corner_gap;
+    const int below_y = anchor_bottom + corner_gap;
+    const bool fits_above = above_y >= hard_min_y;
+    const bool fits_below = below_y <= hard_max_y;
+
+    int y = 0;
+    if (fits_above) {
+        y = above_y;
+    } else if (fits_below) {
+        y = below_y;
+    } else {
+        // 两边都放不下（弹窗比上下剩余空间都高）：贴着输入框那一侧，最少遮挡输入文字。
+        const int space_above = anchor_top - work.top;
+        const int space_below = work.bottom - anchor_bottom;
+        y = space_above >= space_below ? ClampToRange(above_y, hard_min_y, hard_max_y)
+                                       : ClampToRange(below_y, hard_min_y, hard_max_y);
+    }
 
     return POINT{
         x,
@@ -1878,6 +1902,17 @@ POINT PopupWindowRectFallback(RECT target, SIZE size, RECT work, unsigned dpi) {
     }
     anchor = POINT{target.left, target.bottom};
     return ClampPopupToWorkArea(anchor, size, work, dpi);
+}
+
+POINT PopupTargetWindowFallback(RECT target, SIZE size, RECT work, unsigned dpi) {
+    const int gap = ScalePopupMetricForDpi(12, dpi);
+    // 目标窗口如果比弹窗还小（或几乎一样大），就没法「放在窗口里」：
+    // 这时退回窗口右下角外侧一点，至少紧挨着它。
+    const int x_right = target.right - size.cx - gap;
+    const int y_bottom = target.bottom - size.cy - gap;
+    const int x = ClampToRange(x_right, work.left + gap, work.right - size.cx - gap);
+    const int y = ClampToRange(y_bottom, work.top + gap, work.bottom - size.cy - gap);
+    return POINT{x, y};
 }
 
 POINT PopupTargetCenterFallback(RECT target, SIZE size, RECT work, unsigned dpi) {

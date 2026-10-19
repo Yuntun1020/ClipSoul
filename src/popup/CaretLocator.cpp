@@ -42,6 +42,8 @@ const wchar_t* TextAvoidSourceName(TextAvoidSource source) {
         return L"uia-terminal-visible-line";
     case TextAvoidSource::AutomationElementRect:
         return L"uia-element-rect";
+    case TextAvoidSource::AutomationInputFieldRect:
+        return L"uia-input-field-rect";
     case TextAvoidSource::None:
     default:
         return L"none";
@@ -1180,6 +1182,169 @@ bool TryGetAutomationAvoidRectFromWindow(HWND target, UINT dpi, RECT& avoid, Tex
 
     ReleasePtr(candidate);
     ReleasePtr(keyboard_focus_condition);
+    ReleasePtr(focused);
+    ReleasePtr(root);
+    ReleasePtr(automation);
+    return ok;
+}
+
+// Qt/QML 自绘输入框（微信 mmui::ChatInputField 最典型）在 UIA 里的样子：
+//   controlType = 50004 (Edit)，class 是自家类名，没有任何 Text/Value pattern，
+//   而且 HasKeyboardFocus 永远上报 FALSE。上面所有基于「插入符」和「焦点」的路径
+//   都会失败，最后退到屏幕右下角。
+// 这里换一个思路：在目标窗口的 UIA 子树里找「像输入框的控件」，直接用它自己的矩形。
+// 由于拿到的是整个输入区域，定位时再把锚点收进框内第一行，弹窗就不会压住输入文字。
+namespace {
+
+bool LooksLikeEditableInputClass(std::wstring_view class_name) {
+    if (class_name.empty()) {
+        return false;
+    }
+    static constexpr std::wstring_view kNeedles[] = {
+        L"ChatInputField", L"XValidatorTextEdit", L"TextEdit", L"TextArea", L"InputField",
+        L"RichEdit",       L"Edit",                L"TextBox",  L"QTextEdit", L"QLineEdit",
+    };
+    for (const auto needle : kNeedles) {
+        if (class_name.find(needle) != std::wstring_view::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+struct InputFieldSearch {
+    IUIAutomation* automation = nullptr;
+    HWND target = nullptr;
+    UINT dpi = 0;
+    RECT window_rect{};
+    RECT best{};
+    bool found = false;
+};
+
+void ConsiderInputFieldCandidate(InputFieldSearch& search, IUIAutomationElement* element) {
+    if (!element) {
+        return;
+    }
+    CONTROLTYPEID control_type = 0;
+    element->get_CurrentControlType(&control_type);
+    BSTR class_name = nullptr;
+    element->get_CurrentClassName(&class_name);
+    const std::wstring_view klass = class_name ? std::wstring_view(class_name, SysStringLen(class_name))
+                                               : std::wstring_view();
+    const bool edit_like = control_type == UIA_EditControlTypeId || control_type == UIA_DocumentControlTypeId ||
+                           LooksLikeEditableInputClass(klass);
+    if (class_name) {
+        SysFreeString(class_name);
+    }
+    if (!edit_like) {
+        return;
+    }
+    RECT rect{};
+    if (FAILED(element->get_CurrentBoundingRectangle(&rect)) || !PopupTextInputRectUsable(rect)) {
+        return;
+    }
+    // 只看目标窗口内部的控件；越界的多半是浮动窗口或残留缓存。
+    if (rect.left < search.window_rect.left - 8 || rect.right > search.window_rect.right + 8 ||
+        rect.top < search.window_rect.top - 8 || rect.bottom > search.window_rect.bottom + 8) {
+        return;
+    }
+    // 多个候选取面积最大的那个：聊天输入框总是窗口里最大的编辑区域。
+    const bool better = !search.found ||
+                        static_cast<long long>(rect.right - rect.left) * (rect.bottom - rect.top) >
+                            static_cast<long long>(search.best.right - search.best.left) *
+                                (search.best.bottom - search.best.top);
+    if (better) {
+        search.best = rect;
+        search.found = true;
+    }
+}
+
+void WalkInputFieldCandidates(InputFieldSearch& search, IUIAutomationElement* parent, int depth) {
+    if (!parent || depth > 24 || !search.automation) {
+        return;
+    }
+    IUIAutomationCondition* condition = nullptr;
+    VARIANT edit_type{};
+    edit_type.vt = VT_I4;
+    edit_type.lVal = UIA_EditControlTypeId;
+    if (SUCCEEDED(search.automation->CreatePropertyCondition(UIA_ControlTypePropertyId, edit_type, &condition)) &&
+        condition) {
+        IUIAutomationElementArray* matches = nullptr;
+        if (SUCCEEDED(parent->FindAll(TreeScope_Descendants, condition, &matches)) && matches) {
+            int length = 0;
+            matches->get_Length(&length);
+            for (int i = 0; i < length; ++i) {
+                IUIAutomationElement* child = nullptr;
+                if (SUCCEEDED(matches->GetElement(i, &child)) && child) {
+                    ConsiderInputFieldCandidate(search, child);
+                    ReleasePtr(child);
+                }
+            }
+            ReleasePtr(matches);
+        }
+        ReleasePtr(condition);
+    }
+
+    // 有些自绘输入框上报的 controlType 是 Pane/Custom，需要按类名继续往下找。
+    IUIAutomationElement* child = nullptr;
+    if (SUCCEEDED(parent->GetCurrentPatternAs(UIA_TextPatternId, IID_PPV_ARGS(&child)))) {
+        ReleasePtr(child);
+        return;
+    }
+    IUIAutomationTreeWalker* walker = nullptr;
+    if (SUCCEEDED(search.automation->get_RawViewWalker(&walker)) && walker) {
+        IUIAutomationElement* node = nullptr;
+        if (SUCCEEDED(walker->GetFirstChildElement(parent, &node)) && node) {
+            while (node) {
+                ConsiderInputFieldCandidate(search, node);
+                WalkInputFieldCandidates(search, node, depth + 1);
+                IUIAutomationElement* next = nullptr;
+                if (FAILED(walker->GetNextSiblingElement(node, &next)) || !next) {
+                    ReleasePtr(node);
+                    break;
+                }
+                ReleasePtr(node);
+                node = next;
+            }
+        }
+        ReleasePtr(walker);
+    }
+}
+
+} // namespace
+
+bool TryGetAutomationInputFieldRect(HWND target, UINT dpi, RECT& avoid, TextAvoidSource& source) {
+    if (!target || !IsWindow(target)) {
+        return false;
+    }
+    IUIAutomation* automation = nullptr;
+    IUIAutomationElement* root = nullptr;
+    IUIAutomationElement* focused = nullptr;
+    bool ok = false;
+
+    if (SUCCEEDED(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&automation))) &&
+        automation && SUCCEEDED(automation->ElementFromHandle(target, &root)) && root) {
+        InputFieldSearch search{};
+        search.automation = automation;
+        search.target = target;
+        search.dpi = dpi;
+        if (SUCCEEDED(root->get_CurrentBoundingRectangle(&search.window_rect))) {
+            // 先看全局焦点元素：在微信里它就是 ChatInputField，而且我们还能顺带校验
+            // 它确实属于目标窗口（AvoidRectCenterInside 用的是同一套判断）。
+            if (SUCCEEDED(automation->GetFocusedElement(&focused)) && focused) {
+                ConsiderInputFieldCandidate(search, focused);
+            }
+            if (!search.found) {
+                WalkInputFieldCandidates(search, root, 0);
+            }
+            if (search.found) {
+                avoid = search.best;
+                source = TextAvoidSource::AutomationInputFieldRect;
+                ok = true;
+            }
+        }
+    }
+
     ReleasePtr(focused);
     ReleasePtr(root);
     ReleasePtr(automation);

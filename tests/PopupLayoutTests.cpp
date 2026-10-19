@@ -1994,10 +1994,12 @@ TEST_CASE(PopupPositionClampsAroundCaretAnchor) {
     REQUIRE(!ClipSoul::PopupVisualCaretRectUsable(RECT{650, 1040, 654, 1068}, RECT{800, 80, 1800, 1200}, 144));
     const auto input_anchor = ClipSoul::PopupTextInputRectAnchor(RECT{640, 96, 1370, 148}, 144);
     REQUIRE_EQ(input_anchor.x, 652);
-    REQUIRE_EQ(input_anchor.y, 96);
+    // 锚点落在输入框第一行文字的位置（框顶 + 10dip），而不是框顶本身。
+    REQUIRE_EQ(input_anchor.y, 111);
     const auto input_position =
         ClipSoul::PopupTextAvoidRectPosition(RECT{640, 96, 1370, 148}, size, work, 144);
     REQUIRE_EQ(input_position.x, 664);
+    // 上方放不下时落到输入框下方。
     REQUIRE_EQ(input_position.y, 160);
     REQUIRE(input_position.y > 148);
 
@@ -2680,4 +2682,96 @@ TEST_CASE(PopupSmoothScrollToTopEasesInsteadOfJumping) {
     // 参数被夹住，越界不会外插。
     RequireNear(ClipSoul::PopupSmoothScrollOffset(from, to, -1.0f), from);
     RequireNear(ClipSoul::PopupSmoothScrollOffset(from, to, 2.0f), to);
+}
+
+TEST_CASE(PopupTextInputRectAcceptsMultilineChatInput) {
+    // 微信 mmui::ChatInputField 实测 670x159，老的 120px 上限会把它判定成「不是输入框」，
+    // 于是所有插入符路径都失败、弹窗只能退回屏幕右下角。
+    REQUIRE(ClipSoul::PopupTextInputRectUsable(RECT{463, 694, 1133, 853}));
+    REQUIRE(ClipSoul::PopupTextInputRectUsable(RECT{694, 1041, 1699, 1279}));
+    // 整块屏幕或整窗口仍然要挡住。
+    REQUIRE(!ClipSoul::PopupTextInputRectUsable(RECT{6, 120, 2555, 1593}));
+
+    // 高输入框的锚点应落在第一行文字附近，而不是框顶或框中心。
+    const auto anchor = ClipSoul::PopupTextInputRectAnchor(RECT{463, 694, 1133, 853}, 144);
+    REQUIRE_EQ(anchor.y, 694 + 15);
+    REQUIRE(anchor.y > 694);
+    REQUIRE(anchor.y < 853);
+}
+
+TEST_CASE(PopupTargetWindowFallbackStaysInsideTargetWindow) {
+    // 插入符全部定位失败时，弹窗应贴着目标窗口，而不是跑到屏幕另一头的角落。
+    const SIZE size{510, 840};
+    const RECT work{0, 0, 2560, 1528};
+    const RECT target{204, 285, 1741, 1374};
+
+    const auto position = ClipSoul::PopupTargetWindowFallback(target, size, work, 144);
+    // 完全落在目标窗口内部。
+    REQUIRE(position.x >= target.left);
+    REQUIRE(position.y >= target.top);
+    REQUIRE(position.x + size.cx <= target.right);
+    REQUIRE(position.y + size.cy <= target.bottom);
+    // 不再是屏幕右下角。
+    REQUIRE(position.x < work.right - size.cx);
+    REQUIRE(position.y < work.bottom - size.cy);
+
+    // 目标窗口比弹窗还小时不能算出窗口外的坐标，仍要夹在工作区内。
+    const RECT tiny{100, 100, 300, 300};
+    const auto clamped = ClipSoul::PopupTargetWindowFallback(tiny, size, work, 144);
+    REQUIRE(clamped.x >= work.left);
+    REQUIRE(clamped.y >= work.top);
+    REQUIRE(clamped.x + size.cx <= work.right);
+    REQUIRE(clamped.y + size.cy <= work.bottom);
+}
+
+TEST_CASE(PopupTextAvoidRectPositionPrefersAboveForTallInputField) {
+    // 聊天输入框（1005x238）上方空间充足时必须贴上方，不能被 clamp 到屏幕中间。
+    const SIZE size{510, 840};
+    const RECT work{0, 0, 2560, 1528};
+    const RECT input{694, 1041, 1699, 1279};
+
+    const auto position = ClipSoul::PopupTextAvoidRectPosition(input, size, work, 144);
+    // 弹窗底边贴在「输入框第一行文字」上方，留 8dip（144dpi => 12px）间距。
+    const int first_line_y = 1041 + 15; // rect.top + 10dip
+    REQUIRE_EQ(position.y + size.cy, first_line_y - 12);
+    REQUIRE(position.y >= work.top);
+    // 弹窗整体不压在输入框主体上。
+    REQUIRE(position.y + size.cy <= input.bottom);
+    // 水平方向贴着输入框左侧文字处，不会跑到右半屏。
+    REQUIRE(position.x < input.right);
+}
+
+TEST_CASE(PopupContinuousPasteStepsMatchTheHighlightedRow) {
+    // 连续粘贴的核心约束：本次粘贴的项 == 当前高亮项，下一次高亮 == 顺序下一条。
+    // 之前 AdvanceSelectionAfterContinuousPaste 因窗口隐藏提前 return，导致
+    // 每次都重复粘贴同一条、高亮也不再移动。
+    const int item_count = 5;
+    int selected = 1; // 置顶 1 条时的默认选中：最近分区第一条
+
+    const std::vector<int> expected_paste{1, 2, 3, 4, 0, 1};
+    for (size_t step = 0; step < expected_paste.size(); ++step) {
+        const auto advance = ClipSoul::PopupContinuousPasteSelectionStep(item_count, selected);
+        REQUIRE_EQ(advance.paste_index, expected_paste[step]);
+        // 粘贴项必须就是当前高亮项。
+        REQUIRE_EQ(advance.paste_index, selected);
+        selected = advance.next_selected_index;
+        // 每次都要真的往前走一步（不能原地踏步）。
+        REQUIRE(selected != advance.paste_index);
+    }
+}
+
+TEST_CASE(PopupDefaultSelectionAndPasteAgree) {
+    // 呼出弹窗时的默认高亮，必须与「按一次连续粘贴会粘哪条」完全一致。
+    using ClipSoul::PopupSectionPlan;
+    PopupSectionPlan plan;
+    plan.pinned_count = 1;
+    plan.recent_count = 4;
+    plan.show_pinned_header = true;
+    plan.show_recent_header = true;
+
+    const int default_index = ClipSoul::PopupDefaultSelectedIndex(plan);
+    REQUIRE_EQ(default_index, 1); // 跳过置顶区
+
+    const auto first_paste = ClipSoul::PopupContinuousPasteSelectionStep(1 + 4, default_index);
+    REQUIRE_EQ(first_paste.paste_index, default_index);
 }
