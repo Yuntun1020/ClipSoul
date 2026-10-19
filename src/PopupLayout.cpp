@@ -978,7 +978,15 @@ bool PopupShouldAnimateHoverWhileResizing(bool resizing_window) {
 }
 
 bool PopupShouldActivateWhenShown(bool keyboard_invocation) {
-    return !keyboard_invocation;
+    // 键盘呼出也必须激活。原因：弹窗一旦是 WS_EX_NOACTIVATE，就永远收不到
+    // WM_ACTIVATE(WA_INACTIVE)，「点外面自动收起」只能靠轮询鼠标状态；
+    // 而当前台是提权窗口（任务管理器等）时，UIPI 让普通权限进程读不到鼠标按键，
+    // 轮询彻底失效。激活弹窗后，点到任何窗口都会收到失活通知 —— 那是窗口管理器
+    // 事件，跨权限等级一样可靠。
+    // 粘贴目标早已记在 paste_target_ 里，SendPaste 会先 SetForegroundWindow，
+    // 所以抢焦点不影响「粘贴回原窗口」。
+    (void)keyboard_invocation;
+    return true;
 }
 
 bool PopupShouldActivateForShellSurface(bool shell_surface) {

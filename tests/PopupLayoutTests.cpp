@@ -536,11 +536,14 @@ TEST_CASE(PopupSearchDisplayTextShowsQueryOrPlaceholder) {
     REQUIRE(!ClipSoul::PopupPaintShouldUpdateLayout());
     REQUIRE(!ClipSoul::PopupShouldAnimateHoverWhileResizing(true));
     REQUIRE(ClipSoul::PopupShouldAnimateHoverWhileResizing(false));
-    REQUIRE(!ClipSoul::PopupShouldActivateWhenShown(true));
+    // 键盘呼出也必须激活：弹窗一旦是 NOACTIVATE 就永远收不到 WM_ACTIVATE(WA_INACTIVE)，
+    // 「点外面自动收起」只能靠轮询鼠标状态，而提权窗口在前台时 UIPI 让普通进程读不到
+    // 鼠标按键。激活后点到任何窗口都会收到失活通知，跨权限等级可靠。
+    REQUIRE(ClipSoul::PopupShouldActivateWhenShown(true));
     REQUIRE(ClipSoul::PopupShouldActivateWhenShown(false));
     REQUIRE(ClipSoul::PopupShouldActivateForShellSurface(true));
     REQUIRE(!ClipSoul::PopupShouldActivateForShellSurface(false));
-    REQUIRE(!ClipSoul::PopupShowShouldActivate(true, false));
+    REQUIRE(ClipSoul::PopupShowShouldActivate(true, false));
     REQUIRE(ClipSoul::PopupShowShouldActivate(false, false));
     REQUIRE(ClipSoul::PopupShowShouldActivate(true, true));
     REQUIRE(ClipSoul::PopupShowShouldActivate(false, true));
