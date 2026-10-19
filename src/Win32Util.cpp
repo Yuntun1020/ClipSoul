@@ -2,11 +2,13 @@
 
 #include "ClipSoul/HistoryStore.h"
 #include "ClipSoul/PopupLayout.h"
+#include "ClipSoul/ProcessElevation.h"
 #include "ClipSoul/StorageConfig.h"
 #include "ClipSoul/TextUtil.h"
 
 #include <ShlObj.h>
 #include <dwmapi.h>
+#include <shellapi.h>
 
 #include <filesystem>
 #include <fstream>
@@ -170,35 +172,159 @@ void InvalidateSystemDarkTheme() {
     g_system_dark_theme_valid = false;
 }
 
-bool SetStartWithWindows(bool enabled) {
-    HKEY key = nullptr;
-    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0,
-                        nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS) {
+namespace {
+
+constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+constexpr wchar_t kRunValue[] = L"ClipSoul";
+constexpr wchar_t kTaskName[] = L"ClipSoul";
+
+// 计划任务名：ClipSoul（根目录）。以管理员权限运行时用它自启，好处是不弹 UAC。
+// HKCU\...\Run 做不到这一点 —— 那里的启动项总是以发起者的普通权限运行。
+bool RunStartupTaskExists();
+
+bool RunStartupTask(const std::wstring& arguments) {
+    // 用 schtasks 而不是 Task Scheduler COM：少一层 COM 样板，也不引入 taskschd 依赖。
+    // /RL HIGHEST 就是「以最高权限运行」，/SC ONLOGON 是登录时触发。
+    std::wstring command = L"schtasks /Create /F /TN \"" + std::wstring(kTaskName) + L"\" /TR \"" + arguments +
+                           L"\" /SC ONLOGON /RL HIGHEST";
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    std::wstring mutable_command = command;
+    if (!CreateProcessW(nullptr, mutable_command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr,
+                        nullptr, &startup, &process)) {
         return false;
     }
+    WaitForSingleObject(process.hProcess, 15000);
+    DWORD exit_code = 1;
+    GetExitCodeProcess(process.hProcess, &exit_code);
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    return exit_code == 0;
+}
 
-    bool ok = false;
-    if (enabled) {
-        wchar_t path[MAX_PATH]{};
-        GetModuleFileNameW(nullptr, path, MAX_PATH);
-        ok = RegSetValueExW(key, L"ClipSoul", 0, REG_SZ, reinterpret_cast<const BYTE*>(path),
-                            static_cast<DWORD>((wcslen(path) + 1) * sizeof(wchar_t))) == ERROR_SUCCESS;
-    } else {
-        ok = RegDeleteValueW(key, L"ClipSoul") == ERROR_SUCCESS || GetLastError() == ERROR_FILE_NOT_FOUND;
+bool DeleteStartupTask() {
+    std::wstring command = L"schtasks /Delete /F /TN \"" + std::wstring(kTaskName) + L"\"";
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr,
+                        &startup, &process)) {
+        return false;
     }
+    WaitForSingleObject(process.hProcess, 15000);
+    DWORD exit_code = 1;
+    GetExitCodeProcess(process.hProcess, &exit_code);
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    // 任务本就不存在时 schtasks 返回非 0，对「关掉自启」这个意图来说算成功。
+    return exit_code == 0 || !RunStartupTaskExists();
+}
+
+bool RunStartupTaskExists() {
+    std::wstring command = L"schtasks /Query /TN \"" + std::wstring(kTaskName) + L"\"";
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr,
+                        &startup, &process)) {
+        return false;
+    }
+    WaitForSingleObject(process.hProcess, 15000);
+    DWORD exit_code = 1;
+    GetExitCodeProcess(process.hProcess, &exit_code);
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    return exit_code == 0;
+}
+
+bool RunKeyExists() {
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunKey, 0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS) {
+        return false;
+    }
+    const bool exists =
+        RegQueryValueExW(key, kRunValue, nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS;
+    RegCloseKey(key);
+    return exists;
+}
+
+bool SetRunKey(bool enabled) {
+    if (!enabled) {
+        HKEY key = nullptr;
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunKey, 0, KEY_SET_VALUE, &key) != ERROR_SUCCESS) {
+            return true; // 键不存在 = 已经没在自启。
+        }
+        const bool ok = RegDeleteValueW(key, kRunValue) == ERROR_SUCCESS ||
+                        GetLastError() == ERROR_FILE_NOT_FOUND;
+        RegCloseKey(key);
+        return ok;
+    }
+    HKEY key = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, kRunKey, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr) !=
+        ERROR_SUCCESS) {
+        return false;
+    }
+    wchar_t path[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, path, MAX_PATH);
+    const bool ok =
+        RegSetValueExW(key, kRunValue, 0, REG_SZ, reinterpret_cast<const BYTE*>(path),
+                       static_cast<DWORD>((wcslen(path) + 1) * sizeof(wchar_t))) == ERROR_SUCCESS;
     RegCloseKey(key);
     return ok;
 }
 
-bool GetStartWithWindows() {
-    HKEY key = nullptr;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0,
-                      KEY_QUERY_VALUE, &key) != ERROR_SUCCESS) {
+} // namespace
+
+bool SetStartWithWindows(bool enabled) {
+    if (!enabled) {
+        // 两种自启方式都清掉：用户可能先普通运行、后管理员运行，两边各留过一份。
+        const bool task_ok = DeleteStartupTask();
+        const bool key_ok = SetRunKey(false);
+        return task_ok && key_ok;
+    }
+
+    wchar_t path[MAX_PATH]{};
+    if (GetModuleFileNameW(nullptr, path, MAX_PATH) == 0) {
         return false;
     }
-    const auto result = RegQueryValueExW(key, L"ClipSoul", nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS;
-    RegCloseKey(key);
-    return result;
+
+    if (IsProcessElevated()) {
+        // 管理员运行：用计划任务自启，登录后直接以最高权限启动，不弹 UAC。
+        // 同时清掉旧的 Run 键，避免出现两份自启。
+        SetRunKey(false);
+        return RunStartupTask(std::wstring(L"\"") + path + L"\"");
+    }
+
+    // 普通权限：只能用 HKCU 的 Run 键。此时自启项也是普通权限 —— 这正是需要
+    // 「以管理员身份重启」的原因：提权后才能和提权程序互通输入。
+    return SetRunKey(true);
+}
+
+bool GetStartWithWindows() {
+    // 计划任务或 Run 键任一存在，就算启用了自启。
+    return RunStartupTaskExists() || RunKeyExists();
+}
+
+bool RelaunchSelfElevated() {
+    wchar_t path[MAX_PATH]{};
+    if (GetModuleFileNameW(nullptr, path, static_cast<DWORD>(std::size(path))) == 0) {
+        return false;
+    }
+    SHELLEXECUTEINFOW info{};
+    info.cbSize = sizeof(info);
+    info.fMask = SEE_MASK_NOCLOSEPROCESS;
+    info.lpVerb = L"runas";
+    info.lpFile = path;
+    info.nShow = SW_SHOWNORMAL;
+    if (!ShellExecuteExW(&info)) {
+        // 用户在 UAC 提示里点了「否」时也会走到这里：不是错误，只是没提权。
+        return false;
+    }
+    if (info.hProcess) {
+        CloseHandle(info.hProcess);
+    }
+    return true;
 }
 
 std::wstring KindLabel(int kind) {

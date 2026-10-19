@@ -12,7 +12,7 @@ public:
 
     bool Add(HWND hwnd, UINT callback_message);
     void Remove();
-    void ShowMenu(HWND hwnd, POINT point, bool paused);
+    void ShowMenu(HWND hwnd, POINT point, bool paused, bool elevated);
 
 private:
     NOTIFYICONDATAW data_{};

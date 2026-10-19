@@ -22,6 +22,7 @@ add_library(clipsoul_core
     src/Hotkey.cpp
     src/PasteModel.cpp
     src/PopupLayout.cpp
+    src/ProcessElevation.cpp
     src/SingleInstance.cpp
     src/StorageConfig.cpp
     src/TextUtil.cpp

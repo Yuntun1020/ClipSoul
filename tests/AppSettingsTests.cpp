@@ -3,6 +3,7 @@
 #include "ClipSoul/HistoryStore.h"
 #include "ClipSoul/StorageConfig.h"
 #include "ClipSoul/Version.h"
+#include "ClipSoul/ProcessElevation.h"
 
 #include <Windows.h>
 
@@ -111,4 +112,19 @@ TEST_CASE(StorageConfigTrimsAndKeepsCustomPath) {
 
     REQUIRE_EQ(custom, std::filesystem::path(L"D:\\ClipSoulData"));
     REQUIRE_EQ(ClipSoul::SerializeStorageDirectory(custom), std::wstring(L"D:\\ClipSoulData"));
+}
+
+TEST_CASE(ElevationCheckRejectsNullToken) {
+    // 空令牌不能崩，也不该被当成「已提权」。
+    REQUIRE(!ClipSoul::IsProcessElevatedForTest(nullptr));
+}
+
+TEST_CASE(ElevationCheckReadsCurrentProcessToken) {
+    // 用当前进程令牌走一遍真实路径，返回值必须和 IsProcessElevated 一致。
+    // 测试通常在普通权限下运行，但这里只断言两者一致，不假设具体值。
+    HANDLE token = nullptr;
+    REQUIRE(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token));
+    const bool from_token = ClipSoul::IsProcessElevatedForTest(token);
+    CloseHandle(token);
+    REQUIRE_EQ(from_token, ClipSoul::IsProcessElevated());
 }

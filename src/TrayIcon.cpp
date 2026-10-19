@@ -42,13 +42,19 @@ void TrayIcon::Remove() {
     }
 }
 
-void TrayIcon::ShowMenu(HWND hwnd, POINT point, bool paused) {
+void TrayIcon::ShowMenu(HWND hwnd, POINT point, bool paused, bool elevated) {
     HMENU menu = CreatePopupMenu();
     AppendMenuW(menu, MF_STRING, ID_TRAY_SHOW, L"显示 ClipSoul");
     AppendMenuW(menu, MF_STRING, ID_TRAY_PAUSE, paused ? L"继续监听" : L"暂停监听");
     AppendMenuW(menu, MF_STRING, ID_TRAY_SETTINGS, L"设置");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, ID_TRAY_CLEAR, L"清空历史");
+    // 以管理员身份运行时，才能真正和提权程序（全屏游戏、管理员工具）互通输入。
+    // 已经在管理员模式下就不再显示这一项。
+    if (!elevated) {
+        AppendMenuW(menu, MF_STRING, ID_TRAY_RESTART_ELEVATED, L"以管理员身份重启");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    }
     AppendMenuW(menu, MF_STRING, ID_TRAY_EXIT, L"退出");
     SetForegroundWindow(hwnd);
     TrackPopupMenu(menu, TPM_RIGHTBUTTON, point.x, point.y, 0, hwnd, nullptr);

@@ -1,6 +1,7 @@
 #include "ClipSoul/App.h"
 
 #include "ClipSoul/Hotkey.h"
+#include "ClipSoul/ProcessElevation.h"
 #include "ClipSoul/Win32Util.h"
 
 #include <commctrl.h>
@@ -107,9 +108,16 @@ bool App::Initialize() {
         storage_dir_ = LoadStorageDir();
         store_.Open(storage_dir_ / L"clipsoul.db");
         settings_ = store_.LoadSettings();
-        settings_.start_with_windows = GetStartWithWindows();
+        const bool had_start_with_windows = GetStartWithWindows();
+        settings_.start_with_windows = had_start_with_windows;
         ApplyAppSettingsDefaults(settings_);
         store_.SaveSettings(settings_);
+        if (had_start_with_windows && IsProcessElevated()) {
+            // 自启项存在、而且这次是以管理员身份运行：顺手把它升级成「最高权限」的计划任务。
+            // 否则它会继续以普通权限开机启动，用户就还得每次手动以管理员身份运行。
+            // 失败也不影响本次运行，只是自启仍是普通权限。
+            SetStartWithWindows(true);
+        }
 
         capture_ = std::make_unique<ClipboardCapture>(storage_dir_ / L"cache");
         popup_ = std::make_unique<PopupWindow>(instance_, store_, paste_controller_);
@@ -602,11 +610,36 @@ void App::OnTray(LPARAM lparam) {
     if (LOWORD(lparam) == WM_RBUTTONUP || LOWORD(lparam) == WM_CONTEXTMENU) {
         POINT point{};
         GetCursorPos(&point);
-        tray_.ShowMenu(hwnd_, point, settings_.paused);
+        tray_.ShowMenu(hwnd_, point, settings_.paused, IsProcessElevated());
     } else if (LOWORD(lparam) == WM_LBUTTONUP) {
         hotkey_keyboard_invocation_ = false;
         OnHotkey(CurrentInputTarget());
     }
+}
+
+void App::RestartElevated() {
+    if (IsProcessElevated()) {
+        return;
+    }
+    // 先把要交给新实例的状态收干净：注销热键、卸载钩子、移除托盘图标。
+    // 否则新实例启动时热键已被占用、会出现两个托盘图标。
+    UnregisterHotKey(hwnd_, HOTKEY_ID_POPUP);
+    UnregisterHotKey(hwnd_, HOTKEY_ID_CONTINUOUS_PASTE);
+    UninstallKeyboardHook();
+    tray_.Remove();
+    if (!RelaunchSelfElevated()) {
+        // 用户在 UAC 里点了「否」：把刚才拆掉的东西装回去，程序继续以普通权限运行。
+        InstallKeyboardHook();
+        RefreshHotkeyRegistration();
+        tray_.Add(hwnd_, WM_CLIPSOUL_TRAY);
+        MessageBoxW(hwnd_,
+                    L"未能以管理员身份重启。\n\n"
+                    L"如果你不需要在游戏或管理员程序里使用剪贴板，可以忽略此项。",
+                    L"ClipSoul", MB_ICONINFORMATION);
+        return;
+    }
+    DebugLog(L"relaunching elevated; exiting current instance");
+    PostQuitMessage(0);
 }
 
 void App::OnCommand(WPARAM wparam) {
@@ -623,6 +656,9 @@ void App::OnCommand(WPARAM wparam) {
         break;
     case ID_TRAY_CLEAR:
         ClearHistory();
+        break;
+    case ID_TRAY_RESTART_ELEVATED:
+        RestartElevated();
         break;
     case ID_TRAY_EXIT:
         tray_.Remove();

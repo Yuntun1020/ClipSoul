@@ -26,6 +26,7 @@ constexpr UINT ID_TRAY_PAUSE = 1002;
 constexpr UINT ID_TRAY_SETTINGS = 1003;
 constexpr UINT ID_TRAY_CLEAR = 1004;
 constexpr UINT ID_TRAY_EXIT = 1005;
+constexpr UINT ID_TRAY_RESTART_ELEVATED = 1006;
 
 class App {
 public:
@@ -58,6 +59,9 @@ private:
     std::optional<int64_t> SelectedPopupItemId() const;
     void OnTray(LPARAM lparam);
     void OnCommand(WPARAM wparam);
+    // Relaunches ClipSoul through UAC and exits this instance. Used when the user needs to
+    // talk to elevated programs (fullscreen games, admin tools), which UIPI otherwise blocks.
+    void RestartElevated();
     HWND CurrentInputTarget() const;
     bool ConsumeSuppressedRegisteredHotkey(WPARAM hotkey_id);
     // Sends the buffered Alt as a complete tap (DOWN+UP in one SendInput call) so no

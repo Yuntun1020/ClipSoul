@@ -23,4 +23,7 @@ bool SetStartWithWindows(bool enabled);
 bool GetStartWithWindows();
 std::wstring KindLabel(int kind);
 
+// Relaunches this executable through the "runas" verb. Returns false when the user declines UAC.
+bool RelaunchSelfElevated();
+
 } // namespace ClipSoul
