@@ -62,27 +62,40 @@ bool OpenClipboardWithRetry(HWND owner) {
 PasteController::PasteController(ClipboardMonitor& monitor) : monitor_(monitor) {}
 
 bool PasteController::RestoreToClipboard(const HistoryItem& item, HWND owner) {
+    return RestoreToClipboard(item, owner, nullptr);
+}
+
+bool PasteController::RestoreToClipboard(
+    const HistoryItem& item, HWND owner,
+    const std::function<std::optional<HistoryItem>(int64_t)>& load_full_item) {
+    // 列表查询不再带 html 列；真正粘贴 HTML 时才把这一行完整读出来。
+    std::optional<HistoryItem> full_item;
+    if (item.kind == ClipboardKind::Html && item.html.empty() && load_full_item) {
+        full_item = load_full_item(item.id);
+    }
+    const HistoryItem& source = full_item && !full_item->html.empty() ? *full_item : item;
+
     if (!OpenClipboardWithRetry(owner)) {
         return false;
     }
 
     EmptyClipboard();
     bool ok = false;
-    switch (item.kind) {
+    switch (source.kind) {
     case ClipboardKind::Text:
     case ClipboardKind::Html:
     case ClipboardKind::Link:
-        ok = SetText(item);
+        ok = SetText(source);
         break;
     case ClipboardKind::Files:
-        ok = SetFiles(item);
+        ok = SetFiles(source);
         break;
     case ClipboardKind::Image:
-        ok = SetImage(item);
+        ok = SetImage(source);
         break;
     }
     CloseClipboard();
-    monitor_.RecordSelfWrite({item.content_hash});
+    monitor_.RecordSelfWrite({source.content_hash});
     return ok;
 }
 
@@ -166,6 +179,8 @@ bool PasteController::SetText(const HistoryItem& item) const {
         return false;
     }
 
+    // item.html 只有 Get(id) 才会填充（列表查询为了省内存不再带这列）。
+    // 粘贴 HTML 前由调用方补齐，见 EnsureHtmlLoaded()。
     if (item.kind == ClipboardKind::Html && !item.html.empty()) {
         const UINT html_format = RegisterClipboardFormatW(L"HTML Format");
         HGLOBAL html_handle = AllocMoveableBytes(item.html.data(), item.html.size() + 1);

@@ -8,6 +8,8 @@
 #include "ClipSoul/Version.h"
 #include "ClipSoul/Win32Util.h"
 #include "popup/CaretLocator.h"
+#include "popup/InkGlyphs.h"
+#include "popup/IdleMemory.h"
 #include "popup/PromptDialogs.h"
 #include "popup/PopupWin32Helpers.h"
 
@@ -22,6 +24,7 @@
 #include <unordered_set>
 #include <cmath>
 #include <cstdint>
+#include <cwctype>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -38,12 +41,22 @@ namespace {
 constexpr float kPi = 3.14159265358979323846f;
 constexpr wchar_t kPopupClass[] = L"ClipSoul.PopupWindow";
 constexpr UINT_PTR kAnimationTimer = 42;
+// 1:1 复刻预览的 60fps 过渡：WM_TIMER 实际最小粒度约 10~15ms，
+// 用 10ms 请求值才能让 170ms 的 winIn 落下十几帧。
+constexpr UINT kAnimationTimerMs = 10;
 constexpr UINT_PTR kHoverTimer = 43;
 constexpr UINT_PTR kSearchCaretTimer = 44;
 constexpr UINT_PTR kOutsideClickTimer = 45;
 constexpr UINT_PTR kItemLongPressTimer = 46;
 constexpr UINT_PTR kSuppressInactiveHideTimer = 47;
 constexpr UINT_PTR kShellTopmostRaiseTimer = 48;
+constexpr UINT_PTR kIdleMemoryTimer = 49;
+// 搜索输入防抖：每敲一个字符就重新查库 + 数一次总数太贵（一次约 5 条 SQL）。
+constexpr UINT_PTR kSearchReloadTimer = 50;
+// 分批粘贴：每写完一段要给目标程序（Office、IDE）一点时间消费，才不会把后一段抢先覆盖。
+constexpr UINT_PTR kMultiPasteTimer = 51;
+constexpr UINT kMultiPasteDelayMs = 70;
+constexpr UINT kSearchReloadDelayMs = 90;
 constexpr DWORD kTransientHideSuppressMs = 650;
 constexpr DWORD kShellTopmostRaiseMs = 700;
 constexpr int kPopupResizeLeft = 0x1;
@@ -65,6 +78,8 @@ constexpr int kContextFavoriteGroupBase = 3100;
 constexpr int kContextFavoriteGroupMax = 3199;
 constexpr DWORD kChildWindowExitMs = 90;
 constexpr DWORD kPopupBandShellSurface = 16;
+constexpr int kFilterPresetCustom = 4;
+constexpr int kFilterPresetCount = 5;
 
 using CreateWindowInBandProc = HWND(WINAPI*)(DWORD, LPCWSTR, LPCWSTR, DWORD, int, int, int, int, HWND, HMENU, HINSTANCE,
                                              LPVOID, DWORD);
@@ -172,25 +187,26 @@ void HideNativeSearchCaret(HWND search_edit) {
     }
 }
 
-UiRect FavoriteGroupDeleteConfirmPanelRect() {
+UiRect FavoriteGroupDeleteConfirmPanelRect(int logical_width = 0) {
     const auto& metrics = PopupMetrics();
-    constexpr float kWidth = 236.0f;
-    constexpr float kHeight = 136.0f;
-    const float left = (static_cast<float>(metrics.width) - kWidth) * 0.5f;
-    const float top = PopupTabsTop() + 50.0f;
+    const float kWidth = static_cast<float>(logical_width > 0 ? logical_width : metrics.width) - 40.0f;
+    constexpr float kHeight = 150.0f;
+    const float surface_width = logical_width > 0 ? static_cast<float>(logical_width) : static_cast<float>(metrics.width);
+    const float left = (surface_width - kWidth) * 0.5f;
+    const float top = 104.0f;
     return UiRect{left, top, left + kWidth, top + kHeight};
 }
 
 UiRect FavoriteGroupDeleteConfirmDeleteRect(const UiRect& panel) {
-    return UiRect{panel.right - 166.0f, panel.bottom - 42.0f, panel.right - 96.0f, panel.bottom - 14.0f};
+    return UiRect{panel.right - 68.0f, panel.bottom - 42.0f, panel.right - 16.0f, panel.bottom - 14.0f};
 }
 
 UiRect FavoriteGroupDeleteConfirmCancelRect(const UiRect& panel) {
-    return UiRect{panel.right - 84.0f, panel.bottom - 42.0f, panel.right - 14.0f, panel.bottom - 14.0f};
+    return UiRect{panel.right - 126.0f, panel.bottom - 42.0f, panel.right - 74.0f, panel.bottom - 14.0f};
 }
 
-PopupFavoriteGroupDeleteConfirmTarget HitTestFavoriteGroupDeleteConfirm(POINT point) {
-    const auto panel = FavoriteGroupDeleteConfirmPanelRect();
+PopupFavoriteGroupDeleteConfirmTarget HitTestFavoriteGroupDeleteConfirm(POINT point, int logical_width = 0) {
+    const auto panel = FavoriteGroupDeleteConfirmPanelRect(logical_width);
     if (!Contains(panel, point)) {
         return PopupFavoriteGroupDeleteConfirmTarget::None;
     }
@@ -280,6 +296,56 @@ std::wstring ItemMeta(const HistoryItem& item) {
     return meta;
 }
 
+std::wstring ItemMetaSummary(const HistoryItem& item) {
+    // Ink Ledger 副行：类型 · 字数/数量。备注单独绘制（带笔形小图标）。
+    std::wstring meta = item.is_phrase ? L"常用语" : KindLabel(static_cast<int>(item.kind));
+    switch (item.kind) {
+    case ClipboardKind::Files:
+        meta += L" · " + std::to_wstring(item.files.size()) + L" 个文件";
+        break;
+    case ClipboardKind::Image:
+        break;
+    case ClipboardKind::Link: {
+        const auto& url = !item.text.empty() ? item.text : item.search_text;
+        const auto scheme = url.find(L"://");
+        const auto begin = scheme == std::wstring::npos ? 0 : scheme + 3;
+        const auto end = url.find_first_of(L"/?#", begin);
+        meta += L" · " + url.substr(begin, end == std::wstring::npos ? end : end - begin);
+        break;
+    }
+    default: {
+        const auto& body = !item.text.empty() ? item.text : item.search_text;
+        meta += L" · " + std::to_wstring(body.size()) + L" 字";
+        break;
+    }
+    }
+    return meta;
+}
+
+std::vector<std::pair<size_t, size_t>> FindSearchMatches(std::wstring_view text, std::wstring_view needle) {
+    std::vector<std::pair<size_t, size_t>> matches;
+    if (needle.empty() || text.empty() || needle.size() > text.size()) {
+        return matches;
+    }
+    const auto fold = [](wchar_t ch) { return static_cast<wchar_t>(towlower(ch)); };
+    for (size_t index = 0; index + needle.size() <= text.size();) {
+        bool hit = true;
+        for (size_t offset = 0; offset < needle.size(); ++offset) {
+            if (fold(text[index + offset]) != fold(needle[offset])) {
+                hit = false;
+                break;
+            }
+        }
+        if (hit) {
+            matches.emplace_back(index, needle.size());
+            index += needle.size();
+        } else {
+            ++index;
+        }
+    }
+    return matches;
+}
+
 std::wstring ItemDetailText(const HistoryItem& item) {
     std::wstring detail;
     if (!item.note.empty()) {
@@ -316,51 +382,52 @@ std::wstring ItemDetailText(const HistoryItem& item) {
     return append_content(!item.text.empty() ? item.text : item.search_text);
 }
 
-std::wstring ItemTime(const HistoryItem& item) {
-    std::time_t value = static_cast<std::time_t>(item.created_at_unix);
+// "Now" and "today" are resolved once per paint and passed in: this runs for every visible row,
+// and each ItemTime() call used to do two localtime_s() calls.
+struct TimeLabelContext {
+    std::time_t now = 0;
+    std::tm today{};
+    bool valid = false;
+
+    static TimeLabelContext Now() {
+        TimeLabelContext context;
+        context.now = std::time(nullptr);
+        context.valid = localtime_s(&context.today, &context.now) == 0;
+        return context;
+    }
+};
+
+std::wstring ItemTime(const HistoryItem& item, const TimeLabelContext& context) {
+    const std::time_t value = static_cast<std::time_t>(item.created_at_unix);
     std::tm local_time{};
     if (localtime_s(&local_time, &value) != 0) {
         return {};
     }
+    std::tm today{};
+    std::time_t now = context.now;
+    if (context.valid) {
+        today = context.today;
+    } else {
+        now = std::time(nullptr);
+        if (localtime_s(&today, &now) != 0) {
+            today = local_time;
+        }
+    }
     wchar_t buffer[16]{};
-    wcsftime(buffer, std::size(buffer), L"%H:%M", &local_time);
+    if (local_time.tm_year == today.tm_year && local_time.tm_yday == today.tm_yday)
+        wcsftime(buffer, std::size(buffer), L"%H:%M", &local_time);
+    else if (now - value < 48 * 60 * 60 && (local_time.tm_yday + 1 == today.tm_yday || today.tm_yday == 0))
+        return L"昨天";
+    else swprintf_s(buffer, L"%d/%d", local_time.tm_mon + 1, local_time.tm_mday);
     return buffer;
-}
-
-D2D1_COLOR_F KindColor(ClipboardKind kind) {
-    (void)kind;
-    return D2D1::ColorF(0x8A7E6D, 0.86f);
 }
 
 D2D1_COLOR_F ColorWithAlpha(uint32_t rgb, float alpha) {
     return D2D1::ColorF(rgb, alpha);
 }
 
-uint32_t PopupSubtleAccentFill(const PopupThemePalette& palette) {
-    return palette.dark ? palette.paper_selected : palette.paper_selected;
-}
-
 uint32_t PopupNeutralHoverFill(const PopupThemePalette& palette) {
     return palette.paper_hover;
-}
-
-uint32_t PopupSurfacePressedFill(const PopupThemePalette& palette) {
-    return palette.paper_selected;
-}
-
-const wchar_t* KindGlyph(ClipboardKind kind) {
-    switch (kind) {
-    case ClipboardKind::Text:
-    case ClipboardKind::Html:
-        return L"T";
-    case ClipboardKind::Image:
-        return L"\u25d0";
-    case ClipboardKind::Files:
-        return L"F";
-    case ClipboardKind::Link:
-        return L"\u2197";
-    }
-    return L"T";
 }
 
 int64_t LocalDateUnix(PopupCalendarDate date, bool end_of_day) {
@@ -420,53 +487,6 @@ PopupCalendarDate TodayDate() {
     }
     return PopupCalendarDate{local_time.tm_year + 1900, local_time.tm_mon + 1, local_time.tm_mday};
 }
-
-std::filesystem::path IconPath(const wchar_t* filename) {
-    wchar_t module_path[MAX_PATH]{};
-    GetModuleFileNameW(nullptr, module_path, MAX_PATH);
-    std::filesystem::path base = std::filesystem::path(module_path).parent_path();
-    for (int i = 0; i < 4; ++i) {
-        const auto candidate = base / L"assets" / L"icons" / filename;
-        if (std::filesystem::exists(candidate)) {
-            return candidate;
-        }
-        base = base.parent_path();
-    }
-    return std::filesystem::path(module_path).parent_path() / L"assets" / L"icons" / filename;
-}
-
-bool LoadWicFrameFromResource(IWICImagingFactory* factory, int resource_id, IWICBitmapDecoder** decoder,
-                              IWICBitmapFrameDecode** frame) {
-    if (!factory || !decoder || !frame || resource_id == 0) {
-        return false;
-    }
-
-    HRSRC resource = FindResourceW(nullptr, MAKEINTRESOURCEW(resource_id), RT_RCDATA);
-    if (!resource) {
-        return false;
-    }
-    HGLOBAL loaded = LoadResource(nullptr, resource);
-    const void* bytes = loaded ? LockResource(loaded) : nullptr;
-    const DWORD byte_count = SizeofResource(nullptr, resource);
-    if (!bytes || byte_count == 0) {
-        return false;
-    }
-
-    IWICStream* stream = nullptr;
-    if (FAILED(factory->CreateStream(&stream))) {
-        return false;
-    }
-
-    bool ok = false;
-    if (SUCCEEDED(stream->InitializeFromMemory(static_cast<BYTE*>(const_cast<void*>(bytes)), byte_count)) &&
-        SUCCEEDED(factory->CreateDecoderFromStream(stream, nullptr, WICDecodeMetadataCacheOnLoad, decoder)) &&
-        SUCCEEDED((*decoder)->GetFrame(0, frame))) {
-        ok = true;
-    }
-    ReleasePtr(stream);
-    return ok;
-}
-
 bool LoadWicFrameFromFile(IWICImagingFactory* factory, const std::filesystem::path& path, IWICBitmapDecoder** decoder,
                           IWICBitmapFrameDecode** frame) {
     return factory && decoder && frame &&
@@ -511,6 +531,7 @@ PopupWindow::PopupWindow(HINSTANCE instance, HistoryStore& store, PasteControlle
     : instance_(instance),
       store_(store),
       paste_controller_(paste_controller) {
+    ink_glyph_cache_=std::make_unique<InkGlyphCache>();
     const auto today = TodayDate();
     calendar_year_ = today.year;
     calendar_month_ = today.month;
@@ -522,15 +543,8 @@ PopupWindow::~PopupWindow() {
         DeleteObject(search_edit_brush_);
         search_edit_brush_ = nullptr;
     }
-    ReleasePtr(ellipsis_trimming_sign_);
-    ReleasePtr(title_format_);
-    ReleasePtr(body_format_);
-    ReleasePtr(small_format_);
-    ReleasePtr(detail_format_);
-    ReleasePtr(centered_small_format_);
-    ReleasePtr(date_value_format_);
-    ReleasePtr(wic_factory_);
-    ReleasePtr(dwrite_factory_);
+    DiscardTextResources();
+    ink_glyph_cache_.reset();
     ReleasePtr(d2d_factory_);
 }
 
@@ -558,7 +572,7 @@ bool PopupWindow::Create(HWND owner) {
 
     const UINT dpi = DpiForWindowHandle(owner);
     const SIZE size = PhysicalPopupSize(dpi);
-    const DWORD popup_ex_style = WS_EX_TOOLWINDOW | WS_EX_TOPMOST |
+    const DWORD popup_ex_style = WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED |
                                  (PopupWindowShouldUseNoActivateStyle() ? WS_EX_NOACTIVATE : 0);
     if (PopupShouldCreateInShellWindowBand()) {
         if (const auto create_window_in_band = ResolveCreateWindowInBand()) {
@@ -575,6 +589,10 @@ bool PopupWindow::Create(HWND owner) {
     if (!hwnd_) {
         return false;
     }
+    // 预览里的窗口淡入淡出是 CSS opacity：整窗（含 DWM 阴影）一起变透明。
+    // 分层窗口 + LWA_ALPHA 是 Win32 里唯一能做到这一点的做法；不透明度 255 时
+    // 像素与改动前完全一致，只在 170ms / 120ms 的过渡里降到 255 以下。
+    SetLayeredWindowAttributes(hwnd_, 0, 255, LWA_ALPHA);
     search_edit_ = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_CLIPSIBLINGS |
                                                     ES_AUTOHSCROLL | ES_LEFT,
                                    0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSearchEditId)),
@@ -592,10 +610,12 @@ bool PopupWindow::Create(HWND owner) {
     }
     ApplyBackdrop();
     ApplyWindowRegion();
+    SetTimer(hwnd_,kIdleMemoryTimer,750,nullptr);
     return true;
 }
 
 void PopupWindow::Show(HWND target) {
+    KillTimer(hwnd_,kIdleMemoryTimer);
     SetWindowLongPtrW(hwnd_, GWLP_HWNDPARENT, 0);
     paste_target_ = target;
     moving_window_ = false;
@@ -607,6 +627,13 @@ void PopupWindow::Show(HWND target) {
     left_button_was_down_ = false;
     KillTimer(hwnd_, kSuppressInactiveHideTimer);
     KillTimer(hwnd_, kShellTopmostRaiseTimer);
+    KillTimer(hwnd_, kHoverTimer);
+    hover_progress_ = 1.0f;
+    hover_action_ = UiAction::None;
+    hover_item_index_ = -1;
+    pin_motion_progress_ = 1.0f;
+    pin_motion_from_ = pinned_open_;
+    pin_motion_to_ = pinned_open_;
     const std::wstring target_class = WindowClassName(target);
     const std::wstring target_title = WindowTitle(target);
     const std::wstring target_process = WindowProcessName(target);
@@ -616,6 +643,12 @@ void PopupWindow::Show(HWND target) {
         SetWindowLongPtrW(hwnd_, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(target));
     }
     ReloadItems();
+    // 每次呼出都从「最近」分组的第一条开始高亮：置顶区只是快捷区，不参与默认选中，
+    // 也不恢复上一次停在哪条旧记录上（那会让回车粘贴到一条很旧的记录）。
+    selected_index_ = ClampPopupSelectedIndex(static_cast<int>(items_.size()),
+                                              PopupDefaultSelectedIndex(CurrentSectionPlan()));
+    ClampScrollToCurrentPopupHeight();
+    RefreshFavoriteGroupCounts();
     UpdatePopupLogicalSize();
     UpdateBehaviorFromSettings();
     RECT work{};
@@ -652,6 +685,12 @@ void PopupWindow::Show(HWND target) {
     const POINT position = ResolvePopupPosition(target, size, monitor_rect, work, dpi);
     x = position.x;
     y = position.y;
+    // 预览 winIn 的 from 是 opacity:0。必须在窗口可见之前就把 alpha 降到 0，
+    // 否则 SWP_SHOWWINDOW 到首个 WM_PAINT/WM_TIMER 之间会闪一下完全不透明的窗口。
+    window_entering_ = animations_enabled_;
+    window_leaving_ = false;
+    window_motion_progress_ = animations_enabled_ ? 0.0f : 1.0f;
+    ApplyWindowAlpha();
     SetWindowPos(hwnd_, HWND_TOPMOST, x, y, size.cx, size.cy, flags);
     ApplyWindowRegion();
     UpdatePopupLogicalSize();
@@ -693,11 +732,18 @@ void PopupWindow::Show(HWND target) {
     if (PopupShouldAutoFocusSearchOnShow(search_edit_ != nullptr)) {
         search_focused_ = true;
         search_caret_on_ = true;
+        // 预览启动就是 q.focus()，搜索框下的墨线在呼出时从左展开（200ms）。
+        // 这里不能只碰 search_focused_：进度必须从 0 推到 1 才有动画。
+        search_focus_from_ = 0.0f;
+        search_focus_to_ = 1.0f;
+        search_focus_start_ms_ = static_cast<double>(GetTickCount64());
         SetFocus(search_edit_);
         SetTimer(hwnd_, kSearchCaretTimer, GetCaretBlinkTime(), nullptr);
     } else {
         search_focused_ = false;
         search_caret_on_ = false;
+        search_focus_from_ = 0.0f;
+        search_focus_to_ = 0.0f;
         KillTimer(hwnd_, kSearchCaretTimer);
     }
     KillTimer(hwnd_, kAnimationTimer);
@@ -707,6 +753,20 @@ void PopupWindow::Show(HWND target) {
     closing_favorite_group_menu_ = false;
     closing_delete_confirm_ = false;
     closing_delete_confirm_snapshot_ = PendingFavoriteGroupDelete{};
+    context_menu_open_ = context_submenu_open_ = closing_context_menu_ = false;
+    clear_confirm_open_ = false;
+    window_entering_ = rows_entering_ = animations_enabled_;
+    window_leaving_ = false;
+    window_motion_start_ms_ = rows_entrance_start_ms_ = static_cast<double>(GetTickCount64());
+    // 搜索墨线的展开与窗口入场同一时刻起算（预览里 q.focus() 也在启动时立即执行）。
+    if (search_focus_to_ > 0.0f) {
+        search_focus_start_ms_ = window_motion_start_ms_;
+    }
+    window_motion_progress_ = animations_enabled_ ? 0.0f : 1.0f;
+    // 首帧就要是 opacity:0（预览 winIn 的 from）；已在 SetWindowPos 前设过一次，
+    // 这里只为了让起点时间与真正上屏的时刻对齐。
+    ApplyWindowAlpha();
+    if (animations_enabled_) SetTimer(hwnd_, kAnimationTimer, kAnimationTimerMs, nullptr);
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
@@ -718,7 +778,7 @@ std::optional<int64_t> PopupWindow::SelectedItemId() const {
     if (selected_index_ >= 0 && selected_index_ < static_cast<int>(items_.size())) {
         return items_[selected_index_].id;
     }
-    return std::nullopt;
+    return hidden_selected_item_id_;
 }
 
 void PopupWindow::SetSelectedItemId(std::optional<int64_t> id) {
@@ -733,6 +793,7 @@ void PopupWindow::SetSelectedItemId(std::optional<int64_t> id) {
     }
     selected_index_ = static_cast<int>(std::distance(items_.begin(), found));
     scroll_offset_ = ScrollOffsetToRevealSelection(scroll_offset_, selected_index_);
+    KickSlipAnimation();
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
@@ -741,6 +802,30 @@ void PopupWindow::Hide() {
 }
 
 void PopupWindow::Hide(std::wstring_view reason) {
+    if (!completing_window_hide_ && animations_enabled_ && IsVisible() &&
+        (reason == L"escape" || reason == L"close-button" || reason == L"paste")) {
+        if (!window_leaving_) {
+            window_entering_ = false;
+            window_leaving_ = true;
+            window_motion_start_ms_ = static_cast<double>(GetTickCount64());
+            window_motion_progress_ = 0.0f;
+            // 退出也从当前帧（opacity 1）开始，下一帧起按 winOut 曲线降。
+            ApplyWindowAlpha();
+            SetTimer(hwnd_, kAnimationTimer, kAnimationTimerMs, nullptr);
+        }
+        return;
+    }
+    window_entering_ = window_leaving_ = rows_entering_ = false;
+    // 下次 Show 会重新从 0 开始淡入；这里复位到 255，避免淡出末帧的 0 被留在窗口上。
+    window_motion_progress_ = 1.0f;
+    ApplyWindowAlpha();
+    context_menu_open_ = context_submenu_open_ = closing_context_menu_ = false;
+    clear_confirm_open_ = false;
+    row_transitions_.clear();
+    detail_transitions_.clear();
+    // 隐藏后不应再保留未完成的回顶部滚动，下次 Show 从干净状态开始。
+    smooth_scroll_active_ = false;
+    smooth_scroll_from_ = smooth_scroll_to_ = 0.0f;
     if (DebugEnabled()) {
         RECT rect{};
         GetWindowRect(hwnd_, &rect);
@@ -756,6 +841,13 @@ void PopupWindow::Hide(std::wstring_view reason) {
     KillTimer(hwnd_, kSuppressInactiveHideTimer);
     KillTimer(hwnd_, kShellTopmostRaiseTimer);
     KillTimer(hwnd_, kAnimationTimer);
+    KillTimer(hwnd_, kHoverTimer);
+    KillTimer(hwnd_, kItemLongPressTimer);
+    hover_progress_ = 1.0f;
+    context_motion_progress_ = 1.0f;
+    badge_transitions_.clear();
+    stamp_item_id_.reset();
+    toast_text_.clear();
     motion_target_ = PopupMotionTarget::None;
     motion_progress_ = 1.0f;
     closing_filter_panel_ = false;
@@ -780,10 +872,26 @@ void PopupWindow::Hide(std::wstring_view reason) {
     search_caret_on_ = false;
     search_selecting_ = false;
     KillTimer(hwnd_, kSearchCaretTimer);
+    KillTimer(hwnd_, kSearchReloadTimer);
+    KillTimer(hwnd_, kMultiPasteTimer);
+    multi_paste_operations_.clear();
+    hidden_selected_item_id_ = SelectedItemId();
     ShowWindow(hwnd_, SW_HIDE);
+    // The tray listener does not need GPU surfaces or copies of clipboard payloads.
+    // Recreate them on the next Show, preserving only the continuous-paste anchor.
+    DiscardDeviceResources();
+    std::vector<HistoryItem>().swap(items_);
+    std::vector<FavoriteGroup>().swap(favorite_groups_);
+    favorite_group_counts_.clear();
+    detail_height_cache_.clear();
+    SetTimer(hwnd_,kIdleMemoryTimer,750,nullptr);
 }
 
 void PopupWindow::Refresh() {
+    if(!IsVisible()) {
+        if(hwnd_)SetTimer(hwnd_,kIdleMemoryTimer,750,nullptr);
+        return;
+    }
     ReloadItems();
     if (hwnd_) {
         ResizeToCurrentItems();
@@ -814,10 +922,31 @@ void PopupWindow::ReloadItems() {
             active_favorite_group_id_.reset();
         }
     }
+    const bool was_populated = !items_.empty();
+    std::set<int64_t> previous_ids;
+    for (const auto& item : items_) previous_ids.insert(item.id);
     items_ = store_.Query(BuildQuery());
-    selected_index_ = std::clamp(selected_index_, 0, std::max(0, static_cast<int>(items_.size()) - 1));
+    detail_height_cache_.clear();
+    row_metrics_dirty_ = true;
+    if (animations_enabled_ && IsVisible() && was_populated && !rows_entering_) {
+        const double now = static_cast<double>(GetTickCount64());
+        for (const auto& item : items_) {
+            if (!previous_ids.contains(item.id)) row_transitions_[item.id] = {now, false};
+        }
+        if (!row_transitions_.empty()) SetTimer(hwnd_, kAnimationTimer, kAnimationTimerMs, nullptr);
+    }
+    HistoryQuery count_query;
+    count_query.include_favorites = true;
+    history_count_ = store_.Count(count_query);
+    // 列表内容变了：保持同一个「行号」。新复制进来的条目排在最上面，所以高亮会一直停在
+    // 最新一条上，而不是钉在某条旧记录上、随着新条目插入慢慢往下沉。
+    selected_index_ = ClampPopupSelectedIndex(static_cast<int>(items_.size()), selected_index_);
     ClampScrollToCurrentPopupHeight();
     PruneImagePreviewCache();
+    // 列表换了：纸条直接落到新位置，不做跨列表飞行。
+    slip_y_ = PopupSpringState{SlipTargetTop() < 0.0f ? 0.0f : SlipTargetTop(), 0.0f};
+    slip_h_ = PopupSpringState{SlipTargetHeight(), 0.0f};
+    slip_last_ms_ = static_cast<double>(GetTickCount64());
 }
 
 void PopupWindow::PruneImagePreviewCache() {
@@ -907,8 +1036,11 @@ float PopupWindow::SearchTextOffsetDips(size_t text_index, bool trailing) const 
     IDWriteTextLayout* text_layout = nullptr;
     float offset = 0.0f;
     const size_t clamped_index = std::min(text_index, query_.size());
+    // The caret must be measured with the same face/format the text is drawn with (search_format_,
+    // 14pt); using small_format_ (11pt) here made the caret, selection and hit-testing drift left.
+    IDWriteTextFormat* caret_format = search_format_ ? search_format_ : small_format_;
     if (SUCCEEDED(dwrite_factory_->CreateTextLayout(query_.c_str(), static_cast<UINT32>(query_.size()),
-                                                    small_format_, search_layout.text.Width(),
+                                                    caret_format, search_layout.text.Width(),
                                                     search_layout.text.Height(), &text_layout)) &&
         text_layout) {
         FLOAT caret_offset = 0.0f;
@@ -949,8 +1081,9 @@ size_t PopupWindow::SearchTextIndexFromPoint(POINT point) const {
                                std::max(0.0f, search_layout.text.Height()));
     IDWriteTextLayout* text_layout = nullptr;
     size_t index = query_.size();
+    IDWriteTextFormat* caret_format = search_format_ ? search_format_ : small_format_;
     if (SUCCEEDED(dwrite_factory_->CreateTextLayout(query_.c_str(), static_cast<UINT32>(query_.size()),
-                                                    small_format_, search_layout.text.Width(),
+                                                    caret_format, search_layout.text.Width(),
                                                     search_layout.text.Height(), &text_layout)) &&
         text_layout) {
         BOOL trailing_hit = FALSE;
@@ -1006,11 +1139,24 @@ void PopupWindow::EndSearchSelectionDrag() {
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
+void PopupWindow::ReloadSettingsCache() {
+    settings_cache_ = store_.LoadSettings();
+    settings_cache_valid_ = true;
+    history_limit_ = settings_cache_.history_limit;
+}
+
 void PopupWindow::UpdateThemeFromSettings(bool force) {
-    const auto settings = store_.LoadSettings();
+    // ReloadItems() 会在每次输入/过滤时调用到这里，之前每次都整表读 settings 并查一次系统设置，
+    // 现在改成用缓存，只有真正保存设置时才重新读取（见 InvalidateSettingsCache 的调用点）。
+    if (!settings_cache_valid_) {
+        ReloadSettingsCache();
+    }
+    const auto& settings = settings_cache_;
     const int next_theme = std::clamp(settings.theme_mode, 0, 2);
     const bool resize_changed = popup_resizable_ != settings.popup_resizable;
     popup_resizable_ = settings.popup_resizable;
+    paused_ = settings.paused;
+    UpdateAnimationPreferences();
     if (!force && next_theme == theme_mode_ && text_brush_) {
         if (resize_changed && !popup_resizable_) {
             manual_popup_size_ = false;
@@ -1023,16 +1169,6 @@ void PopupWindow::UpdateThemeFromSettings(bool force) {
         DeleteObject(search_edit_brush_);
         search_edit_brush_ = nullptr;
     }
-    ReleasePtr(pin_icon_inverted_);
-    ReleasePtr(pin_active_icon_inverted_);
-    ReleasePtr(close_icon_inverted_);
-    ReleasePtr(filter_icon_inverted_);
-    ReleasePtr(filter_active_icon_inverted_);
-    ReleasePtr(multi_select_icon_inverted_);
-    ReleasePtr(multi_select_active_icon_inverted_);
-    ReleasePtr(trash_icon_inverted_);
-    ReleasePtr(add_favorite_folder_outline_icon_inverted_);
-    ReleasePtr(add_favorite_folder_filled_icon_inverted_);
     if (text_brush_) {
         const auto palette = ResolvePopupThemePalette(theme_mode_, IsSystemDarkTheme());
         text_brush_->SetColor(D2D1::ColorF(palette.text, 0.94f));
@@ -1045,7 +1181,10 @@ void PopupWindow::UpdateThemeFromSettings(bool force) {
 }
 
 void PopupWindow::UpdateBehaviorFromSettings() {
-    const bool next_resizable = store_.LoadSettings().popup_resizable;
+    if (!settings_cache_valid_) {
+        ReloadSettingsCache();
+    }
+    const bool next_resizable = settings_cache_.popup_resizable;
     const bool changed = popup_resizable_ != next_resizable;
     popup_resizable_ = next_resizable;
     if (!popup_resizable_) {
@@ -1070,7 +1209,8 @@ void PopupWindow::ResetManualSize() {
 
 HistoryQuery PopupWindow::BuildQuery() const {
     HistoryQuery query;
-    query.limit = 60;
+    query.limit = std::max(60, history_limit_);
+    query.include_favorites = true;
     query.text = query_;
     query.kinds = filter_kinds_;
     query.favorites_only = view_mode_ == ViewMode::Favorites;
@@ -1105,18 +1245,22 @@ std::wstring PopupWindow::FavoriteGroupName(std::optional<int64_t> group_id) con
 
 void PopupWindow::MoveSelection(int delta) {
     if (items_.empty()) return;
+    CancelSmoothScroll();
     selected_index_ = ClampPopupSelectedIndex(static_cast<int>(items_.size()), selected_index_ + delta);
     scroll_offset_ = ScrollOffsetToRevealSelection(scroll_offset_, selected_index_);
+    KickSlipAnimation();
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
 void PopupWindow::AdvanceSelectionAfterContinuousPaste() {
+    if(!IsVisible())return;
     if (items_.empty()) {
         return;
     }
     selected_index_ =
         PopupContinuousPasteSelectionStep(static_cast<int>(items_.size()), selected_index_).next_selected_index;
     scroll_offset_ = ScrollOffsetToRevealSelection(scroll_offset_, selected_index_);
+    KickSlipAnimation();
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
@@ -1127,13 +1271,17 @@ bool PopupWindow::PasteSelectedForContinuousPaste() {
     const auto step = PopupContinuousPasteSelectionStep(static_cast<int>(items_.size()), selected_index_);
     selected_index_ = step.paste_index;
     const auto item = items_[step.paste_index];
-    if (!paste_controller_.RestoreToClipboard(item, hwnd_)) {
+    auto load_full = [this](int64_t id) { return store_.Get(id); };
+    if (!paste_controller_.RestoreToClipboard(item, hwnd_, load_full)) {
         return false;
     }
     BeginTransientHideSuppression();
     paste_controller_.SendPaste(paste_target_, PasteShortcutOptions{false});
     EndTransientHideSuppressionSoon();
     AdvanceSelectionAfterContinuousPaste();
+    stamp_item_id_ = item.id;
+    stamp_start_ms_ = static_cast<double>(GetTickCount64());
+    SetTimer(hwnd_, kAnimationTimer, kAnimationTimerMs, nullptr);
     if (ShouldHidePopupAfterContinuousPaste(pinned_open_)) {
         Hide(L"continuous-paste");
     }
@@ -1149,6 +1297,7 @@ void PopupWindow::BeginItemPress(int item_index, POINT point) {
     press_point_ = point;
     SetCapture(hwnd_);
     SetTimer(hwnd_, kItemLongPressTimer, PopupItemLongPressMilliseconds(), nullptr);
+    InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
 void PopupWindow::CancelItemPress() {
@@ -1172,6 +1321,7 @@ void PopupWindow::HandleLongPressTimer() {
     KillTimer(hwnd_, kItemLongPressTimer);
     selected_index_ = pressed_item_index_;
     scroll_offset_ = ScrollOffsetToRevealSelection(scroll_offset_, selected_index_);
+    KickSlipAnimation();
     long_press_selected_ = true;
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
@@ -1183,6 +1333,7 @@ void PopupWindow::CompleteItemPress(POINT point) {
     }
     const int released = HitTestItem(point);
     const bool long_press = long_press_selected_;
+    InvalidateRect(hwnd_, nullptr, FALSE);
     CancelItemPress();
     switch (PopupItemPressReleaseActionFor(pressed == released, long_press)) {
     case PopupItemPressReleaseAction::Paste:
@@ -1192,6 +1343,7 @@ void PopupWindow::CompleteItemPress(POINT point) {
     case PopupItemPressReleaseAction::SelectOnly:
         selected_index_ = pressed;
         scroll_offset_ = ScrollOffsetToRevealSelection(scroll_offset_, selected_index_);
+        KickSlipAnimation();
         InvalidateRect(hwnd_, nullptr, FALSE);
         break;
     case PopupItemPressReleaseAction::None:
@@ -1234,12 +1386,17 @@ void PopupWindow::CloseFavoriteGroupDeleteConfirmWithMotion() {
 void PopupWindow::ActivateSelection() {
     if (items_.empty()) return;
     const auto& item = items_[selected_index_];
+    if(row_transitions_.contains(item.id) && row_transitions_.at(item.id).removing)return;
     if (multi_select_) {
         selection_.Toggle(item.id);
         InvalidateRect(hwnd_, nullptr, FALSE);
         return;
     }
-    if (paste_controller_.RestoreToClipboard(item, hwnd_)) {
+    auto load_full = [this](int64_t id) { return store_.Get(id); };
+    if (paste_controller_.RestoreToClipboard(item, hwnd_, load_full)) {
+        stamp_item_id_ = item.id;
+        stamp_start_ms_ = static_cast<double>(GetTickCount64());
+        SetTimer(hwnd_, kAnimationTimer, kAnimationTimerMs, nullptr);
         if (ShouldHidePopupAfterPaste(pinned_open_)) {
             Hide(L"paste");
         }
@@ -1249,6 +1406,7 @@ void PopupWindow::ActivateSelection() {
 
 void PopupWindow::ToggleMultiSelect() {
     multi_select_ = !multi_select_;
+    InvalidateRowMetrics();
     selection_.Clear();
     if (multi_select_) {
         filter_open_ = false;
@@ -1260,24 +1418,50 @@ void PopupWindow::ToggleMultiSelect() {
 
 void PopupWindow::ToggleFavorite(int64_t id) {
     if (auto item = store_.Get(id)) {
+        if(animations_enabled_)badge_transitions_[id]={static_cast<double>(GetTickCount64()),false,item->is_favorite,!item->is_favorite};
         store_.SetFavorite(id, !item->is_favorite);
         ReloadItems();
+        RefreshFavoriteGroupCounts();
+        if(animations_enabled_)SetTimer(hwnd_,kAnimationTimer,kAnimationTimerMs,nullptr);
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
 }
 
 void PopupWindow::TogglePinned(int64_t id) {
-    if (auto item = store_.Get(id)) {
-        store_.SetPinned(id, !item->is_pinned);
-        ReloadItems();
-        InvalidateRect(hwnd_, nullptr, FALSE);
+    auto item = store_.Get(id);
+    if (!item) {
+        return;
     }
+    const bool pinning = !item->is_pinned;
+    if (animations_enabled_) {
+        badge_transitions_[id] = {static_cast<double>(GetTickCount64()), true, item->is_pinned, pinning};
+    }
+    // 纸条现在的位置先记下来：重新排版后让它滑过去，而不是瞬移。
+    const PopupSpringState slip_before = slip_y_;
+    const PopupSpringState slip_height_before = slip_h_;
+    store_.SetPinned(id, pinning);
+    ReloadItems();
+    if (pinning) {
+        // 置顶项会移到顶部置顶区，跟着它保持选中（就在视野里）。
+        SetSelectedItemId(id);
+    } else {
+        // 取消置顶后条目回到它原本的时间位置（通常落在列表中部），高亮不能跟着它「沉」下去；
+        // 回到最近分组的第一条，与呼出弹窗时的默认项保持一致。
+        selected_index_ = ClampPopupSelectedIndex(static_cast<int>(items_.size()),
+                                                  PopupDefaultSelectedIndex(CurrentSectionPlan()));
+        scroll_offset_ = ScrollOffsetToRevealSelection(scroll_offset_, selected_index_);
+    }
+    if (animations_enabled_) {
+        slip_y_ = slip_before;
+        slip_h_ = slip_height_before;
+        KickSlipAnimation();
+        SetTimer(hwnd_, kAnimationTimer, kAnimationTimerMs, nullptr);
+    }
+    InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
 void PopupWindow::DeleteItem(int64_t id) {
-    store_.Delete(id);
-    ReloadItems();
-    InvalidateRect(hwnd_, nullptr, FALSE);
+    BeginRemoval({id});
 }
 
 void PopupWindow::MoveItemInCurrentList(int item_index, int delta) {
@@ -1331,29 +1515,42 @@ void PopupWindow::PasteSelected() {
         return;
     }
 
-    bool pasted_any = false;
-    for (const auto& operation : BuildMultiPasteOperations(selected_items)) {
-        if (paste_controller_.RestoreMultipleToClipboard(operation.items, hwnd_)) {
-            paste_controller_.SendPaste(paste_target_);
-            pasted_any = true;
-            Sleep(70);
+    StartMultiPaste(BuildMultiPasteOperations(selected_items));
+}
+
+void PopupWindow::StartMultiPaste(std::vector<MultiPasteOperation> operations) {
+    multi_paste_operations_ = std::move(operations);
+    selection_.Clear();
+    multi_select_ = false;
+    AdvanceMultiPaste();
+}
+
+void PopupWindow::AdvanceMultiPaste() {
+    // 每段之间用定时器等待，而不是 Sleep() 把整个消息泵冻住（粘贴长列表时 UI 完全无响应）。
+    while (!multi_paste_operations_.empty()) {
+        auto operation = std::move(multi_paste_operations_.front());
+        multi_paste_operations_.erase(multi_paste_operations_.begin());
+        if (!paste_controller_.RestoreMultipleToClipboard(operation.items, hwnd_)) {
+            continue;
+        }
+        paste_controller_.SendPaste(paste_target_);
+        if (!multi_paste_operations_.empty()) {
+            SetTimer(hwnd_, kMultiPasteTimer, kMultiPasteDelayMs, nullptr);
+            return;
         }
     }
-    if (pasted_any) {
-        selection_.Clear();
-        multi_select_ = false;
-        if (ShouldHidePopupAfterPaste(pinned_open_)) {
-            Hide(L"multi-paste");
-        } else {
-            InvalidateRect(hwnd_, nullptr, FALSE);
-        }
+    if (ShouldHidePopupAfterPaste(pinned_open_)) {
+        Hide(L"multi-paste");
+    } else {
+        InvalidateRect(hwnd_, nullptr, FALSE);
     }
 }
 
 void PopupWindow::PromptCreateFavoriteGroup() {
     prompt_open_ = true;
+    InvalidateRect(hwnd_, nullptr, FALSE); UpdateWindow(hwnd_);
     BeginTransientHideSuppression();
-    if (const auto name = PromptText(hwnd_, instance_, L"\u65b0\u5efa\u6536\u85cf\u5939", L"\u8f93\u5165\u5206\u7ec4\u540d\u79f0")) {
+    if (const auto name = PromptText(hwnd_, instance_, L"\u65b0\u5efa\u6536\u85cf\u5939", L"\u8f93\u5165\u5206\u7ec4\u540d\u79f0", L"", theme_mode_)) {
         active_favorite_group_id_ = store_.EnsureFavoriteGroup(*name);
         view_mode_ = ViewMode::Favorites;
         filter_open_ = false;
@@ -1366,6 +1563,7 @@ void PopupWindow::PromptCreateFavoriteGroup() {
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
     prompt_open_ = false;
+    InvalidateRect(hwnd_, nullptr, FALSE);
     EndTransientHideSuppressionSoon();
     SetTimer(hwnd_, kOutsideClickTimer, 50, nullptr);
 }
@@ -1376,20 +1574,23 @@ void PopupWindow::PromptEditNote(int64_t id) {
         return;
     }
     prompt_open_ = true;
+    InvalidateRect(hwnd_, nullptr, FALSE); UpdateWindow(hwnd_);
     BeginTransientHideSuppression();
-    if (const auto note = PromptText(hwnd_, instance_, L"编辑备注", L"备注会显示在收藏内容下方", item->note)) {
+    if (const auto note = PromptText(hwnd_, instance_, L"编辑备注", L"备注会显示在内容下方，也可以被搜索到", item->note, theme_mode_)) {
         store_.SetNote(id, *note);
         ReloadItems();
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
     prompt_open_ = false;
+    InvalidateRect(hwnd_, nullptr, FALSE);
     EndTransientHideSuppressionSoon();
 }
 
 void PopupWindow::PromptAddFavoritePhrase() {
     prompt_open_ = true;
+    InvalidateRect(hwnd_, nullptr, FALSE); UpdateWindow(hwnd_);
     BeginTransientHideSuppression();
-    if (const auto phrase = PromptFavoritePhrase(hwnd_, instance_)) {
+    if (const auto phrase = PromptFavoritePhrase(hwnd_, instance_, theme_mode_)) {
         if (store_.AddFavoritePhrase(phrase->text, phrase->note, active_favorite_group_id_)) {
             view_mode_ = ViewMode::Favorites;
             filter_open_ = false;
@@ -1401,10 +1602,14 @@ void PopupWindow::PromptAddFavoritePhrase() {
         }
     }
     prompt_open_ = false;
+    InvalidateRect(hwnd_, nullptr, FALSE);
     EndTransientHideSuppressionSoon();
 }
 
 void PopupWindow::ToggleFavoriteGroupMenu() {
+    if (!favorite_group_menu_open_) {
+        RefreshFavoriteGroupCounts();
+    }
     if (favorite_group_menu_open_) {
         CloseFavoriteGroupMenuWithMotion();
     } else {
@@ -1422,14 +1627,99 @@ void PopupWindow::ToggleFavoriteGroupMenu() {
 }
 
 void PopupWindow::ToggleExpanded(int64_t id) {
+    const double now = static_cast<double>(GetTickCount64());
+    const auto previous = expanded_item_id_;
+    float old_height = 0.0f;
+    for (const auto& item : items_) {
+        if (item.id == id) old_height = AnimatedExpandedHeight(item);
+        if (previous && item.id == *previous && item.id != id && animations_enabled_)
+            detail_transitions_[item.id] = {AnimatedExpandedHeight(item), 0.0f, now};
+    }
     if (expanded_item_id_ && *expanded_item_id_ == id) {
         expanded_item_id_.reset();
     } else {
         expanded_item_id_ = id;
     }
+    if (animations_enabled_) {
+        for (const auto& item : items_) if (item.id == id) {
+            detail_transitions_[id] = {old_height, expanded_item_id_ && *expanded_item_id_ == id
+                ? ExpandedExtraHeightForItem(item) : 0.0f, now};
+        }
+    }
+    detail_scroll_=0.0f;
+    InvalidateRowMetrics();
     arrow_motion_item_id_ = id;
-    arrow_motion_progress_ = 0.0f;
-    SetTimer(hwnd_, kAnimationTimer, 16, nullptr);
+    arrow_motion_progress_ = animations_enabled_ ? 0.0f : 1.0f;
+    arrow_motion_start_ms_ = static_cast<double>(GetTickCount64());
+    if (animations_enabled_) {
+        SetTimer(hwnd_, kAnimationTimer, kAnimationTimerMs, nullptr);
+    }
+    ResizeToCurrentItems();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+PopupFilterLayout PopupWindow::CurrentFilterLayout() const {
+    const bool custom = filter_preset_ == kFilterPresetCustom;
+    const int rows=PopupCalendarRowCount(calendar_year_,calendar_month_);
+    auto layout=BuildPopupFilterLayout(custom,rows,popup_logical_width_);
+    if(animations_enabled_ && calendar_motion_from_!=calendar_motion_to_) {
+        const float p=PopupMotionProgress(PopupTimedMotionProgress(static_cast<double>(GetTickCount64())-calendar_motion_start_ms_,240.0,true));
+        if(p<1.0f) {
+            const auto compact=BuildPopupFilterLayout(false,rows,popup_logical_width_);
+            const auto full=BuildPopupFilterLayout(true,rows,popup_logical_width_);
+            const float fraction=calendar_motion_from_+(calendar_motion_to_-calendar_motion_from_)*p;
+            const float delta=(full.panel.bottom-compact.panel.bottom)*fraction;
+            const float current_delta=layout.panel.bottom-compact.panel.bottom;
+            const float shift=delta-current_delta;
+            for(auto* rect:{&layout.footer_divider,&layout.done,&layout.count_text}){rect->top+=shift;rect->bottom+=shift;}
+            layout.panel.bottom+=shift;
+            if(!custom) {
+                layout.calendar=full.calendar;layout.calendar_grid=full.calendar_grid;layout.calendar_title=full.calendar_title;
+                layout.calendar_prev=full.calendar_prev;layout.calendar_prev_year=full.calendar_prev_year;
+                layout.calendar_next=full.calendar_next;layout.calendar_next_year=full.calendar_next_year;layout.custom_range=true;
+            }
+        }
+    }
+    return layout;
+}
+
+void PopupWindow::RefreshFavoriteGroupCounts() {
+    favorite_group_counts_ = store_.FavoriteGroupCounts();
+    HistoryQuery query;
+    query.favorites_only = true;
+    favorite_group_counts_total_ = store_.Count(query);
+}
+
+bool PopupWindow::HasActiveFilter() const {
+    return !filter_kinds_.empty() || date_filter_.start.has_value() || date_filter_.end.has_value() ||
+           filter_preset_ != 0;
+}
+
+int PopupWindow::FavoriteGroupItemCount(int64_t group_id) const {
+    const auto found = favorite_group_counts_.find(group_id);
+    return found == favorite_group_counts_.end() ? 0 : found->second;
+}
+
+void PopupWindow::ApplyFilterPreset(int preset_index) {
+    const int clamped = std::clamp(preset_index, 0, kFilterPresetCustom);
+    const float current=filter_preset_==kFilterPresetCustom?1.0f:0.0f;
+    if((clamped==kFilterPresetCustom)!=(filter_preset_==kFilterPresetCustom)){
+        calendar_motion_from_=current;calendar_motion_to_=clamped==kFilterPresetCustom?1.0f:0.0f;
+        calendar_motion_start_ms_=static_cast<double>(GetTickCount64());
+        if(animations_enabled_)SetTimer(hwnd_,kAnimationTimer,kAnimationTimerMs,nullptr);
+    }
+    filter_preset_ = clamped;
+    if (clamped != kFilterPresetCustom) {
+        const auto range = PopupPresetDateRangeFor(clamped, TodayDate());
+        date_filter_.start = range.start;
+        date_filter_.end = range.end;
+        date_filter_.active_field = PopupDateRangeField::Start;
+    } else if (date_filter_.start) {
+        calendar_year_ = date_filter_.start->year;
+        calendar_month_ = date_filter_.start->month;
+    }
+    scroll_offset_ = 0;
+    ReloadItems();
     ResizeToCurrentItems();
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
@@ -1678,8 +1968,10 @@ int PopupWindow::DesiredPopupLogicalHeight() const {
             return item.id == *expanded_item_id_;
         });
         if (found != items_.end()) {
+            // 页脚也要算进去，否则展开长备注会被页脚盖住。
             desired = static_cast<int>(std::ceil(PopupListTop() + metrics.card_height +
-                                                 ExpandedExtraHeightForItem(*found) + metrics.card_gap + 8.0f));
+                                                 ExpandedExtraHeightForItem(*found) + metrics.card_gap +
+                                                 PopupFooterHeight() + 8.0f));
         }
     }
     return std::clamp(desired, kMinPopupHeight, kMaxPopupHeight);
@@ -1687,19 +1979,14 @@ int PopupWindow::DesiredPopupLogicalHeight() const {
 
 float PopupWindow::ExpandedExtraHeightForItem(const HistoryItem& item) const {
     const auto& metrics = PopupMetrics();
-    const float detail_width = std::max(80.0f, static_cast<float>(popup_logical_width_ - metrics.margin * 2 - 96));
-    const auto detail = ItemDetailText(item);
-    const float measured_height = MeasureDetailTextHeight(detail, detail_width);
-    if (measured_height <= 0.0f) {
-        return PopupExpandedCardExtraHeightForText(detail, detail_width);
-    }
-    const bool image_item = item.kind == ClipboardKind::Image && !item.payload_path.empty();
-    const bool image_file_item =
-        item.kind == ClipboardKind::Files && !item.files.empty() && PopupFileCanUseImagePreview(item.files.front());
-    if (image_item || image_file_item) {
-        return PopupExpandedImageCardExtraHeightForMeasuredDetail(measured_height);
-    }
-    return PopupExpandedCardExtraHeightForMeasuredDetail(measured_height);
+    const float detail_width = std::max(40.0f, static_cast<float>(popup_logical_width_ - 140 - (multi_select_ ? 28 : 0)));
+    if (item.kind == ClipboardKind::Image && !item.payload_path.empty()) return 128.0f;
+    if(const auto cached=detail_height_cache_.find(item.id);cached!=detail_height_cache_.end() &&
+        cached->second.first==detail_width)return cached->second.second;
+    const float measured_height=MeasureDetailTextHeight(ItemDetailText(item),detail_width);
+    const float height=8.0f+std::min(150.0f,std::max(18.0f,measured_height)+16.0f);
+    if(detail_format_)detail_height_cache_[item.id]={detail_width,height};
+    return height;
 }
 
 float PopupWindow::MeasureDetailTextHeight(std::wstring_view text, float width) const {
@@ -1726,16 +2013,70 @@ float PopupWindow::MeasureDetailTextHeight(std::wstring_view text, float width) 
 }
 
 float PopupWindow::ItemScrollTop(int item_index) const {
-    const auto& metrics = PopupMetrics();
-    float top = 0.0f;
-    const int clamped_index = std::clamp(item_index, 0, static_cast<int>(items_.size()));
-    for (int index = 0; index < clamped_index; ++index) {
-        top += ItemScrollHeight(index);
-        if (index + 1 < static_cast<int>(items_.size())) {
-            top += static_cast<float>(metrics.card_gap);
+    return ItemRowTop(item_index);
+}
+
+PopupSectionPlan PopupWindow::CurrentSectionPlan() const {
+    size_t pinned = 0;
+    for (const auto& item : items_) {
+        if (item.is_pinned) {
+            ++pinned;
+        } else {
+            break;
         }
     }
-    return top;
+    return PopupSectionPlanFor(items_.size(), pinned);
+}
+
+bool PopupWindow::RowMetricsAreAnimating() const {
+    // 展开/收起和删除过渡会连续改变行高，缓存在这段时间里每帧都无效。
+    return !detail_transitions_.empty() || !row_transitions_.empty();
+}
+
+void PopupWindow::RebuildRowMetrics() {
+    // 一次 O(n) 前缀和，之后绘制/命中/滚动都按索引 O(1) 取值。
+    // 之前 ItemRowTop() 每次都从 0 累加到 index，被行循环调用后整个绘制是 O(n^2)。
+    const auto& metrics = PopupMetrics();
+    const size_t count = items_.size();
+    const auto plan = CurrentSectionPlan();
+    const float header = PopupSectionHeaderHeight();
+    const float gap = static_cast<float>(metrics.card_gap);
+
+    row_heights_.resize(count);
+    row_tops_.resize(count);
+    float top = plan.show_pinned_header ? header : 0.0f;
+    for (size_t index = 0; index < count; ++index) {
+        if (plan.show_recent_header && index == plan.pinned_count) {
+            top += header;
+        }
+        row_tops_[index] = top;
+        const float height = ItemScrollHeight(static_cast<int>(index));
+        row_heights_[index] = height;
+        top += height;
+        if (index + 1 < count) {
+            top += gap;
+        }
+    }
+    total_scroll_height_ = count == 0 ? 0.0f : top + 12.0f;
+    row_metrics_dirty_ = false;
+}
+
+float PopupWindow::RowTopForIndex(int item_index) const {
+    if (row_metrics_dirty_ || RowMetricsAreAnimating()) {
+        const_cast<PopupWindow*>(this)->RebuildRowMetrics();
+    }
+    if (item_index < 0 || item_index >= static_cast<int>(row_tops_.size())) {
+        return 0.0f;
+    }
+    return row_tops_[static_cast<size_t>(item_index)];
+}
+
+float PopupWindow::ItemRowTop(int item_index) const {
+    return RowTopForIndex(item_index);
+}
+
+void PopupWindow::InvalidateRowMetrics() {
+    row_metrics_dirty_ = true;
 }
 
 float PopupWindow::ItemScrollHeight(int item_index) const {
@@ -1745,26 +2086,23 @@ float PopupWindow::ItemScrollHeight(int item_index) const {
     }
     const auto& item = items_[item_index];
     const bool expanded = expanded_item_id_ && *expanded_item_id_ == item.id;
-    return static_cast<float>(metrics.card_height) + (expanded ? ExpandedExtraHeightForItem(item) : 0.0f);
-}
-
-float PopupWindow::TotalScrollHeight() const {
-    const auto& metrics = PopupMetrics();
-    if (items_.empty()) {
-        return 0.0f;
-    }
-    float height = 0.0f;
-    for (int index = 0; index < static_cast<int>(items_.size()); ++index) {
-        height += ItemScrollHeight(index);
-        if (index + 1 < static_cast<int>(items_.size())) {
-            height += static_cast<float>(metrics.card_gap);
-        }
+    float height = static_cast<float>(metrics.card_height) + AnimatedExpandedHeight(item);
+    if (const auto motion = row_transitions_.find(item.id); motion != row_transitions_.end()) {
+        const float progress = RowMotionProgress(item.id);
+        height *= motion->second.removing ? 1.0f - PopupMotionProgress(progress) : PopupMotionProgress(progress);
     }
     return height;
 }
 
+float PopupWindow::TotalScrollHeight() const {
+    if (row_metrics_dirty_ || RowMetricsAreAnimating()) {
+        const_cast<PopupWindow*>(this)->RebuildRowMetrics();
+    }
+    return total_scroll_height_;
+}
+
 float PopupWindow::ViewportScrollHeight() const {
-    return std::max(0.0f, static_cast<float>(popup_logical_height_) - PopupListTop() - 4.0f);
+    return std::max(0.0f, PopupListBottomForHeight(popup_logical_height_) - PopupListTop());
 }
 
 float PopupWindow::ClampSmoothScrollOffset(float requested_offset) const {
@@ -1783,16 +2121,56 @@ float PopupWindow::ScrollOffsetToRevealSelection(float requested_offset, int sel
                                           TotalScrollHeight(), ViewportScrollHeight());
 }
 
-int PopupWindow::FirstVisibleItemIndex() const {
-    float top = 0.0f;
-    for (int index = 0; index < static_cast<int>(items_.size()); ++index) {
-        const float bottom = top + ItemScrollHeight(index);
-        if (bottom >= scroll_offset_) {
-            return index;
-        }
-        top = bottom + static_cast<float>(PopupMetrics().card_gap);
+void PopupWindow::StartSmoothScrollToTop() {
+    // 预览：list.scrollTo({top: 0, behavior: 'smooth'})，滚动位上滑而不是瞬跳。
+    if (!animations_enabled_) {
+        CancelSmoothScroll();
+        scroll_offset_ = 0.0f;
+        return;
     }
-    return std::max(0, static_cast<int>(items_.size()) - 1);
+    smooth_scroll_from_ = scroll_offset_;
+    smooth_scroll_to_ = 0.0f;
+    smooth_scroll_start_ms_ = static_cast<double>(GetTickCount64());
+    smooth_scroll_active_ = std::abs(smooth_scroll_from_ - smooth_scroll_to_) > 0.01f;
+    if (smooth_scroll_active_) {
+        SetTimer(hwnd_, kAnimationTimer, kAnimationTimerMs, nullptr);
+    }
+}
+
+void PopupWindow::CancelSmoothScroll() {
+    smooth_scroll_active_ = false;
+    smooth_scroll_from_ = smooth_scroll_to_ = scroll_offset_;
+}
+
+bool PopupWindow::SmoothScrollNeedsAnimation() const {
+    return smooth_scroll_active_ && std::abs(scroll_offset_ - smooth_scroll_to_) > 0.01f;
+}
+
+void PopupWindow::AdvanceSmoothScroll() {
+    if (!smooth_scroll_active_) {
+        return;
+    }
+    // Chromium smooth scroll 约 300ms；超出后吸附到目标位置。
+    constexpr double kSmoothScrollMs = 300.0;
+    const double elapsed = static_cast<double>(GetTickCount64()) - smooth_scroll_start_ms_;
+    const float raw = static_cast<float>(std::clamp(elapsed / kSmoothScrollMs, 0.0, 1.0));
+    scroll_offset_ = ClampSmoothScrollOffset(
+        PopupSmoothScrollOffset(smooth_scroll_from_, smooth_scroll_to_, raw));
+    if (raw >= 1.0f) {
+        scroll_offset_ = smooth_scroll_to_;
+        smooth_scroll_active_ = false;
+    }
+}
+
+int PopupWindow::FirstVisibleItemIndex() const {
+    if (row_metrics_dirty_ || RowMetricsAreAnimating()) {
+        const_cast<PopupWindow*>(this)->RebuildRowMetrics();
+    }
+    if (items_.empty()) {
+        return 0;
+    }
+    // 前缀和上的二分：滚动到列表尾部时不用再从头遍历。
+    return PopupFirstVisibleRowIndex(row_tops_, scroll_offset_);
 }
 
 int PopupWindow::ResizeHitTest(POINT point) const {
@@ -1814,6 +2192,15 @@ int PopupWindow::ResizeHitTest(POINT point) const {
 }
 
 HCURSOR PopupWindow::CursorForPoint(POINT point) const {
+    if (context_menu_open_) {
+        const int row = HitTestContextMenu(point);
+        const bool sub = context_submenu_open_ && HitTestContextMenu(point, true) >= 0;
+        return LoadCursorW(nullptr, sub || ContextRowEnabled(row) ? IDC_HAND : IDC_ARROW);
+    }
+    if (clear_confirm_open_) {
+        const auto hit = HitTestFavoriteGroupDeleteConfirm(point, popup_logical_width_);
+        return LoadCursorW(nullptr, hit == PopupFavoriteGroupDeleteConfirmTarget::Delete || hit == PopupFavoriteGroupDeleteConfirmTarget::Cancel ? IDC_HAND : IDC_ARROW);
+    }
     if (const int resize_edges = ResizeHitTest(point)) {
         if ((resize_edges & kPopupResizeLeft && resize_edges & kPopupResizeTop) ||
             (resize_edges & kPopupResizeRight && resize_edges & kPopupResizeBottom)) {
@@ -1839,7 +2226,7 @@ HCURSOR PopupWindow::CursorForPoint(POINT point) const {
     }
 
     if (pending_favorite_group_delete_ || closing_delete_confirm_) {
-        const auto target = HitTestFavoriteGroupDeleteConfirm(point);
+        const auto target = HitTestFavoriteGroupDeleteConfirm(point, popup_logical_width_);
         if (target == PopupFavoriteGroupDeleteConfirmTarget::Delete ||
             target == PopupFavoriteGroupDeleteConfirmTarget::Cancel) {
             return LoadCursorW(nullptr, IDC_HAND);
@@ -1848,7 +2235,7 @@ HCURSOR PopupWindow::CursorForPoint(POINT point) const {
     }
 
     if (filter_open_) {
-        const auto target = HitTestPopupFilterTarget(BuildPopupFilterLayout(), calendar_year_, calendar_month_,
+        const auto target = HitTestPopupFilterTarget(CurrentFilterLayout(), calendar_year_, calendar_month_,
                                                      static_cast<float>(point.x), static_cast<float>(point.y));
         if (target != PopupFilterTarget::None && target != PopupFilterTarget::Panel) {
             return LoadCursorW(nullptr, IDC_HAND);
@@ -1994,6 +2381,7 @@ void PopupWindow::UpdateScrollDrag(POINT point) {
     const float content_height = TotalScrollHeight();
     const float viewport_height = ViewportScrollHeight();
     if (content_height <= viewport_height) {
+        CancelSmoothScroll();
         scroll_offset_ = 0.0f;
         return;
     }
@@ -2004,7 +2392,9 @@ void PopupWindow::UpdateScrollDrag(POINT point) {
     const float max_offset = std::max(0.0f, content_height - viewport_height);
     const float next_offset = ClampSmoothScrollOffset((thumb_top - track.top) * max_offset / travel);
     if (next_offset != scroll_offset_) {
+        CancelSmoothScroll();
         scroll_offset_ = next_offset;
+        KickSlipAnimation();
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
 }
@@ -2022,47 +2412,80 @@ void PopupWindow::EnsureDeviceResources() {
     if (!dwrite_factory_) {
         DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
                             reinterpret_cast<IUnknown**>(&dwrite_factory_));
+        // Ink Ledger 字体：品牌 Georgia 斜体，正文/次要 Segoe UI，数字与时间 Consolas。
+        dwrite_factory_->CreateTextFormat(L"Georgia", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                                          DWRITE_FONT_STYLE_ITALIC, DWRITE_FONT_STRETCH_NORMAL,
+                                          17.0f, L"zh-CN", &brand_format_);
+        dwrite_factory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+                                          DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+                                          13.0f, L"zh-CN", &label_format_);
         dwrite_factory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
                                           DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                                          18.0f, L"zh-CN", &title_format_);
+                                          13.0f, L"zh-CN", &title_format_);
+        dwrite_factory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+                                          DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+                                          12.0f, L"zh-CN", &button_format_);
+        dwrite_factory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+                                          DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+                                          14.0f, L"zh-CN", &search_format_);
+        dwrite_factory_->CreateTextFormat(L"Consolas", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+                                          DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+                                          10.5f, L"zh-CN", &mono_format_);
         dwrite_factory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
                                           DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
                                           13.0f, L"zh-CN", &body_format_);
         dwrite_factory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
                                           DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                                          12.0f, L"zh-CN", &small_format_);
+                                          11.0f, L"zh-CN", &small_format_);
+        dwrite_factory_->CreateTextFormat(L"Consolas", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,12.5f,L"zh-CN",&code_format_);
+        dwrite_factory_->CreateTextFormat(L"Consolas", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
+            DWRITE_FONT_STYLE_NORMAL,DWRITE_FONT_STRETCH_NORMAL,7.5f,L"en-US",&extension_format_);
         dwrite_factory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
                                           DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
                                           12.0f, L"zh-CN", &detail_format_);
         dwrite_factory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
                                           DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
                                           12.0f, L"zh-CN", &centered_small_format_);
-        dwrite_factory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+        dwrite_factory_->CreateTextFormat(L"Consolas", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
                                           DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
                                           11.0f, L"zh-CN", &date_value_format_);
-        centered_small_format_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-        centered_small_format_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-        date_value_format_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-        body_format_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-        small_format_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        if (centered_small_format_) {
+            centered_small_format_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            centered_small_format_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        }
+        if (date_value_format_) {
+            date_value_format_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        }
+        for (auto* format : {brand_format_, label_format_, title_format_, button_format_, search_format_,
+                             mono_format_, body_format_, small_format_, date_value_format_, code_format_, extension_format_}) {
+            if (format) {
+                format->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            }
+        }
         DWRITE_TRIMMING trimming{};
         trimming.granularity = DWRITE_TRIMMING_GRANULARITY_CHARACTER;
-        dwrite_factory_->CreateEllipsisTrimmingSign(body_format_, &ellipsis_trimming_sign_);
-        for (auto* format : {title_format_, body_format_, small_format_, centered_small_format_, date_value_format_}) {
-            format->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-            format->SetTrimming(&trimming, ellipsis_trimming_sign_);
+        if (body_format_) {
+            dwrite_factory_->CreateEllipsisTrimmingSign(body_format_, &ellipsis_trimming_sign_);
         }
-        detail_format_->SetWordWrapping(DWRITE_WORD_WRAPPING_CHARACTER);
-        detail_format_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
-    }
-    if (!wic_factory_) {
-        CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic_factory_));
+        for (auto* format : {brand_format_, label_format_, title_format_, button_format_, search_format_,
+                             mono_format_, body_format_, small_format_, centered_small_format_,
+                             date_value_format_, code_format_, extension_format_}) {
+            if (format) {
+                format->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+                format->SetTrimming(&trimming, ellipsis_trimming_sign_);
+            }
+        }
+        if (detail_format_) {
+            detail_format_->SetWordWrapping(DWRITE_WORD_WRAPPING_CHARACTER);
+            detail_format_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+        }
     }
     if (!render_target_) {
         RECT rc{};
         GetClientRect(hwnd_, &rc);
         d2d_factory_->CreateHwndRenderTarget(
-            D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_DEFAULT,
+            D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_SOFTWARE,
                                          D2D1::PixelFormat(DXGI_FORMAT_UNKNOWN, D2D1_ALPHA_MODE_PREMULTIPLIED)),
             D2D1::HwndRenderTargetProperties(hwnd_, D2D1::SizeU(rc.right - rc.left, rc.bottom - rc.top)),
             &render_target_);
@@ -2076,237 +2499,39 @@ void PopupWindow::EnsureDeviceResources() {
     }
 }
 
+void PopupWindow::DiscardTextResources() {
+    // 字体格式即将重建，之前量好的宽度既失效也会按悬垂的 format 指针命中。
+    text_width_cache_.clear();
+    ReleasePtr(brand_format_);
+    ReleasePtr(label_format_);
+    ReleasePtr(button_format_);
+    ReleasePtr(mono_format_);
+    ReleasePtr(search_format_);
+    ReleasePtr(title_format_);
+    ReleasePtr(body_format_);
+    ReleasePtr(code_format_);
+    ReleasePtr(extension_format_);
+    ReleasePtr(small_format_);
+    ReleasePtr(detail_format_);
+    ReleasePtr(centered_small_format_);
+    ReleasePtr(date_value_format_);
+    ReleasePtr(ellipsis_trimming_sign_);
+    ReleasePtr(wic_factory_);
+    ReleasePtr(dwrite_factory_);
+}
+
 void PopupWindow::DiscardDeviceResources() {
-    ReleasePtr(pin_icon_);
-    ReleasePtr(pin_active_icon_);
-    ReleasePtr(close_icon_);
-    ReleasePtr(filter_icon_);
-    ReleasePtr(filter_active_icon_);
-    ReleasePtr(multi_select_icon_);
-    ReleasePtr(multi_select_active_icon_);
-    ReleasePtr(trash_icon_);
-    ReleasePtr(text_kind_icon_);
-    ReleasePtr(link_kind_icon_);
-    ReleasePtr(add_favorite_folder_outline_icon_);
-    ReleasePtr(add_favorite_folder_filled_icon_);
-    ReleasePtr(pin_icon_inverted_);
-    ReleasePtr(pin_active_icon_inverted_);
-    ReleasePtr(close_icon_inverted_);
-    ReleasePtr(filter_icon_inverted_);
-    ReleasePtr(filter_active_icon_inverted_);
-    ReleasePtr(multi_select_icon_inverted_);
-    ReleasePtr(multi_select_active_icon_inverted_);
-    ReleasePtr(trash_icon_inverted_);
-    ReleasePtr(add_favorite_folder_outline_icon_inverted_);
-    ReleasePtr(add_favorite_folder_filled_icon_inverted_);
     for (auto& [_, bitmap] : image_preview_cache_) {
         ReleasePtr(bitmap);
     }
     image_preview_cache_.clear();
-    for (auto& [_, bitmap] : file_icon_cache_) {
-        ReleasePtr(bitmap);
-    }
-    file_icon_cache_.clear();
     ReleasePtr(text_brush_);
     ReleasePtr(muted_brush_);
     ReleasePtr(accent_brush_);
+    ReleasePtr(paint_brush_);
+    ReleasePtr(ribbon_notch_left_);
+    ReleasePtr(ribbon_notch_right_);
     ReleasePtr(render_target_);
-}
-
-ID2D1Bitmap* PopupWindow::LoadIconBitmap(IconId icon) {
-    ID2D1Bitmap** slot = nullptr;
-    const wchar_t* filename = nullptr;
-    int resource_id = 0;
-    switch (icon) {
-    case IconId::Pin:
-        slot = &pin_icon_;
-        filename = L"pin.png";
-        resource_id = IDR_CLIPSOUL_ICON_PIN;
-        break;
-    case IconId::PinActive:
-        slot = &pin_active_icon_;
-        filename = L"pin-active.png";
-        resource_id = IDR_CLIPSOUL_ICON_PIN_ACTIVE;
-        break;
-    case IconId::Close:
-        slot = &close_icon_;
-        filename = L"close.png";
-        resource_id = IDR_CLIPSOUL_ICON_CLOSE;
-        break;
-    case IconId::Filter:
-        slot = &filter_icon_;
-        filename = L"filter.png";
-        resource_id = IDR_CLIPSOUL_ICON_FILTER;
-        break;
-    case IconId::FilterActive:
-        slot = &filter_active_icon_;
-        filename = L"filter-active.png";
-        resource_id = IDR_CLIPSOUL_ICON_FILTER_ACTIVE;
-        break;
-    case IconId::MultiSelect:
-        slot = &multi_select_icon_;
-        filename = L"multi-select.png";
-        resource_id = IDR_CLIPSOUL_ICON_MULTI_SELECT;
-        break;
-    case IconId::MultiSelectActive:
-        slot = &multi_select_active_icon_;
-        filename = L"multi-select-active.png";
-        resource_id = IDR_CLIPSOUL_ICON_MULTI_SELECT_ACTIVE;
-        break;
-    case IconId::Trash:
-        slot = &trash_icon_;
-        filename = L"trash.png";
-        resource_id = IDR_CLIPSOUL_ICON_TRASH;
-        break;
-    case IconId::TextKind:
-        slot = &text_kind_icon_;
-        filename = L"text-kind.png";
-        resource_id = IDR_CLIPSOUL_ICON_TEXT_KIND;
-        break;
-    case IconId::LinkKind:
-        slot = &link_kind_icon_;
-        filename = L"link-kind.png";
-        resource_id = IDR_CLIPSOUL_ICON_LINK_KIND;
-        break;
-    case IconId::AddFavoriteFolderOutline:
-        slot = &add_favorite_folder_outline_icon_;
-        filename = L"add-favorite-folder-outline.png";
-        resource_id = IDR_CLIPSOUL_ICON_ADD_FAVORITE_FOLDER_OUTLINE;
-        break;
-    case IconId::AddFavoriteFolderFilled:
-        slot = &add_favorite_folder_filled_icon_;
-        filename = L"add-favorite-folder-filled.png";
-        resource_id = IDR_CLIPSOUL_ICON_ADD_FAVORITE_FOLDER_FILLED;
-        break;
-    }
-    if (!slot || *slot || !wic_factory_ || !render_target_) {
-        return slot ? *slot : nullptr;
-    }
-
-    IWICBitmapDecoder* decoder = nullptr;
-    IWICBitmapFrameDecode* frame = nullptr;
-    IWICFormatConverter* converter = nullptr;
-    if ((LoadWicFrameFromResource(wic_factory_, resource_id, &decoder, &frame) ||
-         LoadWicFrameFromFile(wic_factory_, IconPath(filename), &decoder, &frame)) &&
-        SUCCEEDED(wic_factory_->CreateFormatConverter(&converter)) &&
-        SUCCEEDED(converter->Initialize(frame, GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, nullptr, 0.0,
-                                        WICBitmapPaletteTypeMedianCut))) {
-        render_target_->CreateBitmapFromWicBitmap(converter, nullptr, slot);
-    }
-    ReleasePtr(converter);
-    ReleasePtr(frame);
-    ReleasePtr(decoder);
-    return *slot;
-}
-
-ID2D1Bitmap* PopupWindow::LoadInvertedIconBitmap(IconId icon) {
-    ID2D1Bitmap** slot = nullptr;
-    const wchar_t* filename = nullptr;
-    int resource_id = 0;
-    switch (icon) {
-    case IconId::Pin:
-        slot = &pin_icon_inverted_;
-        filename = L"pin.png";
-        resource_id = IDR_CLIPSOUL_ICON_PIN;
-        break;
-    case IconId::PinActive:
-        slot = &pin_active_icon_inverted_;
-        filename = L"pin-active.png";
-        resource_id = IDR_CLIPSOUL_ICON_PIN_ACTIVE;
-        break;
-    case IconId::Close:
-        slot = &close_icon_inverted_;
-        filename = L"close.png";
-        resource_id = IDR_CLIPSOUL_ICON_CLOSE;
-        break;
-    case IconId::Filter:
-        slot = &filter_icon_inverted_;
-        filename = L"filter.png";
-        resource_id = IDR_CLIPSOUL_ICON_FILTER;
-        break;
-    case IconId::FilterActive:
-        slot = &filter_active_icon_inverted_;
-        filename = L"filter-active.png";
-        resource_id = IDR_CLIPSOUL_ICON_FILTER_ACTIVE;
-        break;
-    case IconId::MultiSelect:
-        slot = &multi_select_icon_inverted_;
-        filename = L"multi-select.png";
-        resource_id = IDR_CLIPSOUL_ICON_MULTI_SELECT;
-        break;
-    case IconId::MultiSelectActive:
-        slot = &multi_select_active_icon_inverted_;
-        filename = L"multi-select-active.png";
-        resource_id = IDR_CLIPSOUL_ICON_MULTI_SELECT_ACTIVE;
-        break;
-    case IconId::Trash:
-        slot = &trash_icon_inverted_;
-        filename = L"trash.png";
-        resource_id = IDR_CLIPSOUL_ICON_TRASH;
-        break;
-    case IconId::AddFavoriteFolderOutline:
-        slot = &add_favorite_folder_outline_icon_inverted_;
-        filename = L"add-favorite-folder-outline.png";
-        resource_id = IDR_CLIPSOUL_ICON_ADD_FAVORITE_FOLDER_OUTLINE;
-        break;
-    case IconId::AddFavoriteFolderFilled:
-        slot = &add_favorite_folder_filled_icon_inverted_;
-        filename = L"add-favorite-folder-filled.png";
-        resource_id = IDR_CLIPSOUL_ICON_ADD_FAVORITE_FOLDER_FILLED;
-        break;
-    default:
-        return LoadIconBitmap(icon);
-    }
-    if (!slot || *slot || !wic_factory_ || !render_target_) {
-        return slot ? *slot : nullptr;
-    }
-
-    IWICBitmapDecoder* decoder = nullptr;
-    IWICBitmapFrameDecode* frame = nullptr;
-    IWICFormatConverter* converter = nullptr;
-    UINT width = 0;
-    UINT height = 0;
-    HRESULT hr = E_FAIL;
-    if ((LoadWicFrameFromResource(wic_factory_, resource_id, &decoder, &frame) ||
-         LoadWicFrameFromFile(wic_factory_, IconPath(filename), &decoder, &frame)) &&
-        SUCCEEDED(wic_factory_->CreateFormatConverter(&converter)) &&
-        SUCCEEDED(converter->Initialize(frame, GUID_WICPixelFormat32bppBGRA, WICBitmapDitherTypeNone, nullptr, 0.0,
-                                        WICBitmapPaletteTypeMedianCut)) &&
-        SUCCEEDED(converter->GetSize(&width, &height)) && width > 0 && height > 0 && width <= 512 && height <= 512) {
-        const UINT stride = width * 4;
-        std::vector<uint8_t> pixels(static_cast<size_t>(stride) * height);
-        hr = converter->CopyPixels(nullptr, stride, static_cast<UINT>(pixels.size()), pixels.data());
-        if (SUCCEEDED(hr)) {
-            const auto palette = ResolvePopupThemePalette(theme_mode_, IsSystemDarkTheme());
-            const uint32_t tint = PopupDarkUiIconTintColor(palette);
-            const uint8_t tint_blue = static_cast<uint8_t>(tint & 0xFF);
-            const uint8_t tint_green = static_cast<uint8_t>((tint >> 8) & 0xFF);
-            const uint8_t tint_red = static_cast<uint8_t>((tint >> 16) & 0xFF);
-            for (size_t index = 0; index + 3 < pixels.size(); index += 4) {
-                const uint8_t alpha = pixels[index + 3];
-                if (alpha == 0) {
-                    pixels[index + 0] = 0;
-                    pixels[index + 1] = 0;
-                    pixels[index + 2] = 0;
-                    continue;
-                }
-                pixels[index + 0] = static_cast<uint8_t>((static_cast<unsigned int>(tint_blue) * alpha + 127) / 255);
-                pixels[index + 1] =
-                    static_cast<uint8_t>((static_cast<unsigned int>(tint_green) * alpha + 127) / 255);
-                pixels[index + 2] = static_cast<uint8_t>((static_cast<unsigned int>(tint_red) * alpha + 127) / 255);
-            }
-            const auto bitmap_properties = D2D1::BitmapProperties(
-                D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
-            hr = render_target_->CreateBitmap(D2D1::SizeU(width, height), pixels.data(), stride, bitmap_properties, slot);
-        }
-    }
-    ReleasePtr(converter);
-    ReleasePtr(frame);
-    ReleasePtr(decoder);
-    if (FAILED(hr)) {
-        return nullptr;
-    }
-    return *slot;
 }
 
 ID2D1Bitmap* PopupWindow::LoadImagePreviewBitmap(const std::filesystem::path& path) {
@@ -2325,20 +2550,13 @@ ID2D1Bitmap* PopupWindow::LoadImagePreviewBitmap(const std::filesystem::path& pa
         return nullptr;
     }
     const auto size = file.tellg();
-    if (size <= 0) {
-        image_preview_cache_[key] = nullptr;
-        return nullptr;
-    }
     file.seekg(0, std::ios::beg);
-    std::vector<char> dib(static_cast<size_t>(size));
-    file.read(dib.data(), static_cast<std::streamsize>(dib.size()));
-    if (!file || dib.size() < sizeof(BITMAPINFOHEADER)) {
-        image_preview_cache_[key] = nullptr;
-        return nullptr;
-    }
-
-    const auto* header = reinterpret_cast<const BITMAPINFOHEADER*>(dib.data());
-    if (header->biWidth <= 0 || header->biHeight == 0 || header->biPlanes != 1 ||
+    BITMAPINFOHEADER bitmap_header{};
+    file.read(reinterpret_cast<char*>(&bitmap_header),sizeof(bitmap_header));
+    const auto* header=&bitmap_header;
+    if (!file || size < static_cast<std::streamoff>(sizeof(BITMAPINFOHEADER)) ||
+        header->biSize < sizeof(BITMAPINFOHEADER) || header->biWidth <= 0 || header->biHeight == 0 ||
+        header->biHeight == LONG_MIN || header->biPlanes != 1 ||
         (header->biBitCount != 32 && header->biBitCount != 24)) {
         image_preview_cache_[key] = nullptr;
         return nullptr;
@@ -2351,7 +2569,7 @@ ID2D1Bitmap* PopupWindow::LoadImagePreviewBitmap(const std::filesystem::path& pa
     const size_t row_stride = ((static_cast<size_t>(width) * header->biBitCount + 31u) / 32u) * 4u;
     const size_t pixel_offset = header_size;
     const size_t required = pixel_offset + row_stride * static_cast<size_t>(height);
-    if (required > dib.size()) {
+    if (required > static_cast<size_t>(size)) {
         image_preview_cache_[key] = nullptr;
         return nullptr;
     }
@@ -2364,11 +2582,15 @@ ID2D1Bitmap* PopupWindow::LoadImagePreviewBitmap(const std::filesystem::path& pa
     }
 
     std::vector<uint32_t> pixels(static_cast<size_t>(target.cx) * static_cast<size_t>(target.cy));
-    const auto* src_base = reinterpret_cast<const uint8_t*>(dib.data() + pixel_offset);
+    // Read only sampled scanlines, rather than duplicating a full-resolution DIB.
+    std::vector<uint8_t> scanline(row_stride);
     for (int y = 0; y < target.cy; ++y) {
         const int sampled_y = std::min(height - 1, static_cast<int>((static_cast<int64_t>(y) * height) / target.cy));
         const int src_y = top_down ? sampled_y : height - 1 - sampled_y;
-        const auto* src = src_base + row_stride * static_cast<size_t>(src_y);
+        file.seekg(static_cast<std::streamoff>(pixel_offset + row_stride * static_cast<size_t>(src_y)));
+        file.read(reinterpret_cast<char*>(scanline.data()),static_cast<std::streamsize>(scanline.size()));
+        if(!file){image_preview_cache_[key]=nullptr;return nullptr;}
+        const auto* src = scanline.data();
         auto* dst = pixels.data() + static_cast<size_t>(y) * static_cast<size_t>(target.cx);
         for (int x = 0; x < target.cx; ++x) {
             const int sampled_x = std::min(width - 1, static_cast<int>((static_cast<int64_t>(x) * width) / target.cx));
@@ -2384,11 +2606,14 @@ ID2D1Bitmap* PopupWindow::LoadImagePreviewBitmap(const std::filesystem::path& pa
         D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE));
     render_target_->CreateBitmap(D2D1::SizeU(static_cast<UINT32>(target.cx), static_cast<UINT32>(target.cy)),
                                  pixels.data(), static_cast<UINT32>(target.cx * sizeof(uint32_t)), props, &bitmap);
+    // Sixteen entries cover the visible rows even at the largest supported height.
+    while(image_preview_cache_.size()>=16){auto it=image_preview_cache_.begin();ReleasePtr(it->second);image_preview_cache_.erase(it);}
     image_preview_cache_[key] = bitmap;
     return bitmap;
 }
 
 ID2D1Bitmap* PopupWindow::LoadImageFilePreviewBitmap(const std::filesystem::path& path) {
+    if(!wic_factory_)CoCreateInstance(CLSID_WICImagingFactory,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&wic_factory_));
     if (path.empty() || !wic_factory_ || !render_target_) {
         return nullptr;
     }
@@ -2413,99 +2638,9 @@ ID2D1Bitmap* PopupWindow::LoadImageFilePreviewBitmap(const std::filesystem::path
     ReleasePtr(preview_source);
     ReleasePtr(frame);
     ReleasePtr(decoder);
+    while(image_preview_cache_.size()>=16){auto it=image_preview_cache_.begin();ReleasePtr(it->second);image_preview_cache_.erase(it);}
     image_preview_cache_[key] = bitmap;
     return bitmap;
-}
-
-ID2D1Bitmap* PopupWindow::LoadFileIconBitmap(const std::wstring& path) {
-    if (path.empty() || !wic_factory_ || !render_target_) {
-        return nullptr;
-    }
-    const std::wstring extension = std::filesystem::path(path).extension().wstring();
-    const std::wstring key = extension.empty() ? path : extension;
-    if (const auto found = file_icon_cache_.find(key); found != file_icon_cache_.end()) {
-        return found->second;
-    }
-
-    SHFILEINFOW info{};
-    const DWORD_PTR result = SHGetFileInfoW(path.c_str(), FILE_ATTRIBUTE_NORMAL, &info, sizeof(info),
-                                           SHGFI_ICON | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES);
-    if (!result || !info.hIcon) {
-        file_icon_cache_[key] = nullptr;
-        return nullptr;
-    }
-
-    IWICBitmap* wic_bitmap = nullptr;
-    IWICFormatConverter* converter = nullptr;
-    ID2D1Bitmap* bitmap = nullptr;
-    if (SUCCEEDED(wic_factory_->CreateBitmapFromHICON(info.hIcon, &wic_bitmap)) &&
-        SUCCEEDED(wic_factory_->CreateFormatConverter(&converter)) &&
-        SUCCEEDED(converter->Initialize(wic_bitmap, GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, nullptr,
-                                        0.0, WICBitmapPaletteTypeMedianCut))) {
-        render_target_->CreateBitmapFromWicBitmap(converter, nullptr, &bitmap);
-    }
-    DestroyIcon(info.hIcon);
-    ReleasePtr(converter);
-    ReleasePtr(wic_bitmap);
-    file_icon_cache_[key] = bitmap;
-    return bitmap;
-}
-
-ID2D1Bitmap* PopupWindow::CachedIconBitmap(IconId icon) const {
-    switch (icon) {
-    case IconId::Pin:
-        return pin_icon_;
-    case IconId::PinActive:
-        return pin_active_icon_;
-    case IconId::Close:
-        return close_icon_;
-    case IconId::Filter:
-        return filter_icon_;
-    case IconId::FilterActive:
-        return filter_active_icon_;
-    case IconId::MultiSelect:
-        return multi_select_icon_;
-    case IconId::MultiSelectActive:
-        return multi_select_active_icon_;
-    case IconId::Trash:
-        return trash_icon_;
-    case IconId::TextKind:
-        return text_kind_icon_;
-    case IconId::LinkKind:
-        return link_kind_icon_;
-    case IconId::AddFavoriteFolderOutline:
-        return add_favorite_folder_outline_icon_;
-    case IconId::AddFavoriteFolderFilled:
-        return add_favorite_folder_filled_icon_;
-    }
-    return nullptr;
-}
-
-ID2D1Bitmap* PopupWindow::CachedInvertedIconBitmap(IconId icon) const {
-    switch (icon) {
-    case IconId::Pin:
-        return pin_icon_inverted_;
-    case IconId::PinActive:
-        return pin_active_icon_inverted_;
-    case IconId::Close:
-        return close_icon_inverted_;
-    case IconId::Filter:
-        return filter_icon_inverted_;
-    case IconId::FilterActive:
-        return filter_active_icon_inverted_;
-    case IconId::MultiSelect:
-        return multi_select_icon_inverted_;
-    case IconId::MultiSelectActive:
-        return multi_select_active_icon_inverted_;
-    case IconId::Trash:
-        return trash_icon_inverted_;
-    case IconId::AddFavoriteFolderOutline:
-        return add_favorite_folder_outline_icon_inverted_;
-    case IconId::AddFavoriteFolderFilled:
-        return add_favorite_folder_filled_icon_inverted_;
-    default:
-        return nullptr;
-    }
 }
 
 ID2D1Bitmap* PopupWindow::CachedImagePreviewBitmap(const std::filesystem::path& path) const {
@@ -2513,15 +2648,6 @@ ID2D1Bitmap* PopupWindow::CachedImagePreviewBitmap(const std::filesystem::path& 
         return nullptr;
     }
     if (const auto found = image_preview_cache_.find(path.wstring()); found != image_preview_cache_.end()) {
-        return found->second;
-    }
-    return nullptr;
-}
-
-ID2D1Bitmap* PopupWindow::CachedFileIconBitmap(const std::wstring& path) const {
-    const std::wstring extension = std::filesystem::path(path).extension().wstring();
-    const std::wstring key = extension.empty() ? path : extension;
-    if (const auto found = file_icon_cache_.find(key); found != file_icon_cache_.end()) {
         return found->second;
     }
     return nullptr;
@@ -2551,92 +2677,23 @@ PopupWindow::IconId PopupWindow::ToWindowIcon(PopupIconAssetSlot slot) const {
 
 void PopupWindow::DrawIcon(IconId icon, const UiRect& rect, float opacity) {
     const auto palette = ResolvePopupThemePalette(theme_mode_, IsSystemDarkTheme());
-    const bool fast_interaction =
-        PopupIsFastMediaInteraction(moving_window_, resizing_window_, motion_target_ == PopupMotionTarget::ViewSwitch);
-    const bool content_icon = icon == IconId::TextKind || icon == IconId::LinkKind;
-    ID2D1Bitmap* bitmap = nullptr;
-    if (palette.dark && !content_icon) {
-        bitmap = PopupUiIconShouldLoadBitmap(palette, content_icon, fast_interaction) ? LoadInvertedIconBitmap(icon)
-                                                                                      : CachedInvertedIconBitmap(icon);
+    InkGlyph glyph = InkGlyph::Plus;
+    switch (icon) {
+    case IconId::Pin: case IconId::PinActive: glyph = InkGlyph::Pin; break;
+    case IconId::Close: glyph = InkGlyph::Close; break;
+    case IconId::Filter: case IconId::FilterActive: glyph = InkGlyph::Filter; break;
+    case IconId::MultiSelect: case IconId::MultiSelectActive: glyph = InkGlyph::Multi; break;
+    case IconId::Trash: glyph = InkGlyph::Trash; break;
+    case IconId::TextKind: glyph = InkGlyph::Text; break;
+    case IconId::LinkKind: glyph = InkGlyph::Link; break;
+    default: break;
     }
-    if (!bitmap) {
-        if (!PopupUiIconShouldFallbackToOriginalBitmap(palette, content_icon)) {
-            return;
-        }
-        bitmap = PopupUiIconShouldLoadBitmap(palette, content_icon, fast_interaction) ? LoadIconBitmap(icon)
-                                                                                      : CachedIconBitmap(icon);
-    }
-    if (!PopupShouldDrawCachedMediaDuringFastInteraction(fast_interaction, bitmap != nullptr)) {
-        return;
-    }
-    if (bitmap) {
-        render_target_->DrawBitmap(bitmap, Rect(rect), opacity, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
-    }
-}
-
-void PopupWindow::DrawCardMedia(const HistoryItem& item, const PopupCardLayout& card, ID2D1SolidColorBrush* brush) {
-    const bool fast_interaction =
-        PopupIsFastMediaInteraction(moving_window_, resizing_window_, motion_target_ == PopupMotionTarget::ViewSwitch);
-    const bool load_previews = PopupShouldLoadImagePreview(fast_interaction);
-    const auto kind_color = KindColor(item.kind);
-    if (item.kind == ClipboardKind::Image) {
-        brush->SetColor(D2D1::ColorF(0xFFFFFF, 0.46f));
-        render_target_->FillRoundedRectangle(RoundRect(card.image_preview, 10), brush);
-        ID2D1Bitmap* bitmap =
-            load_previews ? LoadImagePreviewBitmap(item.payload_path) : CachedImagePreviewBitmap(item.payload_path);
-        if (PopupShouldDrawCachedMediaDuringFastInteraction(fast_interaction, bitmap != nullptr) && bitmap) {
-            const auto size = bitmap->GetSize();
-            const auto fitted =
-                FitImageRectToBounds(size.width, size.height, ShrinkRect(card.image_preview, 2.0f, 2.0f));
-            render_target_->DrawBitmap(bitmap, Rect(fitted), 0.96f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
-            brush->SetColor(D2D1::ColorF(0xFFFFFF, 0.62f));
-            render_target_->DrawRoundedRectangle(RoundRect(card.image_preview, 8), brush, 1.0f);
-            return;
-        }
-    }
-
-    if (item.kind == ClipboardKind::Files && !item.files.empty()) {
-        const auto& first_file = item.files.front();
-        if (PopupFileCanUseImagePreview(first_file)) {
-            brush->SetColor(D2D1::ColorF(0xFFFFFF, 0.46f));
-            render_target_->FillRoundedRectangle(RoundRect(card.image_preview, 10), brush);
-            ID2D1Bitmap* bitmap =
-                load_previews ? LoadImageFilePreviewBitmap(first_file) : CachedImagePreviewBitmap(first_file);
-            if (PopupShouldDrawCachedMediaDuringFastInteraction(fast_interaction, bitmap != nullptr) && bitmap) {
-                const auto size = bitmap->GetSize();
-                const auto fitted =
-                    FitImageRectToBounds(size.width, size.height, ShrinkRect(card.image_preview, 2.0f, 2.0f));
-                render_target_->DrawBitmap(bitmap, Rect(fitted), 0.96f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
-                brush->SetColor(D2D1::ColorF(0xFFFFFF, 0.62f));
-                render_target_->DrawRoundedRectangle(RoundRect(card.image_preview, 8), brush, 1.0f);
-                return;
-            }
-        }
-        ID2D1Bitmap* file_icon =
-            PopupShouldLoadFileIcon(fast_interaction) ? LoadFileIconBitmap(first_file) : CachedFileIconBitmap(first_file);
-        if (PopupShouldDrawCachedMediaDuringFastInteraction(fast_interaction, file_icon != nullptr) && file_icon) {
-            render_target_->DrawBitmap(file_icon, Rect(card.file_icon), 0.96f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
-            return;
-        }
-    }
-
-    if (item.kind == ClipboardKind::Text || item.kind == ClipboardKind::Html || item.kind == ClipboardKind::Link) {
-        const bool link = item.kind == ClipboardKind::Link;
-        const UiRect badge = CenteredRect(card.image_preview, 26.0f, 26.0f);
-        brush->SetColor(D2D1::ColorF(link ? 0xF3F0EA : 0xF1F2F4, 0.92f));
-        render_target_->FillRoundedRectangle(RoundRect(badge, 7), brush);
-        brush->SetColor(D2D1::ColorF(link ? 0x7A6F60 : 0x73767D, 0.42f));
-        render_target_->DrawRoundedRectangle(RoundRect(badge, 7), brush, 1.0f);
-        const auto icon_rect = PopupCardKindIconRect(card);
-        DrawIcon(link ? IconId::LinkKind : IconId::TextKind, icon_rect, 0.92f);
-        return;
-    }
-
-    brush->SetColor(D2D1::ColorF(kind_color.r, kind_color.g, kind_color.b, 0.12f));
-    render_target_->FillRoundedRectangle(RoundRect(card.image_preview, 8), brush);
-    brush->SetColor(kind_color);
-    render_target_->DrawRoundedRectangle(RoundRect(card.image_preview, 8), brush, 1.0f);
-    render_target_->DrawTextW(KindGlyph(item.kind), 1, centered_small_format_, Rect(card.image_preview), brush);
+    const bool content=icon==IconId::TextKind || icon==IconId::LinkKind;
+    if(!text_brush_)return;
+    const auto saved=text_brush_->GetColor();
+    text_brush_->SetColor(D2D1::ColorF(content?palette.muted:palette.text_tertiary,opacity));
+    DrawInkGlyph(render_target_,d2d_factory_,text_brush_,glyph,rect,ink_glyph_cache_.get());
+    text_brush_->SetColor(saved);
 }
 
 void PopupWindow::StartMotion(PopupMotionTarget target, int direction) {
@@ -2645,94 +2702,262 @@ void PopupWindow::StartMotion(PopupMotionTarget target, int direction) {
     }
     motion_target_ = target;
     motion_progress_ = 0.0f;
+    motion_start_ms_ = static_cast<double>(GetTickCount64());
     motion_direction_ = direction < 0 ? -1 : 1;
-    SetTimer(hwnd_, kAnimationTimer, 16, nullptr);
+    if (!animations_enabled_) {
+        motion_progress_ = 1.0f;
+        FinishMotionIfSettled();
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        return;
+    }
+    SetTimer(hwnd_, kAnimationTimer, kAnimationTimerMs, nullptr);
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
-void PopupWindow::AdvanceMotion() {
-    const bool has_panel_motion = motion_target_ != PopupMotionTarget::None;
-    const bool has_arrow_motion = arrow_motion_progress_ < 1.0f;
-    if (!has_panel_motion && !has_arrow_motion) {
-        KillTimer(hwnd_, kAnimationTimer);
+void PopupWindow::UpdateAnimationPreferences() {
+    // 系统关闭"显示动画"时，所有进度直接取 1，弹簧直接跳到目标位置。
+    BOOL enabled = TRUE;
+    if (!SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &enabled, 0)) {
+        enabled = TRUE;
+    }
+    animations_enabled_ = enabled != FALSE;
+    if (!animations_enabled_) {
+        motion_progress_ = 1.0f;
+        arrow_motion_progress_ = 1.0f;
+        hover_progress_ = 1.0f;
+    }
+}
+
+void PopupWindow::FinishMotionIfSettled() {
+    if (motion_progress_ >= 1.0f) {
+        motion_progress_ = 1.0f;
+        if (motion_target_ == PopupMotionTarget::FilterPanel) {
+            closing_filter_panel_ = false;
+        } else if (motion_target_ == PopupMotionTarget::FavoriteMenu) {
+            closing_favorite_group_menu_ = false;
+        } else if (motion_target_ == PopupMotionTarget::DeleteConfirm) {
+            closing_delete_confirm_ = false;
+            closing_delete_confirm_snapshot_ = PendingFavoriteGroupDelete{};
+        }
+        motion_target_ = PopupMotionTarget::None;
+    }
+}
+
+PopupMotionKind PopupWindow::MotionKindForTarget(PopupMotionTarget target) {
+    switch (target) {
+    case PopupMotionTarget::ViewSwitch:
+        return PopupMotionKind::ViewSwitch;
+    case PopupMotionTarget::MultiSelect:
+        return PopupMotionKind::MultiSelect;
+    default:
+        return PopupMotionKind::Panel;
+    }
+}
+
+BYTE PopupWindow::WindowAlphaForFrame() const {
+    if (!window_entering_ && !window_leaving_) {
+        return 255;
+    }
+    const PopupWindowMotionFrame frame = window_leaving_ ? PopupWindowLeaveFrame(window_motion_progress_)
+                                                        : PopupWindowEnterFrame(window_motion_progress_);
+    const float clamped = std::clamp(frame.opacity, 0.0f, 1.0f);
+    return static_cast<BYTE>(std::lround(clamped * 255.0f));
+}
+
+void PopupWindow::ApplyWindowAlpha() {
+    if (!hwnd_) {
         return;
     }
-    if (has_panel_motion) {
-        motion_progress_ = std::min(1.0f, motion_progress_ + 0.16f);
-        if (motion_progress_ >= 1.0f) {
-            motion_progress_ = 1.0f;
-            if (motion_target_ == PopupMotionTarget::FilterPanel) {
-                closing_filter_panel_ = false;
-            } else if (motion_target_ == PopupMotionTarget::FavoriteMenu) {
-                closing_favorite_group_menu_ = false;
-            } else if (motion_target_ == PopupMotionTarget::DeleteConfirm) {
-                closing_delete_confirm_ = false;
-                closing_delete_confirm_snapshot_ = PendingFavoriteGroupDelete{};
+    // 预览是整窗 opacity；分层窗口的 LWA_ALPHA 是唯一能连 DWM 阴影一起淡出的做法。
+    SetLayeredWindowAttributes(hwnd_, 0, WindowAlphaForFrame(), LWA_ALPHA);
+}
+
+void PopupWindow::AdvanceMotion() {
+    if(!IsVisible()){KillTimer(hwnd_,kAnimationTimer);return;}
+    const double now_ms = static_cast<double>(GetTickCount64());
+    // 只有真的有进度在推进时才整窗重绘：之前每帧无条件 InvalidateRect，导致 hover 收敛后
+    // 定时器还要空转 ~580ms、每 10ms 重绘一整张软件渲染的画布。
+    bool needs_repaint = false;
+    if (window_entering_ || window_leaving_) {
+        window_motion_progress_ = PopupTimedMotionProgress(now_ms - window_motion_start_ms_, window_leaving_ ? 120.0 : 170.0, animations_enabled_);
+        ApplyWindowAlpha();
+        needs_repaint = true;
+        if (window_motion_progress_ >= 1.0f) {
+            if (window_leaving_) {
+                completing_window_hide_ = true;
+                Hide(L"animation-complete");
+                completing_window_hide_ = false;
+                return;
             }
-            motion_target_ = PopupMotionTarget::None;
+            window_entering_ = false;
+            ApplyWindowAlpha();
         }
     }
-    if (has_arrow_motion) {
-        arrow_motion_progress_ = std::min(1.0f, arrow_motion_progress_ + 0.22f);
+    // 预览 rowRise：40 + i*18ms 错峰延迟，每行 220ms；最后一行结束于 422ms。
+    if (rows_entering_) {
+        if (now_ms - rows_entrance_start_ms_ >= PopupRowEntranceTotalMs()) rows_entering_ = false;
+        needs_repaint = true;
+    }
+    if (context_menu_open_ || closing_context_menu_) {
+        context_motion_progress_ = PopupTimedMotionProgress(now_ms - context_motion_start_ms_, 200.0, animations_enabled_);
+        if (context_motion_progress_ >= 1.0f) closing_context_menu_ = false;
+        needs_repaint = true;
+    }
+    bool removed = false;
+    for (auto it = row_transitions_.begin(); it != row_transitions_.end();) {
+        needs_repaint = true;
+        if (RowMotionProgress(it->first) >= 1.0f) {
+            removed |= it->second.removing;
+            it = row_transitions_.erase(it);
+        } else ++it;
+    }
+    if (removed) { ReloadItems(); RefreshFavoriteGroupCounts(); }
+    for (auto it = detail_transitions_.begin(); it != detail_transitions_.end();) {
+        needs_repaint = true;
+        if (now_ms - it->second.start_ms >= 240.0 || !animations_enabled_) it = detail_transitions_.erase(it);
+        else ++it;
+    }
+    for(auto it=badge_transitions_.begin();it!=badge_transitions_.end();) {
+        needs_repaint = true;
+        if(now_ms-it->second.start_ms>=280.0)it=badge_transitions_.erase(it);else ++it;
+    }
+    if (stamp_item_id_) {
+        if (now_ms - stamp_start_ms_ >= 960.0) {
+            stamp_item_id_.reset();
+        } else {
+            needs_repaint = true;
+        }
+    }
+    if (!toast_text_.empty()) {
+        if (now_ms - toast_start_ms_ >= 1600.0) {
+            toast_text_.clear();
+        } else {
+            needs_repaint = true;
+        }
+    }
+    if (motion_target_ != PopupMotionTarget::None) {
+        const auto kind = MotionKindForTarget(motion_target_);
+        motion_progress_ = PopupTimedMotionProgress(now_ms - motion_start_ms_,
+                                                    PopupMotionDurationMs(kind), animations_enabled_);
+        FinishMotionIfSettled();
+        needs_repaint = true;
+    }
+    if (pin_motion_progress_ < 1.0f) {
+        pin_motion_progress_ = PopupTimedMotionProgress(now_ms - pin_motion_start_ms_, 260.0, animations_enabled_);
+        if (pin_motion_progress_ >= 1.0f) pin_motion_progress_ = 1.0f;
+        needs_repaint = true;
+    }
+    if (arrow_motion_progress_ < 1.0f) {
+        arrow_motion_progress_ =
+            PopupTimedMotionProgress(now_ms - arrow_motion_start_ms_,
+                                     PopupMotionDurationMs(PopupMotionKind::Arrow), animations_enabled_);
         if (arrow_motion_progress_ >= 1.0f) {
             arrow_motion_progress_ = 1.0f;
             arrow_motion_item_id_.reset();
         }
+        needs_repaint = true;
     }
-    if (motion_target_ == PopupMotionTarget::None && arrow_motion_progress_ >= 1.0f) {
+    if (hover_progress_ < 1.0f) {
+        hover_progress_ = PopupTimedMotionProgress(now_ms - hover_motion_start_ms_,
+                                                   PopupMotionDurationMs(PopupMotionKind::Hover),
+                                                   animations_enabled_);
+        if (hover_progress_ >= 1.0f) {
+            KillTimer(hwnd_, kHoverTimer);
+        }
+        needs_repaint = true;
+    }
+    // 弹簧/平滑滚动只在还需要推进时才重绘，收敛之后不再白白整窗重画。
+    if (SlipNeedsAnimation() || SmoothScrollNeedsAnimation()) {
+        needs_repaint = true;
+    }
+    AdvanceSlipSpring();
+    AdvanceSmoothScroll();
+    // 悬停提示（450ms 后出现）也靠这个定时器驱动；它由 hover_action_ 决定，不靠进度值。
+    if (hover_action_ != UiAction::None) {
+        needs_repaint = true;
+    }
+    // 日历/搜索框过渡是纯时间驱动的绘制（Paint 里按 GetTickCount64 求值）。
+    if (now_ms - calendar_motion_start_ms_ < 240.0 || now_ms - search_focus_start_ms_ < 200.0) {
+        needs_repaint = true;
+    }
+    if (motion_target_ == PopupMotionTarget::None && arrow_motion_progress_ >= 1.0f &&
+        hover_progress_ >= 1.0f && pin_motion_progress_ >= 1.0f && !SlipNeedsAnimation() && !window_entering_ && !window_leaving_ &&
+        !rows_entering_ && row_transitions_.empty() && detail_transitions_.empty() && badge_transitions_.empty() && !closing_context_menu_ &&
+        context_motion_progress_ >= 1.0f && toast_text_.empty() && !stamp_item_id_ && !SmoothScrollNeedsAnimation() &&
+        now_ms-calendar_motion_start_ms_>=240.0 && now_ms - search_focus_start_ms_ >= 200.0 &&
+        (hover_action_==UiAction::None || now_ms-hover_motion_start_ms_>=580.0)) {
         KillTimer(hwnd_, kAnimationTimer);
     }
-    InvalidateRect(hwnd_, nullptr, FALSE);
+    if (needs_repaint) {
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+}
+
+float PopupWindow::SlipTargetTop() const {
+    if (items_.empty() || selected_index_ < 0 || selected_index_ >= static_cast<int>(items_.size())) {
+        return -1.0f;
+    }
+    return ItemRowTop(selected_index_) - scroll_offset_;
+}
+
+float PopupWindow::SlipTargetHeight() const {
+    if (items_.empty() || selected_index_ < 0 || selected_index_ >= static_cast<int>(items_.size())) {
+        return 0.0f;
+    }
+    return ItemScrollHeight(selected_index_);
+}
+
+bool PopupWindow::SlipNeedsAnimation() const {
+    const float target_top = SlipTargetTop();
+    if (target_top < 0.0f) {
+        return false;
+    }
+    return std::abs(slip_y_.position - target_top) > 0.5f || std::abs(slip_y_.velocity) > 2.0f ||
+           std::abs(slip_h_.position - SlipTargetHeight()) > 0.5f || std::abs(slip_h_.velocity) > 2.0f;
+}
+
+void PopupWindow::KickSlipAnimation() {
+    // 选中项或滚动位置变了：纸条要跟着动，必须保证 kAnimationTimer 在跑。
+    if (!hwnd_ || !IsVisible() || !animations_enabled_ || !SlipNeedsAnimation()) {
+        return;
+    }
+    slip_last_ms_ = 0.0;
+    SetTimer(hwnd_, kAnimationTimer, kAnimationTimerMs, nullptr);
+}
+
+void PopupWindow::AdvanceSlipSpring() {
+    const double now_ms = static_cast<double>(GetTickCount64());
+    const double elapsed_ms = slip_last_ms_ > 0.0 ? now_ms - slip_last_ms_ : 16.0;
+    slip_last_ms_ = now_ms;
+    const float target_top = SlipTargetTop();
+    if (target_top < 0.0f || !animations_enabled_) {
+        slip_y_ = PopupSpringState{target_top < 0.0f ? 0.0f : target_top, 0.0f};
+        slip_h_ = PopupSpringState{SlipTargetHeight(), 0.0f};
+        return;
+    }
+    const float dt = static_cast<float>(elapsed_ms / 1000.0);
+    slip_y_ = PopupSpringStep(slip_y_.position, slip_y_.velocity, target_top, dt);
+    slip_h_ = PopupSpringStep(slip_h_.position, slip_h_.velocity, SlipTargetHeight(), dt);
 }
 
 void PopupWindow::Paint() {
+    if(!IsVisible())return;
     EnsureDeviceResources();
+    if(!render_target_)return;
     const auto& metrics = PopupMetrics();
     if (PopupPaintShouldUpdateLayout()) {
         UpdatePopupLogicalSize();
         ClampScrollToCurrentPopupHeight();
     }
+    if (slip_last_ms_ <= 0.0) {
+        slip_last_ms_ = static_cast<double>(GetTickCount64());
+    }
     const auto palette = ResolvePopupThemePalette(theme_mode_, IsSystemDarkTheme());
-    render_target_->BeginDraw();
-    render_target_->Clear(D2D1::ColorF(palette.window_tint, 1.0f));
-
-    ID2D1SolidColorBrush* brush = nullptr;
-    render_target_->CreateSolidColorBrush(ColorWithAlpha(palette.window_tint, palette.window_opacity), &brush);
-    const bool drawing_fast_interaction = moving_window_ || resizing_window_;
-    auto drawEdgeShadow = [&](const UiRect& rect, float radius, float strength = 1.0f, float y_offset = 2.0f) {
-        if (!PopupShouldDrawDecorativeShadows(drawing_fast_interaction)) {
-            return;
-        }
-        const float alpha = (palette.dark ? 0.10f : 0.055f) * std::clamp(strength, 0.0f, 1.0f);
-        brush->SetColor(D2D1::ColorF(0x000000, alpha));
-        render_target_->FillRoundedRectangle(
-            RoundRect(rect.left, rect.top + y_offset, rect.right, rect.bottom + y_offset, radius),
-            brush);
-    };
-    auto drawInkPanelFrame = [&](const UiRect& rect, float radius, float opacity = 0.74f,
-                                 bool strong = false) {
-        brush->SetColor(D2D1::ColorF(strong ? palette.border_selected : palette.border,
-                                     palette.dark ? opacity * 0.78f : opacity));
-        render_target_->DrawRoundedRectangle(RoundRect(rect, radius), brush, strong ? 1.25f : 1.0f);
-    };
-    auto drawPopupInnerEdge = [&](const UiRect& rect, float radius) {
-        const float outer_alpha = palette.dark ? 0.52f : 0.74f;
-        brush->SetColor(D2D1::ColorF(palette.border_selected, outer_alpha));
-        if (PopupWindowEdgeShouldDrawCornerArcs()) {
-            render_target_->DrawRoundedRectangle(
-                RoundRect(rect.left, rect.top, rect.right, rect.bottom, radius),
-                brush, 1.0f);
-            return;
-        }
-        render_target_->DrawLine(D2D1::Point2F(rect.left, rect.top),
-                                 D2D1::Point2F(rect.right, rect.top), brush, 1.0f);
-        render_target_->DrawLine(D2D1::Point2F(rect.right, rect.top),
-                                 D2D1::Point2F(rect.right, rect.bottom), brush, 1.0f);
-        render_target_->DrawLine(D2D1::Point2F(rect.right, rect.bottom),
-                                 D2D1::Point2F(rect.left, rect.bottom), brush, 1.0f);
-        render_target_->DrawLine(D2D1::Point2F(rect.left, rect.bottom),
-                                 D2D1::Point2F(rect.left, rect.top), brush, 1.0f);
-    };
+    const float surface_width = static_cast<float>(popup_logical_width_);
+    const float surface_height = static_cast<float>(popup_logical_height_);
+    // Ink Ledger 内容边线：左 18 / 右 10（页眉、搜索、标签栏同宽）。
+    const float content_left = 18.0f;
+    const float content_right = surface_width - 10.0f;
     const auto motionProgressFor = [&](PopupMotionTarget target) {
         if (motion_target_ != target) {
             return 1.0f;
@@ -2740,114 +2965,251 @@ void PopupWindow::Paint() {
         const float progress = PopupMotionProgress(motion_progress_);
         return motion_direction_ < 0 ? 1.0f - progress : progress;
     };
-    auto applyMotionTransform = [&](PopupMotionTarget target, float max_offset, float min_scale,
-                                    const UiRect& anchor, bool horizontal = false) {
-        const bool view_switch_motion =
-            horizontal && target == PopupMotionTarget::ViewSwitch && motion_target_ == target;
-        const float motion = view_switch_motion ? PopupMotionProgress(motion_progress_) : motionProgressFor(target);
-        const float offset = view_switch_motion ? PopupViewSwitchListOffset(motion_direction_, motion_progress_, max_offset)
-                                                : PopupMotionEnterOffset(motion, max_offset);
-        const float scale = min_scale + (1.0f - min_scale) * motion;
-        const auto center =
-            D2D1::Point2F((anchor.left + anchor.right) * 0.5f, (anchor.top + anchor.bottom) * 0.5f);
-        const auto scale_matrix = D2D1::Matrix3x2F::Scale(scale, scale, center);
-        const auto move_matrix = horizontal
-                                     ? D2D1::Matrix3x2F::Translation(offset, 0.0f)
-                                     : D2D1::Matrix3x2F::Translation(0.0f, offset);
-        render_target_->SetTransform(scale_matrix * move_matrix);
-    };
-    auto applyMotionTransformFromTrigger = [&](PopupMotionTarget target, float max_offset, float min_scale,
-                                               const UiRect& trigger, const UiRect& panel) {
-        const bool exiting = motion_target_ == target && motion_direction_ < 0;
-        const float motion = motionProgressFor(target);
-        const auto offset = exiting
-                                ? PopupMotionExitOffsetFromTrigger(trigger, panel, motion_progress_, max_offset)
-                                : PopupMotionEnterOffsetFromTrigger(trigger, panel, motion, max_offset);
-        const float scale = min_scale + (1.0f - min_scale) * motion;
-        const auto center =
-            D2D1::Point2F((trigger.left + trigger.right) * 0.5f, (trigger.top + trigger.bottom) * 0.5f);
-        const auto scale_matrix = D2D1::Matrix3x2F::Scale(scale, scale, center);
-        const auto move_matrix = D2D1::Matrix3x2F::Translation(offset.x, offset.y);
-        render_target_->SetTransform(scale_matrix * move_matrix);
-    };
-    const UiRect window_surface_rect{0.0f, 0.0f, static_cast<float>(popup_logical_width_),
-                                     static_cast<float>(popup_logical_height_)};
-    brush->SetColor(ColorWithAlpha(palette.window_tint, palette.window_opacity));
-    render_target_->FillRoundedRectangle(RoundRect(window_surface_rect, PopupWindowEdgeCornerRadius()), brush);
-    if (PopupWindowShouldDrawClientEdge()) {
-        const UiRect popup_edge_rect = PopupWindowEdgeStrokeRectForSize(popup_logical_width_, popup_logical_height_);
-        drawPopupInnerEdge(popup_edge_rect, PopupWindowEdgeCornerRadius());
+    const bool view_switch_active = motion_target_ == PopupMotionTarget::ViewSwitch;
+
+    render_target_->BeginDraw();
+    // 预览里窗口是 border-radius:14px 的一张纸，圆角外是桌面。
+    // 这里用透明清屏 + 自绘圆角矩形，圆角外一格像素都不涂：窗口级 alpha 才能整窗淡入。
+    render_target_->Clear(D2D1::ColorF(0, 0.0f));
+
+    if (!paint_brush_ && render_target_) {
+        render_target_->CreateSolidColorBrush(ColorWithAlpha(palette.window_tint, palette.window_opacity), &paint_brush_);
     }
+    ID2D1SolidColorBrush* brush = paint_brush_;
+    if (!brush) {
+        return;
+    }
+    const bool drawing_fast_interaction = moving_window_ || resizing_window_;
+    auto drawEdgeShadow = [&](const UiRect& rect, float radius, float strength = 1.0f, float y_offset = 2.0f) {
+        if (!PopupShouldDrawDecorativeShadows(drawing_fast_interaction)) {
+            return;
+        }
+        const float amount = std::clamp(strength,0.0f,1.0f);
+        const int steps=radius>=11?12:7;
+        for(int i=steps;i>0;--i) {
+            const float spread=static_cast<float>(i);
+            brush->SetColor(D2D1::ColorF(palette.dark?0x000000:0x282014,
+                (palette.dark?0.025f:0.012f)*amount*(1.0f-spread/static_cast<float>(steps+2))));
+            render_target_->FillRoundedRectangle(RoundRect(rect.left-spread,rect.top+y_offset-spread*0.4f,
+                rect.right+spread,rect.bottom+y_offset+spread,radius+spread*0.5f),brush);
+        }
+    };
+    auto drawInkPanelFrame = [&](const UiRect& rect, float radius, float opacity = 0.74f, bool strong = false) {
+        brush->SetColor(D2D1::ColorF(strong ? palette.border_selected : palette.border,
+                                     palette.dark ? opacity * 0.78f : opacity));
+        render_target_->DrawRoundedRectangle(RoundRect(rect, radius), brush, strong ? 1.25f : 1.0f);
+    };
+    // 发丝线：墨色 9%（加强版 16%）。
+    auto hairline = [&](float left, float top, float right, bool strong = false) {
+        brush->SetColor(D2D1::ColorF(palette.text, strong ? 0.16f : 0.09f));
+        render_target_->DrawLine(D2D1::Point2F(left, top + 0.5f), D2D1::Point2F(right, top + 0.5f), brush, 1.0f);
+    };
+    // 收藏书签底部的 V 形缺口：两条斜切三角在单位空间里各建一次，之后只做平移 + 缩放。
+    // 之前每帧、每个收藏行都要 CreatePathGeometry 两次（并立刻 Release）。
+    auto ribbonNotchGeometry = [&](bool mirrored) -> ID2D1PathGeometry* {
+        ID2D1PathGeometry*& slot = mirrored ? ribbon_notch_right_ : ribbon_notch_left_;
+        if (slot || !d2d_factory_) {
+            return slot;
+        }
+        ID2D1PathGeometry* geometry = nullptr;
+        ID2D1GeometrySink* sink = nullptr;
+        if (SUCCEEDED(d2d_factory_->CreatePathGeometry(&geometry)) && geometry &&
+            SUCCEEDED(geometry->Open(&sink)) && sink) {
+            sink->BeginFigure(D2D1::Point2F(0.0f, 0.0f), D2D1_FIGURE_BEGIN_FILLED);
+            sink->AddLine(D2D1::Point2F(mirrored ? 1.0f : 0.0f, 1.0f));
+            sink->AddLine(D2D1::Point2F(mirrored ? 0.0f : 1.0f, 0.0f));
+            sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+            sink->Close();
+            sink->Release();
+            slot = geometry;
+            return geometry;
+        }
+        ReleasePtr(geometry);
+        return nullptr;
+    };
+    // 在 (x, y) 处画一个宽 w、高 h 的斜切缺口。
+    auto fillRibbonNotch = [&](float x, float y, float w, float h, bool mirrored, uint32_t color, float alpha) {
+        ID2D1PathGeometry* geometry = ribbonNotchGeometry(mirrored);
+        if (!geometry) {
+            return;
+        }
+        D2D1_MATRIX_3X2_F saved{};
+        render_target_->GetTransform(&saved);
+        render_target_->SetTransform(D2D1::Matrix3x2F::Scale(w, h) * D2D1::Matrix3x2F::Translation(x, y) * saved);
+        brush->SetColor(D2D1::ColorF(color, alpha));
+        render_target_->FillGeometry(geometry, brush);
+        render_target_->SetTransform(saved);
+    };
+    auto drawText = [&](std::wstring_view text, IDWriteTextFormat* format, const UiRect& rect, uint32_t color,
+                        float alpha) {
+        if (text.empty() || !format) {
+            return;
+        }
+        brush->SetColor(D2D1::ColorF(color, alpha));
+        render_target_->DrawTextW(text.data(), static_cast<UINT32>(text.size()), format, Rect(rect), brush);
+    };
+    auto drawChevron = [&](float cx, float cy, float size, bool up, uint32_t color, float alpha, float thickness) {
+        brush->SetColor(D2D1::ColorF(color, alpha));
+        const float half = size * 0.5f;
+        if (up) {
+            render_target_->DrawLine(D2D1::Point2F(cx - half, cy + half * 0.5f), D2D1::Point2F(cx, cy - half * 0.5f),
+                                     brush, thickness);
+            render_target_->DrawLine(D2D1::Point2F(cx + half, cy + half * 0.5f), D2D1::Point2F(cx, cy - half * 0.5f),
+                                     brush, thickness);
+        } else {
+            render_target_->DrawLine(D2D1::Point2F(cx - half, cy - half * 0.5f), D2D1::Point2F(cx, cy + half * 0.5f),
+                                     brush, thickness);
+            render_target_->DrawLine(D2D1::Point2F(cx + half, cy - half * 0.5f), D2D1::Point2F(cx, cy + half * 0.5f),
+                                     brush, thickness);
+        }
+    };
+
+    auto drawAlignedText = [&](std::wstring_view text, IDWriteTextFormat* format, const UiRect& rect,
+                               uint32_t color, float alpha, DWRITE_TEXT_ALIGNMENT alignment) {
+        if (!format) return;
+        const auto previous = format->GetTextAlignment();
+        format->SetTextAlignment(alignment);
+        drawText(text, format, rect, color, alpha);
+        format->SetTextAlignment(previous);
+    };
+    auto textWidth = [&](std::wstring_view text, IDWriteTextFormat* format) {
+        if (!format || text.empty()) {
+            return 0.0f;
+        }
+        const auto key = std::make_pair(std::wstring(text), static_cast<const void*>(format));
+        if (const auto cached = text_width_cache_.find(key); cached != text_width_cache_.end()) {
+            return cached->second;
+        }
+        IDWriteTextLayout* layout = nullptr;
+        float width = 0.0f;
+        if (SUCCEEDED(dwrite_factory_->CreateTextLayout(text.data(), static_cast<UINT32>(text.size()),
+                format, 4096.0f, 100.0f, &layout))) {
+            DWRITE_TEXT_METRICS tm{}; layout->GetMetrics(&tm); width = tm.widthIncludingTrailingWhitespace;
+            layout->Release();
+        }
+        // 固定文案（品牌名、"匹配 "、提示语）不需要每帧重新排版；数量变化时条目仍然有限。
+        if (text_width_cache_.size() < 256) {
+            text_width_cache_[key] = width;
+        }
+        return width;
+    };
+    auto glyph = [&](InkGlyph icon, const UiRect& rect, uint32_t color, float alpha = 1.0f) {
+        brush->SetColor(D2D1::ColorF(color, alpha));
+        DrawInkGlyph(render_target_,d2d_factory_,brush,icon,rect,ink_glyph_cache_.get());
+    };
+    // 预览 #winIn/#winOut 的 opacity / translateY / scale，按真实时间逐帧求值。
+    // opacity 只由窗口级 LWA_ALPHA 施加（见 ApplyWindowAlpha），这里再叠一层 D2D
+    // 图层透明度会变成 opacity²，和预览对不上。
+    const PopupWindowMotionFrame window_frame =
+        window_leaving_ ? PopupWindowLeaveFrame(window_motion_progress_)
+                        : (window_entering_ ? PopupWindowEnterFrame(window_motion_progress_)
+                                            : PopupWindowMotionFrame{});
+    const float window_scale = window_frame.scale;
+    if (window_entering_ || window_leaving_) {
+        render_target_->SetTransform(D2D1::Matrix3x2F::Scale(window_scale, window_scale,
+            D2D1::Point2F(surface_width / 2.0f, surface_height / 2.0f)) *
+            D2D1::Matrix3x2F::Translation(0, window_frame.translate_y));
+    }
+    {
+        const UiRect backdrop_rect{0.0f, 0.0f, surface_width, surface_height};
+        brush->SetColor(ColorWithAlpha(palette.window_tint, palette.window_opacity));
+        render_target_->FillRoundedRectangle(RoundRect(backdrop_rect, PopupWindowEdgeCornerRadius()), brush);
+    }
+    // 注意：透明度完全由窗口级 LWA_ALPHA 负责；这里再 PushLayer 半透明会变成 opacity²。
+
+    // ---------- 窗口底 ----------
+    // 底色已在 window_layer 之前铺好（见上），这里不再重复铺一层。
+    const UiRect window_surface_rect{0.0f, 0.0f, surface_width, surface_height};
+
+    // ---------- A1 页眉：Georgia 斜体品牌 + 朱砂方点 + 等宽版本号 ----------
     const auto header = BuildPopupHeaderLayoutForWidth(popup_logical_width_);
-    render_target_->DrawTextW(L"ClipSoul", 8, title_format_, Rect(header.title), text_brush_);
-    render_target_->DrawTextW(kClipSoulVersion.data(), static_cast<UINT32>(kClipSoulVersion.size()), small_format_,
-                              Rect(header.title.left + 96.0f, header.title.top + 4.0f,
-                                   header.title.left + 158.0f, header.title.bottom),
-                              muted_brush_);
-    const float brand_y = header.title.bottom + 3.0f;
-    brush->SetColor(D2D1::ColorF(palette.active_tab, palette.dark ? 0.68f : 0.74f));
-    render_target_->DrawLine(D2D1::Point2F(header.title.left + 1.0f, brand_y),
-                             D2D1::Point2F(header.title.left + 52.0f, brand_y), brush, 1.4f);
+    const UiRect brand_rect{content_left, 0.0f, content_left + 96.0f, 44.0f};
+    drawText(L"ClipSoul", brand_format_, brand_rect, palette.text, 0.96f);
+    brush->SetColor(D2D1::ColorF(palette.danger, 0.94f));
+    const float brand_width = textWidth(L"ClipSoul", brand_format_);
+    render_target_->FillRoundedRectangle(
+        RoundRect(content_left + brand_width + 3.0f, 21.0f, content_left + brand_width + 8.0f, 26.0f, 1.0f), brush);
+    drawText(kClipSoulVersion, mono_format_,
+             UiRect{content_left + brand_width + 16.0f, 3.0f, content_left + brand_width + 78.0f, 44.0f}, palette.text_tertiary, 1.0f);
+
     auto drawHeaderButton = [&](const UiRect& rect, bool active, UiAction action) {
         const bool hovered = hover_action_ == action;
         const float hover = hovered ? hover_progress_ : 0.0f;
-        if (active || hovered) {
-            drawEdgeShadow(rect, 9.0f, active ? 0.32f : 0.18f + 0.10f * hover, 1.0f);
-            if (action == UiAction::Close && hovered) {
-                brush->SetColor(D2D1::ColorF(palette.dark ? 0x3A211F : 0xF8DED8,
-                                             0.40f + 0.35f * hover));
-            } else {
-                brush->SetColor(active ? D2D1::ColorF(PopupSubtleAccentFill(palette), 0.72f)
-                                       : D2D1::ColorF(PopupNeutralHoverFill(palette), 0.70f * hover));
-            }
-            render_target_->FillRoundedRectangle(RoundRect(rect, 9), brush);
-            if (action == UiAction::Close && hovered) {
-                brush->SetColor(D2D1::ColorF(palette.danger, 0.32f + 0.42f * hover));
-            } else {
-                brush->SetColor(active ? D2D1::ColorF(palette.border_selected, 0.64f)
-                                       : D2D1::ColorF(palette.border_hover, 0.78f * hover));
-            }
-            render_target_->DrawRoundedRectangle(RoundRect(rect, 9), brush, 1.0f);
+        if (hovered) {
+            brush->SetColor(D2D1::ColorF(action == UiAction::Close ? palette.danger : palette.paper_hover,
+                                         action == UiAction::Close ? 0.12f * hover : 0.92f * hover));
+            render_target_->FillRoundedRectangle(RoundRect(rect, 7), brush);
         }
+        if (action == UiAction::Pin && active) {
+            // 「已固定」小圆点跟随旋转进度淡入。
+            const float badge = pin_motion_progress_ < 1.0f
+                                    ? (pin_motion_to_ ? pin_motion_progress_ : 1.0f - pin_motion_progress_)
+                                    : (pinned_open_ ? 1.0f : 0.0f);
+            if (badge > 0.0f) {
+                brush->SetColor(D2D1::ColorF(palette.danger, 0.96f * badge));
+                render_target_->FillEllipse(
+                    D2D1::Ellipse(D2D1::Point2F(rect.right - 6.5f, rect.top + 6.5f), 2.5f * badge, 2.5f * badge),
+                    brush);
+            }
+        }
+        return hover;
     };
     drawHeaderButton(header.pin, pinned_open_, UiAction::Pin);
-    DrawIcon(ToWindowIcon(PopupPinIconSlot(pinned_open_)),
-             BuildPopupHeaderPinIconRect(header),
-             palette.dark ? (pinned_open_ ? 0.96f : 0.88f) : (pinned_open_ ? 0.94f : 0.74f));
-    drawHeaderButton(header.close, false, UiAction::Close);
-    DrawIcon(IconId::Close,
-             BuildPopupHeaderCloseIconRect(header),
-             palette.dark ? 0.92f : 0.70f);
+    {
+        // 图钉旋转：未固定 0° → 固定后 -40°，260ms 弹性缓动（预览 #pinWin）。
+        const float opacity = palette.dark ? (pinned_open_ ? 0.96f : 0.72f) : (pinned_open_ ? 0.88f : 0.55f);
+        const UiRect pin_icon = BuildPopupHeaderPinIconRect(header);
+        const float angle = PopupPinRotationDegrees(pin_motion_to_, pin_motion_progress_);
+        if (std::fabs(angle) > 0.01f) {
+            const float cx = (pin_icon.left + pin_icon.right) * 0.5f;
+            const float cy = (pin_icon.top + pin_icon.bottom) * 0.5f;
+            D2D1_MATRIX_3X2_F saved_transform{};
+            render_target_->GetTransform(&saved_transform);
+            render_target_->SetTransform(D2D1::Matrix3x2F::Rotation(angle, D2D1::Point2F(cx, cy)) * saved_transform);
+            DrawIcon(ToWindowIcon(PopupPinIconSlot(pin_motion_to_)), pin_icon, opacity);
+            render_target_->SetTransform(saved_transform);
+        } else {
+            DrawIcon(ToWindowIcon(PopupPinIconSlot(pin_motion_to_)), pin_icon, opacity);
+        }
+    }
+    const float close_hover = drawHeaderButton(header.close, false, UiAction::Close);
+    if (close_hover > 0.0f) {
+        brush->SetColor(D2D1::ColorF(palette.danger, 0.30f + 0.66f * close_hover));
+        const auto icon_rect = BuildPopupHeaderCloseIconRect(header);
+        const float cx = (icon_rect.left + icon_rect.right) * 0.5f;
+        const float cy = (icon_rect.top + icon_rect.bottom) * 0.5f;
+        render_target_->DrawLine(D2D1::Point2F(cx - 4.5f, cy - 4.5f), D2D1::Point2F(cx + 4.5f, cy + 4.5f), brush,
+                                 1.4f);
+        render_target_->DrawLine(D2D1::Point2F(cx + 4.5f, cy - 4.5f), D2D1::Point2F(cx - 4.5f, cy + 4.5f), brush,
+                                 1.4f);
+    } else {
+        DrawIcon(IconId::Close, BuildPopupHeaderCloseIconRect(header), palette.dark ? 0.62f : 0.42f);
+    }
 
-    const float search_top = PopupSearchTop();
+    // ---------- A2 搜索：无框、底部发丝线、聚焦时墨线从左展开 ----------
     const auto search_layout = BuildPopupSearchLayoutForWidth(popup_logical_width_);
     const bool search_hovered = hover_action_ == UiAction::Search || Contains(search_layout.box, hover_point_);
     const bool search_active = search_focused_ && GetFocus() == search_edit_;
-    const float search_focus = PopupSearchFocusProgress(search_active, search_hovered, hover_progress_);
-    if (search_hovered || search_active) {
-        brush->SetColor(D2D1::ColorF(0x000000, search_active ? 0.070f : 0.036f + 0.028f * search_focus));
-        render_target_->FillRoundedRectangle(
-            RoundRect(metrics.margin - 1.0f, search_top - 1.0f, popup_logical_width_ - metrics.margin + 1.0f,
-                      search_top + metrics.search_height + 2.0f, 10),
-            brush);
+    const float search_focus_p = PopupMotionProgress(PopupTimedMotionProgress(
+        static_cast<double>(GetTickCount64()) - search_focus_start_ms_, 200.0, animations_enabled_));
+    const float search_focus = search_focus_from_ + (search_focus_to_ - search_focus_from_) * search_focus_p;
+    const float search_line_y = search_layout.box.bottom - 1.0f;
+    hairline(search_layout.box.left, search_line_y, search_layout.box.right, true);
+    if (search_focus > 0.0f) {
+        const float line_right =
+            search_layout.box.left + (search_layout.box.right - search_layout.box.left) * search_focus;
+        brush->SetColor(D2D1::ColorF(palette.text, 0.92f));
+        render_target_->DrawLine(D2D1::Point2F(search_layout.box.left, search_line_y),
+                                 D2D1::Point2F(line_right, search_line_y), brush, 1.5f);
     }
-    brush->SetColor(ColorWithAlpha(palette.search_fill, palette.dark ? 0.96f : 1.0f));
-    render_target_->FillRoundedRectangle(
-        RoundRect(metrics.margin, search_top, popup_logical_width_ - metrics.margin, search_top + metrics.search_height, 9),
-        brush);
-    brush->SetColor(search_active ? D2D1::ColorF(palette.accent, 0.92f)
-                                   : D2D1::ColorF(search_hovered ? palette.strong_border : palette.border,
-                                                  search_hovered ? 0.52f + 0.22f * search_focus : 0.78f));
-    render_target_->DrawRoundedRectangle(
-        RoundRect(metrics.margin, search_top, popup_logical_width_ - metrics.margin, search_top + metrics.search_height, 9),
-        brush, search_active ? 1.5f : 1.0f);
-    const float search_icon_x = static_cast<float>(metrics.margin) + 20.0f;
-    const float search_icon_y = search_top + metrics.search_height * 0.5f;
-    brush->SetColor(D2D1::ColorF(palette.text_tertiary, 0.76f));
-    render_target_->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(search_icon_x, search_icon_y - 1.0f), 5.0f, 5.0f),
-                                brush, 1.45f);
-    render_target_->DrawLine(D2D1::Point2F(search_icon_x + 3.8f, search_icon_y + 3.0f),
-                             D2D1::Point2F(search_icon_x + 8.0f, search_icon_y + 7.0f), brush, 1.45f);
+    const float search_icon_x = search_layout.icon.left + search_layout.icon.Width() * 0.5f;
+    const float search_icon_y = (search_layout.icon.top + search_layout.icon.bottom) * 0.5f;
+    brush->SetColor(D2D1::ColorF(search_active ? palette.text : palette.text_tertiary, search_active ? 0.92f : 0.76f));
+    render_target_->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(search_icon_x, search_icon_y - 1.0f), 4.6f, 4.6f), brush,
+                                1.4f);
+    render_target_->DrawLine(D2D1::Point2F(search_icon_x + 3.4f, search_icon_y + 2.6f),
+                             D2D1::Point2F(search_icon_x + 6.6f, search_icon_y + 5.8f), brush, 1.4f);
+
     const bool has_composition = PopupSearchHasComposition(composing_, composition_text_);
     const auto search_text = PopupSearchCompositionDisplayText(query_, composing_, composition_text_);
     const auto search_selection = CurrentSearchSelection();
@@ -2857,234 +3219,308 @@ void PopupWindow::Paint() {
         const float selection_right =
             ClampPopupSearchCaretX(search_layout, SearchTextOffsetDips(search_selection.end, false));
         if (selection_right > selection_left) {
-            brush->SetColor(D2D1::ColorF(palette.accent, palette.dark ? 0.34f : 0.12f));
+            brush->SetColor(D2D1::ColorF(palette.text, palette.dark ? 0.22f : 0.10f));
             render_target_->FillRoundedRectangle(
-                RoundRect(selection_left, search_layout.text.top + 3.0f, selection_right,
-                          search_layout.text.bottom - 3.0f, 3.0f),
+                RoundRect(selection_left, search_layout.text.top + 2.0f, selection_right,
+                          search_layout.text.bottom - 2.0f, 3.0f),
                 brush);
         }
     }
-    brush->SetColor(PopupSearchCompositionTextColor(has_composition, query_)
-        ? D2D1::ColorF(palette.text, 0.94f)
-        : D2D1::ColorF(palette.text_tertiary, 0.62f));
-    if (has_composition && dwrite_factory_ && small_format_) {
-        const auto committed_text = std::wstring(query_);
+    const bool composition_colored = PopupSearchCompositionTextColor(has_composition, query_);
+    if (has_composition && dwrite_factory_ && search_format_) {
         IDWriteTextLayout* text_layout = nullptr;
-        if (SUCCEEDED(dwrite_factory_->CreateTextLayout(
-                search_text.data(), static_cast<UINT32>(search_text.size()),
-                small_format_, search_layout.text.Width(), search_layout.text.Height(),
-                &text_layout))) {
-            DWRITE_TEXT_RANGE range{static_cast<UINT32>(committed_text.size()),
-                                   static_cast<UINT32>(composition_text_.size())};
+        if (SUCCEEDED(dwrite_factory_->CreateTextLayout(search_text.data(), static_cast<UINT32>(search_text.size()),
+                                                        search_format_, search_layout.text.Width(),
+                                                        search_layout.text.Height(), &text_layout)) &&
+            text_layout) {
+            DWRITE_TEXT_RANGE range{static_cast<UINT32>(query_.size()),
+                                    static_cast<UINT32>(composition_text_.size())};
             text_layout->SetUnderline(TRUE, range);
-            render_target_->DrawTextLayout(
-                D2D1::Point2F(search_layout.text.left, search_layout.text.top),
-                text_layout, brush);
-            text_layout->Release();
+            brush->SetColor(D2D1::ColorF(palette.text, 0.94f));
+            render_target_->DrawTextLayout(D2D1::Point2F(search_layout.text.left, search_layout.text.top),
+                                           text_layout, brush);
+            ReleasePtr(text_layout);
         }
     } else {
-        render_target_->DrawTextW(search_text.data(), static_cast<UINT32>(search_text.size()),
-                                  small_format_, Rect(search_layout.text), brush);
+        drawText(search_text, search_format_, search_layout.text,
+                 composition_colored ? palette.text : palette.text_tertiary, composition_colored ? 0.94f : 0.62f);
     }
-    if (PopupSearchCaretVisible(search_active, search_caret_on_) &&
-        !PopupSearchHasSelection(search_selection) &&
+    if (PopupSearchCaretVisible(search_active, search_caret_on_) && !PopupSearchHasSelection(search_selection) &&
         PopupSearchCaretVisibleDuringComposition(has_composition)) {
-        const float measured_text_width = SearchCaretOffsetDips();
-        const float caret_x = ClampPopupSearchCaretX(search_layout, measured_text_width);
-        brush->SetColor(D2D1::ColorF(palette.accent, 0.86f));
-        render_target_->DrawLine(D2D1::Point2F(caret_x, search_layout.text.top + 3.0f),
-                                 D2D1::Point2F(caret_x, search_layout.text.bottom - 3.0f),
-                                 brush, 1.0f);
+        const float caret_x = ClampPopupSearchCaretX(search_layout, SearchCaretOffsetDips());
+        brush->SetColor(D2D1::ColorF(palette.text, 0.86f));
+        render_target_->DrawLine(D2D1::Point2F(caret_x, search_layout.text.top + 2.0f),
+                                 D2D1::Point2F(caret_x, search_layout.text.bottom - 2.0f), brush, 1.0f);
     }
     if (!query_.empty()) {
         const bool clear_hovered = hover_action_ == UiAction::ClearSearch ||
                                    PopupSearchClearButtonHitTest(search_layout, true, hover_point_);
-        const float clear_opacity = clear_hovered ? 0.95f : 0.82f;
-        brush->SetColor(D2D1::ColorF(clear_hovered ? palette.muted : palette.text_tertiary, clear_opacity));
         const auto center = PopupSearchClearButtonCenterDips(search_layout);
-        render_target_->DrawLine(D2D1::Point2F(static_cast<float>(center.x) - 4.0f, static_cast<float>(center.y) - 4.0f),
-                                 D2D1::Point2F(static_cast<float>(center.x) + 4.0f, static_cast<float>(center.y) + 4.0f), brush, 1.8f);
-        render_target_->DrawLine(D2D1::Point2F(static_cast<float>(center.x) + 4.0f, static_cast<float>(center.y) - 4.0f),
-                                 D2D1::Point2F(static_cast<float>(center.x) - 4.0f, static_cast<float>(center.y) + 4.0f), brush, 1.8f);
+        if (clear_hovered) {
+            brush->SetColor(D2D1::ColorF(palette.paper_hover, 0.94f));
+            render_target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(static_cast<float>(center.x),
+                                                                    static_cast<float>(center.y)),
+                                                      9.0f, 9.0f),
+                                        brush);
+        }
+        brush->SetColor(D2D1::ColorF(clear_hovered ? palette.text : palette.text_tertiary,
+                                     clear_hovered ? 0.92f : 0.72f));
+        render_target_->DrawLine(D2D1::Point2F(center.x - 3.5f, center.y - 3.5f),
+                                 D2D1::Point2F(center.x + 3.5f, center.y + 3.5f), brush, 1.3f);
+        render_target_->DrawLine(D2D1::Point2F(center.x + 3.5f, center.y - 3.5f),
+                                 D2D1::Point2F(center.x - 3.5f, center.y + 3.5f), brush, 1.3f);
     }
-    auto drawToolbarIcon = [&](const UiRect& rect, wchar_t icon, bool active = false,
-                               bool has_chevron = false) {
-        IconId icon_id = IconId::Filter;
-        if (icon == L'F') icon_id = ToWindowIcon(PopupFilterIconSlot(active));
-        if (icon == L'M') icon_id = ToWindowIcon(PopupMultiSelectIconSlot(active));
-        if (icon == L'P') icon_id = ToWindowIcon(PopupPasteSelectedIconSlot());
-        if (icon == L'A') icon_id = ToWindowIcon(PopupMultiSelectIconSlot(true));
-        if (icon == L'D') icon_id = IconId::Trash;
-        if (icon == L'C') icon_id = IconId::Close;
-        const bool compact = rect.Width() < 94.0f;
-        const auto icon_rect =
-            CenteredRect(UiRect{rect.left + (compact ? 5.0f : 8.0f), rect.top + 4.0f,
-                                rect.left + (compact ? 23.0f : 34.0f), rect.bottom - 4.0f},
-                         static_cast<float>(metrics.toolbar_icon_size),
-                         static_cast<float>(metrics.toolbar_icon_size));
-        DrawIcon(icon_id, icon_rect, palette.dark ? (active ? 0.96f : 0.88f) : (active ? 0.86f : 0.66f));
-        if (has_chevron) {
-            const float cx = rect.right - 11.0f;
-            const float cy = (rect.top + rect.bottom) * 0.5f;
-            const float panel_motion = motion_target_ == PopupMotionTarget::FilterPanel
-                                           ? PopupMotionProgress(motion_progress_)
-                                           : 1.0f;
-            const float rotation_progress = active ? panel_motion : 1.0f - panel_motion;
-            const float radians = rotation_progress * kPi;
-            const auto p1 = RotatePoint(cx - 4.0f, cy - 2.0f, cx, cy, radians);
-            const auto p2 = RotatePoint(cx, cy + 2.0f, cx, cy, radians);
-            const auto p3 = RotatePoint(cx + 4.0f, cy - 2.0f, cx, cy, radians);
-            brush->SetColor(D2D1::ColorF(PopupToolbarLabelColor(palette, active, false), 0.78f));
-            render_target_->DrawLine(p1, p2, brush, 1.15f);
-            render_target_->DrawLine(p3, p2, brush, 1.15f);
-        }
-    };
-    auto drawButton = [&](const UiRect& rect, const wchar_t* label, wchar_t icon, UiAction action,
-                          bool active = false, bool has_chevron = false) {
-        const bool hovered = hover_action_ == action;
-        const float hover = hovered ? hover_progress_ : 0.0f;
-        const bool danger = action == UiAction::ClearAll || action == UiAction::DeleteSelected;
-        if (danger) {
-            brush->SetColor(ColorWithAlpha(hovered ? PopupNeutralHoverFill(palette) : palette.card_fill,
-                                           0.78f + 0.18f * hover));
-        } else {
-            brush->SetColor(active ? D2D1::ColorF(PopupSubtleAccentFill(palette), 0.86f)
-                                   : ColorWithAlpha(hovered ? PopupNeutralHoverFill(palette) : palette.card_fill,
-                                                    0.78f + 0.18f * hover));
-        }
-        drawEdgeShadow(rect, 9.0f, active ? 0.30f : 0.12f + 0.10f * hover, 1.0f);
-        render_target_->FillRoundedRectangle(RoundRect(rect, 9), brush);
-        brush->SetColor(active ? D2D1::ColorF(palette.border_selected, 0.82f)
-                               : D2D1::ColorF(hover > 0.0f ? palette.border_hover : palette.border,
-                                              hover > 0.0f ? 0.78f : 0.68f));
-        render_target_->DrawRoundedRectangle(RoundRect(rect, 9), brush, active ? 1.15f : 1.0f);
-        drawToolbarIcon(rect, icon, active, has_chevron);
-        const uint32_t label_color = PopupToolbarLabelColor(palette, active, danger);
-        brush->SetColor(D2D1::ColorF(label_color, danger ? (hovered ? 0.96f : 0.86f) : 0.92f));
-        render_target_->DrawTextW(label, static_cast<UINT32>(wcslen(label)), small_format_,
-                                  Rect(PopupToolbarLabelRect(rect, has_chevron)), brush);
-    };
-    const auto toolbar = BuildPopupToolbarLayoutForWidth(multi_select_, popup_logical_width_);
+
+    // ---------- A3 标签栏 + 工具按钮（同栏靠右） ----------
+    const auto tabs = BuildPopupTabsLayoutForWidth(view_mode_ == ViewMode::Favorites, popup_logical_width_);
     const bool multi_motion_active = motion_target_ == PopupMotionTarget::MultiSelect;
     const float multi_motion = multi_motion_active ? PopupMotionProgress(motion_progress_) : 1.0f;
     const bool multi_entering = multi_select_;
-    D2D1_MATRIX_3X2_F toolbar_transform{};
-    render_target_->GetTransform(&toolbar_transform);
-    if (multi_motion_active) {
-        const float toolbar_offset = PopupMultiSelectToolbarOffset(multi_motion, multi_entering);
-        render_target_->SetTransform(D2D1::Matrix3x2F::Translation(toolbar_offset, 0.0f));
-    }
-    if (multi_select_) {
-        drawButton(toolbar.select_all, L"\u5168\u9009", L'A', UiAction::SelectAll);
-        drawButton(toolbar.cancel_multi_select, L"取消", L'C', UiAction::MultiSelect);
-        drawButton(toolbar.delete_selected, L"选中删除", L'D', UiAction::DeleteSelected);
-        drawButton(toolbar.paste_selected, L"选中粘贴", L'P', UiAction::PasteSelected);
-    } else {
-        drawButton(toolbar.filter, L"\u7b5b\u9009", L'F', UiAction::Filter, filter_open_, true);
-        drawButton(toolbar.multi_select, L"\u591a\u9009", L'M', UiAction::MultiSelect);
-        drawButton(toolbar.clear_all, L"全部清除", L'D', UiAction::ClearAll);
-    }
-    if (multi_motion_active) {
-        render_target_->SetTransform(toolbar_transform);
-    }
+    const float tab_text_top = tabs.history.top;
 
-    const auto tabs = BuildPopupTabsLayoutForWidth(view_mode_ == ViewMode::Favorites, popup_logical_width_);
-    auto drawTabSurface = [&](const UiRect& rect, bool active, UiAction action) {
-        const bool hovered = hover_action_ == action;
-        const float hover = hovered ? hover_progress_ : 0.0f;
-        if (!active && !hovered) {
-            return;
-        }
-        if (hovered && !active) {
-            brush->SetColor(D2D1::ColorF(PopupNeutralHoverFill(palette), 0.45f * hover));
-            render_target_->FillRoundedRectangle(RoundRect(rect, 10), brush);
-        }
+    auto drawTabLabel = [&](const UiRect& rect, const wchar_t* label, int count, bool active) {
+        drawText(label, active ? title_format_ : label_format_,
+                 UiRect{rect.left, tab_text_top, rect.left + 27.0f, rect.bottom},
+                 active ? palette.text : palette.text_tertiary, active ? 0.98f : 0.86f);
+        drawText(std::to_wstring(count), mono_format_,
+                 UiRect{rect.left + 30.0f, tab_text_top + 2.0f, rect.right, rect.bottom},
+                 palette.text_tertiary, 0.82f);
     };
-    drawTabSurface(tabs.history, view_mode_ == ViewMode::History, UiAction::HistoryTab);
-    drawTabSurface(tabs.favorites, view_mode_ == ViewMode::Favorites, UiAction::FavoritesTab);
-    render_target_->DrawTextW(L"历史", 2, centered_small_format_, Rect(tabs.history),
-                              view_mode_ == ViewMode::History ? accent_brush_ : text_brush_);
-    render_target_->DrawTextW(L"\u6536\u85cf\u5939", 3, centered_small_format_, Rect(tabs.favorites),
-                              view_mode_ == ViewMode::Favorites ? accent_brush_ : text_brush_);
-    if (view_mode_ == ViewMode::Favorites) {
-        const bool group_hovered = hover_action_ == UiAction::FavoriteGroupMenu;
-        const float group_hover = group_hovered ? hover_progress_ : 0.0f;
-        drawEdgeShadow(tabs.favorite_group, 11.0f, 0.24f + 0.12f * group_hover, 1.6f);
-        brush->SetColor(group_hovered ? D2D1::ColorF(PopupNeutralHoverFill(palette), 0.72f + 0.14f * group_hover)
-                                      : ColorWithAlpha(palette.card_fill, 0.72f));
-        render_target_->FillRoundedRectangle(RoundRect(tabs.favorite_group, 10), brush);
-        brush->SetColor(group_hovered ? D2D1::ColorF(palette.accent, 0.52f)
-                                      : D2D1::ColorF(palette.border, 0.62f));
-        render_target_->DrawRoundedRectangle(RoundRect(tabs.favorite_group, 10), brush, 0.9f);
-        const auto group_icon_slot =
-            PopupFavoriteFolderIconSlotForGroup(favorite_group_menu_open_ || active_favorite_group_id_.has_value());
-        DrawIcon(group_icon_slot == PopupFavoriteFolderIconSlot::Filled ? IconId::AddFavoriteFolderFilled
-                                                                        : IconId::AddFavoriteFolderOutline,
-                 PopupFavoriteGroupIconRect(tabs), palette.dark ? 0.92f : 0.82f);
+    drawTabLabel(tabs.history, L"历史", history_count_, view_mode_ == ViewMode::History);
+    drawTabLabel(tabs.favorites, L"收藏", favorite_group_counts_total_, view_mode_ == ViewMode::Favorites);
 
-        const float add_cx = (tabs.add_favorite_phrase.left + tabs.add_favorite_phrase.right) * 0.5f;
-        const float add_cy = (tabs.add_favorite_phrase.top + tabs.add_favorite_phrase.bottom) * 0.5f;
-        const bool add_hovered = hover_action_ == UiAction::AddFavoritePhrase;
-        const float add_hover = add_hovered ? hover_progress_ : 0.0f;
-        brush->SetColor(add_hovered ? D2D1::ColorF(PopupNeutralHoverFill(palette), 0.70f + 0.16f * add_hover)
-                                    : D2D1::ColorF(palette.card_fill, 0.70f));
-        render_target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(add_cx, add_cy), 11.0f, 11.0f), brush);
-        brush->SetColor(D2D1::ColorF(palette.border, 0.72f));
-        render_target_->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(add_cx, add_cy), 11.0f, 11.0f), brush,
-                                    1.0f + 0.35f * add_hover);
-        brush->SetColor(D2D1::ColorF(palette.accent, 0.90f));
-        render_target_->DrawLine(D2D1::Point2F(add_cx - 4.0f, add_cy), D2D1::Point2F(add_cx + 4.0f, add_cy), brush,
-                                 1.35f);
-        render_target_->DrawLine(D2D1::Point2F(add_cx, add_cy - 4.0f), D2D1::Point2F(add_cx, add_cy + 4.0f), brush,
-                                 1.35f);
-    }
+    // 选中标签下的 1.5px 墨线（滑动动画）
     UiRect indicator = tabs.active_indicator;
-    if (motion_target_ == PopupMotionTarget::ViewSwitch) {
+    if (view_switch_active) {
         const auto previous_tabs =
             BuildPopupTabsLayoutForWidth(motion_direction_ > 0 ? false : true, popup_logical_width_);
         indicator = PopupTabIndicatorRectForMotion(previous_tabs.active_indicator, tabs.active_indicator,
                                                    PopupMotionProgress(motion_progress_));
     }
-    brush->SetColor(D2D1::ColorF(palette.active_tab, 0.92f));
-    render_target_->FillRectangle(Rect(indicator), brush);
-    brush->SetColor(D2D1::ColorF(palette.border, 0.58f));
-    render_target_->FillRectangle(Rect(tabs.divider), brush);
+    brush->SetColor(D2D1::ColorF(palette.text, 0.92f));
+    render_target_->FillRectangle(Rect(indicator.left, indicator.bottom - 1.5f, indicator.right, indicator.bottom),
+                                  brush);
 
+
+    if (view_mode_ == ViewMode::Favorites) {
+        // 分组按钮（描边小按钮：组名 + ▾）
+        const bool group_hovered = hover_action_ == UiAction::FavoriteGroupMenu;
+        const float group_hover = group_hovered ? hover_progress_ : 0.0f;
+        if (group_hovered || favorite_group_menu_open_) {
+            brush->SetColor(D2D1::ColorF(palette.paper_hover, 0.94f * (favorite_group_menu_open_ ? 1.0f : group_hover)));
+            render_target_->FillRoundedRectangle(RoundRect(tabs.favorite_group, 6), brush);
+        }
+        brush->SetColor(D2D1::ColorF(palette.text, 0.16f));
+        render_target_->DrawRoundedRectangle(RoundRect(tabs.favorite_group, 6), brush, 1.0f);
+        drawText(ActiveFavoriteGroupLabel(), button_format_,
+                 UiRect{tabs.favorite_group.left + 8.0f, tabs.favorite_group.top,
+                        tabs.favorite_group.right - 15.0f, tabs.favorite_group.bottom},
+                 palette.muted, 0.94f);
+        drawChevron(tabs.favorite_group.right - 9.0f,
+                    (tabs.favorite_group.top + tabs.favorite_group.bottom) * 0.5f, 8.0f,
+                    favorite_group_menu_open_, palette.text_tertiary, 1.0f, 1.6f);
+        // ＋ 添加常用语
+        const bool add_hovered = hover_action_ == UiAction::AddFavoritePhrase;
+        const float add_cx = (tabs.add_favorite_phrase.left + tabs.add_favorite_phrase.right) * 0.5f;
+        const float add_cy = (tabs.add_favorite_phrase.top + tabs.add_favorite_phrase.bottom) * 0.5f;
+        if (add_hovered) {
+            brush->SetColor(D2D1::ColorF(palette.paper_hover, 0.94f * hover_progress_));
+            render_target_->FillRoundedRectangle(RoundRect(tabs.add_favorite_phrase, 7.0f), brush);
+        }
+        brush->SetColor(D2D1::ColorF(palette.muted, 0.92f));
+        render_target_->DrawLine(D2D1::Point2F(add_cx - 4.0f, add_cy), D2D1::Point2F(add_cx + 4.0f, add_cy), brush,
+                                 1.3f);
+        render_target_->DrawLine(D2D1::Point2F(add_cx, add_cy - 4.0f), D2D1::Point2F(add_cx, add_cy + 4.0f), brush,
+                                 1.3f);
+    }
+
+    const auto toolbar = BuildPopupToolbarLayoutForWidth(multi_select_, popup_logical_width_);
+    D2D1_MATRIX_3X2_F toolbar_transform{};
+    render_target_->GetTransform(&toolbar_transform);
+    if (multi_motion_active) {
+        render_target_->SetTransform(
+            D2D1::Matrix3x2F::Translation(PopupMultiSelectToolbarOffset(multi_motion, multi_entering), 0.0f));
+    }
+    auto drawIconButton = [&](const UiRect& rect, IconId icon, UiAction action, bool active, bool show_dot) {
+        const bool hovered = hover_action_ == action;
+        const float hover = hovered ? hover_progress_ : 0.0f;
+        if (hovered) {
+            brush->SetColor(D2D1::ColorF(palette.paper_hover, 0.94f * hover));
+            render_target_->FillRoundedRectangle(RoundRect(rect, 7), brush);
+        }
+        DrawIcon(icon, CenteredRect(rect, 15.0f, 15.0f),
+                 palette.dark ? (active ? 0.96f : (hovered ? 0.92f : 0.66f))
+                              : (active ? 0.90f : (hovered ? 0.86f : 0.58f)));
+        if (show_dot) {
+            // 有筛选条件时，筛选按钮右上角朱砂圆点
+            brush->SetColor(D2D1::ColorF(palette.danger, 0.96f));
+            render_target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(rect.right - 5.0f, rect.top + 5.0f), 2.2f, 2.2f),
+                                        brush);
+        }
+    };
+    auto drawTextButton = [&](const UiRect& rect, const std::wstring& label, UiAction action, bool danger,
+                              bool solid) {
+        const bool hovered = hover_action_ == action;
+        const float hover = hovered ? hover_progress_ : 0.0f;
+        if (solid) {
+            brush->SetColor(D2D1::ColorF(palette.text, 0.94f));
+            render_target_->FillRoundedRectangle(RoundRect(rect, 6), brush);
+            drawAlignedText(label, button_format_, rect, palette.window_tint, selection_.SelectedIds().empty() ? 0.35f : 1.0f, DWRITE_TEXT_ALIGNMENT_CENTER);
+            return;
+        }
+        if (hovered) {
+            brush->SetColor(D2D1::ColorF(danger ? palette.danger : palette.paper_hover,
+                                         danger ? 0.12f * hover : 0.94f * hover));
+            render_target_->FillRoundedRectangle(RoundRect(rect, 6), brush);
+        }
+        const bool disabled = danger && selection_.SelectedIds().empty();
+        drawAlignedText(label, button_format_, rect, danger && hovered ? palette.danger : palette.muted,
+                        disabled ? 0.35f : 1.0f, DWRITE_TEXT_ALIGNMENT_CENTER);
+    };
+    if (multi_select_) {
+        const size_t selected_size = selection_.Count();
+        const std::wstring selected_count = std::to_wstring(selected_size);
+        drawTextButton(toolbar.cancel_multi_select, L"取消", UiAction::MultiSelect, false, false);
+        drawTextButton(toolbar.select_all, !items_.empty() && selected_size == items_.size() ? L"全不选" : L"全选", UiAction::SelectAll, false, false);
+        drawTextButton(toolbar.delete_selected, L"删除", UiAction::DeleteSelected, true, false);
+        drawTextButton(toolbar.paste_selected, L"粘贴 " + selected_count, UiAction::PasteSelected, false, true);
+    } else {
+        drawIconButton(toolbar.filter, ToWindowIcon(PopupFilterIconSlot(filter_open_)), UiAction::Filter, filter_open_,
+                       HasActiveFilter());
+        drawIconButton(toolbar.multi_select, ToWindowIcon(PopupMultiSelectIconSlot(false)), UiAction::MultiSelect,
+                       false, false);
+        drawIconButton(toolbar.clear_all, IconId::Trash, UiAction::ClearAll, false, false);
+    }
+    if (multi_motion_active) {
+        render_target_->SetTransform(toolbar_transform);
+    }
+
+    // ---------- A4/A5/A6 列表：发丝线分行，当前项是抽起的纸条 ----------
     const auto list_clip = PopupListClipRectForHeight(popup_logical_width_, popup_logical_height_);
     render_target_->PushAxisAlignedClip(Rect(list_clip), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
     D2D1_MATRIX_3X2_F list_transform{};
     render_target_->GetTransform(&list_transform);
-    applyMotionTransform(PopupMotionTarget::ViewSwitch, 18.0f, 0.992f, list_clip, true);
+    if (view_switch_active) {
+        render_target_->SetTransform(D2D1::Matrix3x2F::Translation(
+            PopupViewSwitchListOffset(motion_direction_, motion_progress_, 18.0f), 0.0f));
+    }
 
+    const auto plan = CurrentSectionPlan();
+    const float section_header_height = PopupSectionHeaderHeight();
+
+    // 当前项纸条：弹簧跟随，画在内容之下
+    const float slip_target_top = SlipTargetTop();
+    if (slip_target_top >= 0.0f && !multi_select_) {
+        const float slip_top = PopupListTop() + slip_y_.position;
+        const float slip_height = std::max(20.0f, slip_h_.position);
+        const UiRect slip{8.0f, slip_top, surface_width - 8.0f, slip_top + slip_height};
+        drawEdgeShadow(slip, 9.0f, 0.34f, 1.6f);
+        brush->SetColor(D2D1::ColorF(palette.paper_selected, palette.dark ? 0.94f : 0.99f));
+        render_target_->FillRoundedRectangle(RoundRect(slip, 9), brush);
+        brush->SetColor(D2D1::ColorF(palette.text, 0.10f));
+        render_target_->DrawRoundedRectangle(RoundRect(slip, 9), brush, 1.0f);
+    }
+
+    const TimeLabelContext time_context = TimeLabelContext::Now();
     const int first_visible_index = FirstVisibleItemIndex();
-    float y = PopupListTop() - (scroll_offset_ - ItemScrollTop(first_visible_index));
-    for (int item_index = first_visible_index; item_index < static_cast<int>(items_.size()) &&
-                                           y <= static_cast<float>(popup_logical_height_) - 4.0f;
-         ++item_index) {
+    // 预览 JS 的 --i：sect 取当前计数（不递增），row 取 Math.min(++i, 9)。
+    // 所以 sect 的 --i = 已渲染行数，行 k 的 --i = k + 1。
+    const double entrance_elapsed_ms =
+        rows_entering_ ? static_cast<double>(GetTickCount64()) - rows_entrance_start_ms_ : 1.0e9;
+    const auto entrance_index_for_item = [](int item_index) { return std::min(item_index + 1, 9); };
+    for (int item_index = first_visible_index; item_index < static_cast<int>(items_.size()); ++item_index) {
+        const float row_top = PopupListTop() + ItemRowTop(item_index) - scroll_offset_;
+        if (row_top > static_cast<float>(popup_logical_height_)) {
+            break;
+        }
+        // A5 分区标题：置顶 N（朱砂）/ 最近 N（收藏视图叫"其他"）
+        if (plan.show_pinned_header && item_index == 0) {
+            const float header_top = row_top - section_header_height;
+            if (header_top + section_header_height > PopupListTop()) {
+                // 置顶分区标题排在首行之前：预览里此时 --i 仍是 0。
+                const auto entrance = PopupRowEntranceFrameAt(entrance_elapsed_ms, 0);
+                D2D1_MATRIX_3X2_F saved{};
+                render_target_->GetTransform(&saved);
+                render_target_->SetTransform(D2D1::Matrix3x2F::Translation(0, entrance.translate_y) * saved);
+                const float pin_y = header_top + 16.0f;
+                glyph(InkGlyph::PinFill,{content_left,pin_y-5.5f,content_left+11,pin_y+5.5f},palette.danger,
+                      entrance.opacity);
+                drawText(L"置顶 " + std::to_wstring(plan.pinned_count), small_format_,
+                         UiRect{content_left + 16.0f, header_top+8, content_left + 66.0f,
+                                header_top + 24.0f}, palette.danger, entrance.opacity);
+                brush->SetColor(D2D1::ColorF(palette.danger, 0.10f * entrance.opacity));
+                render_target_->DrawLine(D2D1::Point2F(content_left + 54.0f, pin_y),
+                                         D2D1::Point2F(surface_width - 18.0f, pin_y), brush, 1.0f);
+                render_target_->SetTransform(saved);
+            }
+        }
+        if (plan.show_recent_header && static_cast<size_t>(item_index) == plan.pinned_count) {
+            const float header_top = row_top - section_header_height;
+            if (header_top + section_header_height > PopupListTop()) {
+                // 预览里 --i 用的是当前计数（已渲染行数），最近分区标题 = pinned_count。
+                const auto entrance = PopupRowEntranceFrameAt(
+                    entrance_elapsed_ms, std::min(static_cast<int>(plan.pinned_count), 9));
+                D2D1_MATRIX_3X2_F saved{};
+                render_target_->GetTransform(&saved);
+                render_target_->SetTransform(D2D1::Matrix3x2F::Translation(0, entrance.translate_y) * saved);
+                const wchar_t* label = view_mode_ == ViewMode::Favorites ? L"其他" : L"最近";
+                drawText(std::wstring(label) + L" " + std::to_wstring(plan.recent_count), small_format_,
+                         UiRect{content_left, header_top+8, content_left + 58.0f, header_top+24},
+                         palette.text_tertiary, entrance.opacity);
+                brush->SetColor(D2D1::ColorF(palette.text, 0.09f * entrance.opacity));
+                render_target_->DrawLine(D2D1::Point2F(content_left + 45.0f, header_top + 16.0f),
+                                         D2D1::Point2F(surface_width - 18.0f, header_top + 16.0f),
+                                         brush, 1.0f);
+                render_target_->SetTransform(saved);
+            }
+        }
+
         const auto& item = items_[item_index];
         const bool selected = item_index == selected_index_;
         const bool hovered = item_index == hover_item_index_;
         const float hover = hovered ? hover_progress_ : 0.0f;
         const bool checked = selection_.IsSelected(item.id);
-        auto card = BuildPopupCardLayout(multi_select_ || multi_motion_active, y);
+        const bool expanded = expanded_item_id_ && *expanded_item_id_ == item.id;
+        const float expanded_height = AnimatedExpandedHeight(item);
+        D2D1_MATRIX_3X2_F row_transform{};
+        render_target_->GetTransform(&row_transform);
+        float row_opacity = 1.0f, row_dx = 0.0f, row_dy = 0.0f;
+        if (rows_entering_) {
+            const auto entrance = PopupRowEntranceFrameAt(entrance_elapsed_ms, entrance_index_for_item(item_index));
+            row_opacity = entrance.opacity;
+            row_dy = entrance.translate_y;
+        }
+        if (auto motion = row_transitions_.find(item.id); motion != row_transitions_.end()) {
+            const float p = RowMotionProgress(item.id);
+            if (motion->second.removing) { row_opacity *= 1.0f - std::min(1.0f, p / 0.4f); row_dx = -10.0f * PopupMotionProgress(p); }
+            else { row_opacity *= PopupMotionProgress(p); row_dy -= 6.0f * (1.0f - PopupMotionProgress(p)); }
+        }
+        float press_scale = pressed_item_index_ == item_index ? (long_press_selected_ ? 0.985f : 0.99f) : 1.0f;
+        render_target_->SetTransform(D2D1::Matrix3x2F::Scale(press_scale, press_scale,
+            D2D1::Point2F(surface_width / 2, row_top + ItemScrollHeight(item_index) / 2)) *
+            D2D1::Matrix3x2F::Translation(row_dx, row_dy) * row_transform);
+        ID2D1Layer* row_layer = nullptr;
+        const bool row_layer_active = row_opacity < 0.999f && SUCCEEDED(render_target_->CreateLayer(nullptr, &row_layer));
+        if (row_layer_active) render_target_->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(), nullptr,
+            D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1::Matrix3x2F::Identity(), row_opacity), row_layer);
+        auto card = BuildPopupCardLayout(multi_select_ || multi_motion_active, row_top);
         if (multi_motion_active) {
-            const auto single_card = BuildPopupCardLayout(false, y);
-            const auto multi_card = BuildPopupCardLayout(true, y);
+            const auto single_card = BuildPopupCardLayout(false, row_top);
+            const auto multi_card = BuildPopupCardLayout(true, row_top);
             const float layout_progress = multi_select_ ? multi_motion : 1.0f - multi_motion;
             const auto blendRect = [layout_progress](const UiRect& from, const UiRect& to) {
-                const auto blend = [layout_progress](float a, float b) {
-                    return a + (b - a) * layout_progress;
-                };
-                return UiRect{blend(from.left, to.left), blend(from.top, to.top),
-                              blend(from.right, to.right), blend(from.bottom, to.bottom)};
+                const auto blend = [layout_progress](float a, float b) { return a + (b - a) * layout_progress; };
+                return UiRect{blend(from.left, to.left), blend(from.top, to.top), blend(from.right, to.right),
+                              blend(from.bottom, to.bottom)};
             };
             card.image_preview = blendRect(single_card.image_preview, multi_card.image_preview);
             card.file_icon = blendRect(single_card.file_icon, multi_card.file_icon);
+            card.kind_badge = blendRect(single_card.kind_badge,multi_card.kind_badge);
             card.title = blendRect(single_card.title, multi_card.title);
             card.meta = blendRect(single_card.meta, multi_card.meta);
             card.checkbox = multi_card.checkbox;
         }
-        const float width_delta = static_cast<float>(popup_logical_width_ - metrics.width);
+        const float width_delta = surface_width - static_cast<float>(metrics.width);
         card.card.right += width_delta;
         card.title.right += width_delta;
         card.meta.right += width_delta;
@@ -3094,103 +3530,252 @@ void PopupWindow::Paint() {
         card.menu.right += width_delta;
         card.expand.left += width_delta;
         card.expand.right += width_delta;
-        const bool expanded = expanded_item_id_ && *expanded_item_id_ == item.id;
-        const auto detail = expanded ? ItemDetailText(item) : std::wstring{};
-        const float expanded_height = expanded ? ExpandedExtraHeightForItem(item) : 0.0f;
         card.card.bottom += expanded_height;
-        const UiRect card_surface = ShrinkRect(card.card, 0.55f, 0.55f);
-        if (selected || hovered) {
-            drawEdgeShadow(card_surface, 12.0f, selected ? 0.34f : 0.12f + 0.08f * hover,
-                           selected ? 1.6f : 1.0f);
-        }
-        brush->SetColor(selected ? D2D1::ColorF(palette.paper_selected, palette.dark ? 0.92f : 0.98f)
-                                 : ColorWithAlpha(hovered ? PopupNeutralHoverFill(palette) : palette.card_fill,
-                                                  palette.card_opacity));
-        render_target_->FillRoundedRectangle(RoundRect(card_surface, 12), brush);
-        brush->SetColor(selected ? D2D1::ColorF(palette.border_selected, 0.92f)
-                                 : D2D1::ColorF(hovered ? palette.border_hover : palette.border,
-                                                hovered ? 0.86f : 0.74f));
-        render_target_->DrawRoundedRectangle(RoundRect(card_surface, 12), brush,
-                                             selected ? 1.15f : 1.0f);
-        DrawCardMedia(item, card, brush);
 
+        render_target_->PushAxisAlignedClip(Rect(card.card.left,card.card.top,card.card.right,
+            card.card.top+ItemScrollHeight(item_index)),D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        // 悬停：55% 深纸（当前项不铺）
+        if (hovered && !selected) {
+            brush->SetColor(D2D1::ColorF(palette.paper_hover, 0.55f * hover));
+            render_target_->FillRoundedRectangle(RoundRect(card.card, 9), brush);
+        }
+        // 行间发丝线：左端从 52px 起；当前行、其上一行、末行不画
+        const bool hide_line = selected || (item_index + 1 == selected_index_) ||
+                               (item_index + 1 == static_cast<int>(items_.size()));
+        if (!hide_line) {
+            hairline(card.card.left + 52.0f, card.card.bottom, card.card.right - 10.0f);
+        }
+
+        // A6 多选勾选框：15px 圆角方框，整列从左侧滑入
         if (multi_select_ || multi_motion_active) {
-            const float checkbox_opacity = multi_motion_active
-                                               ? PopupMultiSelectCheckboxOpacity(multi_motion, multi_entering)
-                                               : 1.0f;
-            const float checkbox_offset = multi_motion_active
-                                              ? PopupMultiSelectCheckboxOffset(multi_motion, multi_entering)
-                                              : 0.0f;
-            const UiRect checkbox{
-                card.checkbox.left + checkbox_offset,
-                card.checkbox.top,
-                card.checkbox.right + checkbox_offset,
-                card.checkbox.bottom,
-            };
-            brush->SetColor(checked ? D2D1::ColorF(palette.accent, 0.90f)
-                                    : D2D1::ColorF(palette.panel_fill, 0.78f * checkbox_opacity));
-            render_target_->FillRoundedRectangle(RoundRect(checkbox, 4), brush);
-            brush->SetColor(D2D1::ColorF(checked ? palette.accent : palette.border, checked ? 0.82f : 0.76f));
+            const float checkbox_opacity =
+                multi_motion_active ? PopupMultiSelectCheckboxOpacity(multi_motion, multi_entering) : 1.0f;
+            const float checkbox_offset =
+                multi_motion_active ? PopupMultiSelectCheckboxOffset(multi_motion, multi_entering) : 0.0f;
+            const UiRect checkbox{card.checkbox.left + checkbox_offset, card.checkbox.top,
+                                  card.checkbox.right + checkbox_offset, card.checkbox.bottom};
             brush->SetOpacity(checkbox_opacity);
-            render_target_->DrawRoundedRectangle(RoundRect(checkbox, 4), brush, 1.0f);
-            brush->SetOpacity(1.0f);
+            brush->SetColor(D2D1::ColorF(checked ? palette.text : palette.panel_fill,
+                                         checked ? 0.94f : (palette.dark ? 0.30f : 0.92f)));
+            render_target_->FillRoundedRectangle(RoundRect(checkbox, 4), brush);
+            brush->SetColor(D2D1::ColorF(checked ? palette.text : palette.text_tertiary, checked ? 0.94f : 0.66f));
+            render_target_->DrawRoundedRectangle(RoundRect(checkbox, 4), brush, 1.2f);
             if (checked) {
-                brush->SetColor(D2D1::ColorF(0xFFFFFF, 0.96f));
-                brush->SetOpacity(checkbox_opacity);
-                render_target_->DrawLine(D2D1::Point2F(checkbox.left + 3.0f, checkbox.top + 7.0f),
-                                         D2D1::Point2F(checkbox.left + 6.0f, checkbox.top + 10.0f),
-                                         brush, 1.7f);
-                render_target_->DrawLine(D2D1::Point2F(checkbox.left + 6.0f, checkbox.top + 10.0f),
-                                         D2D1::Point2F(checkbox.right - 3.0f, checkbox.top + 4.0f),
-                                         brush, 1.7f);
-                brush->SetOpacity(1.0f);
+                brush->SetColor(D2D1::ColorF(palette.window_tint, 0.98f));
+                render_target_->DrawLine(D2D1::Point2F(checkbox.left + 3.2f, checkbox.top + 7.6f),
+                                         D2D1::Point2F(checkbox.left + 6.2f, checkbox.top + 10.6f), brush, 1.7f);
+                render_target_->DrawLine(D2D1::Point2F(checkbox.left + 6.2f, checkbox.top + 10.6f),
+                                         D2D1::Point2F(checkbox.right - 3.2f, checkbox.top + 4.4f), brush, 1.7f);
             }
+            brush->SetOpacity(1.0f);
         }
 
-        const auto title = ItemTitle(item);
-        const auto meta = ItemMeta(item);
-        brush->SetColor(D2D1::ColorF(palette.text, selected ? 0.98f : 0.92f));
-        render_target_->DrawTextW(title.c_str(), static_cast<UINT32>(title.size()), body_format_,
-                                  Rect(card.title), brush);
-        render_target_->DrawTextW(meta.c_str(), static_cast<UINT32>(meta.size()), small_format_,
-                                  Rect(card.meta), muted_brush_);
-        const auto time = ItemTime(item);
-        render_target_->DrawTextW(time.c_str(), static_cast<UINT32>(time.size()), small_format_, Rect(card.time),
-                                  muted_brush_);
+        // 媒体列：30×30 类型徽章 / 34px 缩略图 / 文件图标
+        const UiRect media_slot = card.image_preview;
+        const bool fast_interaction =
+            PopupIsFastMediaInteraction(moving_window_, resizing_window_, view_switch_active);
+        const bool load_preview = PopupShouldLoadImagePreview(fast_interaction);
+        const auto drawImagePreview = [&](const std::filesystem::path& path, const UiRect& bounds) {
+            brush->SetColor(D2D1::ColorF(palette.panel_fill, palette.dark ? 0.94f : 0.99f));
+            render_target_->FillRoundedRectangle(RoundRect(bounds, 6), brush);
+            brush->SetColor(D2D1::ColorF(palette.text, 0.16f));
+            render_target_->DrawRoundedRectangle(RoundRect(bounds, 6), brush, 1.0f);
+            ID2D1Bitmap* bitmap = load_preview ? (item.kind==ClipboardKind::Files
+                ? LoadImageFilePreviewBitmap(path) : LoadImagePreviewBitmap(path)) : CachedImagePreviewBitmap(path);
+            if (PopupShouldDrawCachedMediaDuringFastInteraction(fast_interaction, bitmap != nullptr) && bitmap) {
+                const auto size = bitmap->GetSize();
+                const auto fitted = FitImageRectToBounds(size.width, size.height, ShrinkRect(bounds, 3.0f, 3.0f));
+                render_target_->DrawBitmap(bitmap, Rect(fitted), 0.98f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+            }
+        };
+        if (item.kind == ClipboardKind::Image) {
+            drawImagePreview(item.payload_path, CenteredRect(media_slot, 34.0f, 34.0f));
+        } else if (item.kind == ClipboardKind::Files && !item.files.empty()) {
+            const auto& first_file = item.files.front();
+            if (PopupFileCanUseImagePreview(first_file)) {
+                drawImagePreview(first_file, CenteredRect(media_slot, 34.0f, 34.0f));
+            } else {
+                // 文件：带折角的纸片图标
+                const UiRect sheet = CenteredRect(media_slot, 27.0f, 33.0f);
+                brush->SetColor(D2D1::ColorF(palette.panel_fill, palette.dark ? 0.94f : 0.99f));
+                render_target_->FillRoundedRectangle(
+                    RoundRect(sheet.left, sheet.top, sheet.right, sheet.bottom, 3.0f), brush);
+                brush->SetColor(D2D1::ColorF(palette.text, 0.16f));
+                render_target_->DrawRoundedRectangle(
+                    RoundRect(sheet.left, sheet.top, sheet.right, sheet.bottom, 3.0f), brush, 1.0f);
+                brush->SetColor(D2D1::ColorF(palette.paper_hover));
+                render_target_->FillRoundedRectangle(RoundRect(sheet.right-9,sheet.top,sheet.right,sheet.top+9,2),brush);
+                brush->SetColor(D2D1::ColorF(palette.text,0.16f));
+                render_target_->DrawLine(D2D1::Point2F(sheet.right-9,sheet.top),D2D1::Point2F(sheet.right-9,sheet.top+9),brush,1);
+                render_target_->DrawLine(D2D1::Point2F(sheet.right-9,sheet.top+9),D2D1::Point2F(sheet.right,sheet.top+9),brush,1);
+                const auto extension = std::filesystem::path(first_file).extension().wstring();
+                std::wstring label = extension.size() > 1 ? extension.substr(1,3) : std::wstring(L"FILE");
+                for (auto& ch : label) ch=static_cast<wchar_t>(towupper(ch));
+                drawAlignedText(label,extension_format_,{sheet.left,sheet.bottom-14,sheet.right,sheet.bottom-2},palette.muted,1,DWRITE_TEXT_ALIGNMENT_CENTER);
+            }
+        } else {
+            // 文本 / 链接：30×30 深纸徽章 + 原型线性图标
+            const UiRect badge = card.kind_badge;
+            brush->SetColor(D2D1::ColorF(selected && !multi_select_ ? palette.window_tint : palette.paper_hover, 1.0f));
+            render_target_->FillRoundedRectangle(RoundRect(badge, 8), brush);
+            DrawIcon(item.kind == ClipboardKind::Link ? IconId::LinkKind : IconId::TextKind,
+                     CenteredRect(badge, 14.0f, 14.0f), 1.0f);
+        }
 
-        brush->SetColor(D2D1::ColorF(expanded ? palette.accent : palette.text_tertiary, expanded ? 0.92f : 0.70f));
-        const float ex = (card.expand.left + card.expand.right) * 0.5f;
-        const float ey = (card.expand.top + card.expand.bottom) * 0.5f;
+        // 置顶：类型图标右上角朱砂实心圆 + 白色图钉
+        const auto badge_motion=badge_transitions_.find(item.id);
+        const bool pin_anim=badge_motion!=badge_transitions_.end() && badge_motion->second.pin;
+        const bool fav_anim=badge_motion!=badge_transitions_.end() && !badge_motion->second.pin;
+        if (item.is_pinned || pin_anim) {
+            D2D1_MATRIX_3X2_F pin_transform{};render_target_->GetTransform(&pin_transform);
+            const UiRect badge = CenteredRect(media_slot, 30.0f, 30.0f);
+            const float pin_cx = card.card.left + 41.0f + (multi_select_ ? 28.0f : 0.0f);
+            const float pin_cy = card.card.top + 13.0f;
+            if(pin_anim) {
+                const float raw=PopupTimedMotionProgress(static_cast<double>(GetTickCount64())-badge_motion->second.start_ms,280.0,animations_enabled_);
+                const float p=PopupMotionProgress(raw);
+                const float scale=badge_motion->second.to?p:1-p;
+                render_target_->SetTransform(D2D1::Matrix3x2F::Scale(scale,scale,D2D1::Point2F(pin_cx,pin_cy))*
+                    D2D1::Matrix3x2F::Rotation(-60*(1-p),D2D1::Point2F(pin_cx,pin_cy))*pin_transform);
+            }
+            brush->SetColor(D2D1::ColorF(selected?palette.paper_selected:palette.window_tint, 1.0f));
+            render_target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(pin_cx, pin_cy), 9.0f, 9.0f), brush);
+            brush->SetColor(D2D1::ColorF(palette.danger, 0.98f));
+            render_target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(pin_cx, pin_cy), 8.0f, 8.0f), brush);
+            glyph(InkGlyph::PinFill,{pin_cx-4.5f,pin_cy-4.5f,pin_cx+4.5f,pin_cy+4.5f},0xFFFFFF);
+            render_target_->SetTransform(pin_transform);
+        }
+
+        // 标题：搜索命中处加粗 + 朱砂下划线
+        const auto title = ItemTitle(item);
+        const bool is_code = item.kind == ClipboardKind::Text && (title.starts_with(L"cmake ") || title.starts_with(L"npm ") ||
+            title.starts_with(L"git ") || title.starts_with(L"SELECT ") || title.starts_with(L"ctest ") || title.starts_with(L"const "));
+        auto* row_format = is_code ? code_format_ : body_format_;
+        const UiRect title_rect = card.title;
+        const auto matches = query_.empty() ? std::vector<std::pair<size_t, size_t>>{}
+                                            : FindSearchMatches(title, query_);
+        if (!matches.empty() && dwrite_factory_ && title_format_) {
+            IDWriteTextLayout* text_layout = nullptr;
+            if (SUCCEEDED(dwrite_factory_->CreateTextLayout(title.c_str(), static_cast<UINT32>(title.size()),
+                                                            row_format, title_rect.Width(), title_rect.Height(),
+                                                            &text_layout)) &&
+                text_layout) {
+                for (const auto& [start, length] : matches) {
+                    text_layout->SetFontWeight(DWRITE_FONT_WEIGHT_BOLD,
+                                               DWRITE_TEXT_RANGE{static_cast<UINT32>(start),
+                                                                 static_cast<UINT32>(length)});
+                }
+                brush->SetColor(D2D1::ColorF(palette.text, selected ? 0.99f : 0.94f));
+                render_target_->DrawTextLayout(D2D1::Point2F(title_rect.left, title_rect.top), text_layout, brush);
+                for (const auto& [start, length] : matches) {
+                    UINT32 count = 0;
+                    text_layout->HitTestTextRange(static_cast<UINT32>(start), static_cast<UINT32>(length), 0.0f, 0.0f,
+                                                  nullptr, 0, &count);
+                    if (count == 0 || count > 16) {
+                        continue;
+                    }
+                    DWRITE_HIT_TEST_METRICS hit[16]{};
+                    if (SUCCEEDED(text_layout->HitTestTextRange(static_cast<UINT32>(start),
+                                                                static_cast<UINT32>(length), 0.0f, 0.0f, hit, count,
+                                                                &count))) {
+                        brush->SetColor(D2D1::ColorF(palette.danger, 0.92f));
+                        for (UINT32 index = 0; index < count; ++index) {
+                            const float underline_y = title_rect.top + hit[index].top + hit[index].height - 1.0f;
+                            render_target_->DrawLine(
+                                D2D1::Point2F(title_rect.left + hit[index].left, underline_y),
+                                D2D1::Point2F(title_rect.left + hit[index].left + hit[index].width, underline_y),
+                                brush, 1.5f);
+                        }
+                    }
+                }
+                ReleasePtr(text_layout);
+            }
+        } else {
+            drawText(title, row_format, title_rect, palette.text, 1.0f);
+        }
+
+        // 副行：类型 · 字数（备注带笔形小图标）
+        const auto meta = ItemMetaSummary(item);
+        const float meta_width = std::min(textWidth(meta, small_format_), card.meta.Width());
+        drawText(meta, small_format_, UiRect{card.meta.left,card.meta.top,card.meta.left+meta_width,card.meta.bottom}, palette.text_tertiary, 1.0f);
+        if (!item.note.empty()) {
+            const auto note_text = PopupNotePreviewText(item.note);
+            const float note_x = card.meta.left + meta_width + 14.0f;
+            const float pen_y = card.meta.top + 5.0f;
+            brush->SetColor(D2D1::ColorF(palette.text_tertiary, 0.86f));
+            render_target_->DrawLine(D2D1::Point2F(note_x, pen_y + 6.0f), D2D1::Point2F(note_x + 5.0f, pen_y + 1.0f),
+                                     brush, 1.1f);
+            render_target_->DrawLine(D2D1::Point2F(note_x - 0.6f, pen_y + 6.6f),
+                                     D2D1::Point2F(note_x + 1.0f, pen_y + 5.0f), brush, 1.1f);
+            drawText(note_text, small_format_,
+                     UiRect{note_x + 8.0f, card.meta.top, card.meta.right, card.meta.bottom}, palette.muted, 0.90f);
+        }
+
+        // 时间（等宽）+ 展开箭头；收藏项给书签带留位置
+        const auto time = ItemTime(item, time_context);
+        const float time_shift = item.is_favorite ? 14.0f : 0.0f;
+        drawAlignedText(time, mono_format_,
+                 UiRect{card.time.left - time_shift, card.time.top, card.time.right - time_shift, card.time.bottom},
+                 palette.text_tertiary, 1.0f, DWRITE_TEXT_ALIGNMENT_TRAILING);
         float arrow_progress = 1.0f;
         if (arrow_motion_item_id_ && *arrow_motion_item_id_ == item.id) {
             arrow_progress = PopupMotionProgress(arrow_motion_progress_);
         }
-        const float arrow_angle = expanded ? (-kPi * 0.5f) * (1.0f - arrow_progress)
-                                           : (-kPi * 0.5f) * arrow_progress;
-        const auto arrow_a = RotatePoint(ex - 4.0f, ey - 2.0f, ex, ey, arrow_angle);
-        const auto arrow_b = RotatePoint(ex, ey + 3.0f, ex, ey, arrow_angle);
-        const auto arrow_c = RotatePoint(ex + 4.0f, ey - 2.0f, ex, ey, arrow_angle);
-        render_target_->DrawLine(arrow_a, arrow_b, brush, 1.5f);
-        render_target_->DrawLine(arrow_c, arrow_b, brush, 1.5f);
+        const float ex = (card.expand.left + card.expand.right) * 0.5f;
+        const float ey = (card.expand.top + card.expand.bottom) * 0.5f;
+        // 箭头旋转：展开时从 0° 连续转到 180°（而不是在 90° 处突然翻面）。
+        const float arrow_radians = kPi * (expanded ? arrow_progress : 1.0f - arrow_progress);
+        const auto arrow_left = RotatePoint(ex - 4.5f, ey - 2.5f, ex, ey, arrow_radians);
+        const auto arrow_mid = RotatePoint(ex, ey + 2.5f, ex, ey, arrow_radians);
+        const auto arrow_right = RotatePoint(ex + 4.5f, ey - 2.5f, ex, ey, arrow_radians);
+        brush->SetColor(D2D1::ColorF(expanded ? palette.text : palette.text_tertiary,
+                                     expanded ? 0.92f : 0.70f));
+        render_target_->DrawLine(arrow_left, arrow_mid, brush, 1.4f);
+        render_target_->DrawLine(arrow_right, arrow_mid, brush, 1.4f);
 
-        if (expanded) {
-            const UiRect detail_rect{card.title.left, card.meta.bottom + 6.0f, card.card.right - 16.0f,
-                                     card.card.bottom - 12.0f};
+        // 收藏：右上角朱砂书签带（宽 8、高 13、底边 V 形缺口）
+        if (item.is_favorite || fav_anim) {
+            float ribbon_height=13;
+            if(fav_anim) {
+                const float p=PopupMotionProgress(PopupTimedMotionProgress(static_cast<double>(GetTickCount64())-badge_motion->second.start_ms,280.0,animations_enabled_));
+                ribbon_height*=badge_motion->second.to?p:1-p;
+            }
+            const float ribbon_right = card.card.right - 14.0f;
+            const float ribbon_left = ribbon_right - 8.0f;
+            const float ribbon_bottom = card.card.top + std::max(3.0f,ribbon_height);
+            brush->SetColor(D2D1::ColorF(palette.danger, 0.96f));
+            render_target_->FillRectangle(Rect(ribbon_left, card.card.top, ribbon_right, ribbon_bottom - 3.0f), brush);
+            // 左半：斜边从左上角接到右下；右半是它的镜像。
+            const float notch_width = (ribbon_right - ribbon_left) * 0.5f;
+            fillRibbonNotch(ribbon_left, ribbon_bottom - 3.0f, notch_width, 3.0f, false, palette.danger, 0.96f);
+            fillRibbonNotch(ribbon_right - notch_width, ribbon_bottom - 3.0f, notch_width, 3.0f, true,
+                            palette.danger, 0.96f);
+        }
+
+        // 展开详情：深纸圆角块；图片显示 120px 大图
+        if (expanded_height > 0.5f) {
+            render_target_->PushAxisAlignedClip(Rect(card.title.left, card.meta.bottom, card.card.right - 12.0f,
+                card.card.bottom - 4.0f), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            const UiRect detail_block{card.title.left, card.meta.bottom + 8.0f, card.title.right,
+                                      card.meta.bottom + 8.0f + std::max(0.0f,expanded_height - 8.0f)};
+            brush->SetColor(D2D1::ColorF(selected ? palette.window_tint : palette.paper_hover, 1.0f));
+            render_target_->FillRoundedRectangle(RoundRect(detail_block, 6), brush);
             const bool image_item = item.kind == ClipboardKind::Image && !item.payload_path.empty();
-            const bool image_file_item =
-                item.kind == ClipboardKind::Files && !item.files.empty() && PopupFileCanUseImagePreview(item.files.front());
+            const bool image_file_item = false;
+            const auto detail = ItemDetailText(item);
             if (image_item || image_file_item) {
-                const UiRect image_rect{detail_rect.left, detail_rect.top, detail_rect.left + 116.0f,
-                                        std::min(detail_rect.top + 116.0f, detail_rect.bottom)};
-                brush->SetColor(D2D1::ColorF(0xFFFFFF, 0.54f));
-                render_target_->FillRoundedRectangle(RoundRect(image_rect, 10), brush);
-                const bool fast_interaction = PopupIsFastMediaInteraction(
-                    moving_window_, resizing_window_, motion_target_ == PopupMotionTarget::ViewSwitch);
-                const bool load_preview = PopupShouldLoadImagePreview(fast_interaction);
+                const float image_size = 120.0f;
+                const UiRect image_rect{detail_block.left, detail_block.top,
+                                        detail_block.left + image_size,
+                                        detail_block.top + image_size};
+                const auto& path = image_item ? item.payload_path : std::filesystem::path(item.files.front());
+                brush->SetColor(D2D1::ColorF(palette.panel_fill, palette.dark ? 0.94f : 0.99f));
+                render_target_->FillRoundedRectangle(RoundRect(image_rect, 7), brush);
+                brush->SetColor(D2D1::ColorF(palette.text, 0.16f));
+                render_target_->DrawRoundedRectangle(RoundRect(image_rect, 7), brush, 1.0f);
                 ID2D1Bitmap* bitmap = nullptr;
                 if (image_item) {
-                    bitmap = load_preview ? LoadImagePreviewBitmap(item.payload_path)
-                                          : CachedImagePreviewBitmap(item.payload_path);
+                    bitmap = load_preview ? LoadImagePreviewBitmap(path) : CachedImagePreviewBitmap(path);
                 } else {
                     bitmap = load_preview ? LoadImageFilePreviewBitmap(item.files.front())
                                           : CachedImagePreviewBitmap(item.files.front());
@@ -3198,89 +3783,144 @@ void PopupWindow::Paint() {
                 if (PopupShouldDrawCachedMediaDuringFastInteraction(fast_interaction, bitmap != nullptr) && bitmap) {
                     const auto size = bitmap->GetSize();
                     const auto fitted =
-                        FitImageRectToBounds(size.width, size.height, ShrinkRect(image_rect, 2.0f, 2.0f));
+                        FitImageRectToBounds(size.width, size.height, ShrinkRect(image_rect, 4.0f, 4.0f));
                     render_target_->DrawBitmap(bitmap, Rect(fitted), 0.98f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
                 }
-                const std::wstring path = ItemDetailText(item);
-                const UiRect path_rect{detail_rect.left, image_rect.bottom + 8.0f, detail_rect.right,
-                                       detail_rect.bottom};
-                render_target_->DrawTextW(path.c_str(), static_cast<UINT32>(path.size()), detail_format_,
-                                          Rect(path_rect), muted_brush_);
-            } else {
-                render_target_->DrawTextW(detail.c_str(), static_cast<UINT32>(detail.size()), detail_format_,
-                                          Rect(detail_rect), text_brush_);
-            }
-        }
 
-        y += metrics.card_height + expanded_height + metrics.card_gap;
-        if (expanded) {
-            break;
+            } else {
+                render_target_->PushAxisAlignedClip(Rect(detail_block.left+10,detail_block.top+8,detail_block.right-10,detail_block.bottom-6),D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                drawText(detail, detail_format_,
+                         UiRect{detail_block.left + 10.0f, detail_block.top + 8.0f-detail_scroll_, detail_block.right - 10.0f,
+                                detail_block.top + 8192.0f-detail_scroll_}, palette.muted, 1.0f);
+                render_target_->PopAxisAlignedClip();
+            }
+            render_target_->PopAxisAlignedClip();
         }
+        if (stamp_item_id_ && *stamp_item_id_ == item.id) {
+            const float elapsed = static_cast<float>(GetTickCount64() - stamp_start_ms_);
+            const float appear = PopupMotionProgress(std::clamp(elapsed / 260.0f, 0.0f, 1.0f));
+            const float alpha = elapsed > 700.0f ? 1.0f - std::clamp((elapsed - 700.0f) / 260.0f, 0.0f, 1.0f) : appear;
+            const UiRect stamp{card.card.right - 90.0f, card.card.top + 11.0f, card.card.right - 42.0f, card.card.top + 34.0f};
+            D2D1_MATRIX_3X2_F saved{}; render_target_->GetTransform(&saved);
+            const auto center = D2D1::Point2F((stamp.left + stamp.right) / 2, (stamp.top + stamp.bottom) / 2);
+            render_target_->SetTransform(D2D1::Matrix3x2F::Scale(1.0f + 0.7f * (1-appear), 1.0f + 0.7f*(1-appear), center) *
+                D2D1::Matrix3x2F::Rotation(-8.0f - 6.0f*(1-appear), center) * saved);
+            brush->SetColor(D2D1::ColorF(palette.window_tint, alpha));
+            render_target_->FillRoundedRectangle(RoundRect(stamp, 4), brush);
+            brush->SetColor(D2D1::ColorF(palette.danger, alpha));
+            render_target_->DrawRoundedRectangle(RoundRect(stamp, 4), brush, 1.5f);
+            drawAlignedText(L"已贴", small_format_, stamp, palette.danger, alpha, DWRITE_TEXT_ALIGNMENT_CENTER);
+            render_target_->SetTransform(saved);
+        }
+        render_target_->PopAxisAlignedClip();
+        if (row_layer_active) render_target_->PopLayer();
+        ReleasePtr(row_layer);
+        render_target_->SetTransform(row_transform);
     }
 
+    // ---------- A8 空状态 ----------
     if (items_.empty()) {
+        const float empty_top = PopupListTop() + 90.0f;
         const auto empty_text = PopupEmptyMessage(view_mode_ == ViewMode::Favorites,
                                                   active_favorite_group_id_ ? ActiveFavoriteGroupLabel() : L"");
-        render_target_->DrawTextW(empty_text.c_str(), static_cast<UINT32>(empty_text.size()), body_format_,
-                                  Rect(metrics.margin, PopupListTop() + 24.0f,
-                                       popup_logical_width_ - metrics.margin, PopupListTop() + 56.0f),
-                                  muted_brush_);
+        drawAlignedText(!query_.empty() || HasActiveFilter() ? L"没有匹配的记录" : empty_text, button_format_,
+                 UiRect{content_left + 24.0f, empty_top + 34.0f, surface_width - content_left - 24.0f,
+                        empty_top + 58.0f},
+                 palette.text_tertiary, 1.0f, DWRITE_TEXT_ALIGNMENT_CENTER);
     }
 
-    render_target_->SetTransform(list_transform);
+    if (view_switch_active) {
+        render_target_->SetTransform(list_transform);
+    }
     render_target_->PopAxisAlignedClip();
 
+    // ---------- A7 滚动条：4px（悬停/拖动 6px）+ 回到顶部圆形浮层 ----------
     const float content_height = TotalScrollHeight();
     const float viewport_height = ViewportScrollHeight();
-    if (content_height > viewport_height) {
-        const auto track = PopupScrollbarTrackRectForSize(popup_logical_width_, popup_logical_height_);
-        const float thumb_height = std::max(32.0f, track.Height() * viewport_height / content_height);
-        const float max_offset = std::max(1.0f, content_height - viewport_height);
-        const float thumb_top =
-            track.top + (track.Height() - thumb_height) * ClampSmoothScrollOffset(scroll_offset_) / max_offset;
-        const UiRect thumb{track.left, thumb_top, track.right, thumb_top + thumb_height};
+    if (content_height > viewport_height && !items_.empty()) {
         const bool scrollbar_hovered =
             hover_action_ == UiAction::Scrollbar ||
             Contains(PopupScrollbarHitRectForSize(popup_logical_width_, popup_logical_height_), hover_point_);
-        const float thumb_opacity = PopupScrollbarThumbOpacity(scrollbar_hovered, dragging_scrollbar_, hover_progress_);
-        brush->SetColor(D2D1::ColorF(palette.scrollbar_track, palette.dark ? 0.28f : 0.86f));
-        render_target_->FillRoundedRectangle(RoundRect(track, 2), brush);
-        const uint32_t thumb_color = dragging_scrollbar_ ? palette.scrollbar_pressed
-                                   : scrollbar_hovered ? palette.accent
-                                                       : palette.scrollbar_thumb;
-        brush->SetColor(D2D1::ColorF(thumb_color, thumb_opacity));
-        render_target_->FillRoundedRectangle(RoundRect(thumb, 2), brush);
-
-        if (PopupScrollToTopButtonVisible(scroll_offset_)) {
-            const auto button = PopupScrollToTopButtonRectForSize(popup_logical_width_, popup_logical_height_);
-            const bool button_hovered =
-                hover_action_ == UiAction::ScrollToTop || Contains(button, hover_point_);
-            const float button_hover = button_hovered ? hover_progress_ : 0.0f;
-            drawEdgeShadow(button, 10.0f, button_hovered ? 0.28f + 0.10f * button_hover : 0.16f, 1.4f);
-            brush->SetColor(ColorWithAlpha(palette.dark ? palette.card_fill : palette.panel_fill,
-                                           palette.dark ? 0.82f + 0.08f * button_hover
-                                                        : 0.84f + 0.10f * button_hover));
-            render_target_->FillRoundedRectangle(RoundRect(button, 10), brush);
-            brush->SetColor(D2D1::ColorF(button_hovered ? palette.border_hover : palette.border, 0.86f));
-            render_target_->DrawRoundedRectangle(RoundRect(button, 10), brush, 1.0f);
-
-            brush->SetColor(D2D1::ColorF(button_hovered ? palette.accent : palette.text_tertiary,
-                                         button_hovered ? 0.96f : 0.82f));
-            const float cx = (button.left + button.right) * 0.5f;
-            const float cy = (button.top + button.bottom) * 0.5f - 1.0f * button_hover;
-            render_target_->DrawLine(D2D1::Point2F(cx, cy + 8.0f), D2D1::Point2F(cx, cy - 7.0f), brush, 1.8f);
-            render_target_->DrawLine(D2D1::Point2F(cx - 6.0f, cy - 1.0f), D2D1::Point2F(cx, cy - 7.0f), brush, 1.8f);
-            render_target_->DrawLine(D2D1::Point2F(cx + 6.0f, cy - 1.0f), D2D1::Point2F(cx, cy - 7.0f), brush, 1.8f);
-        }
+        const bool emphasized = scrollbar_hovered || dragging_scrollbar_;
+        const float thumb_width = emphasized ? 6.0f : 4.0f;
+        const float track_right = surface_width - 3.0f;
+        const float track_left = track_right - thumb_width;
+        const float track_top = PopupListTop() + 2.0f;
+        const float track_bottom = PopupListBottomForHeight(popup_logical_height_) - 2.0f;
+        const float track_height = std::max(1.0f, track_bottom - track_top);
+        const float thumb_height = std::max(32.0f, track_height * viewport_height / content_height);
+        const float max_offset = std::max(1.0f, content_height - viewport_height);
+        const float thumb_top =
+            track_top + (track_height - thumb_height) * ClampSmoothScrollOffset(scroll_offset_) / max_offset;
+        const float thumb_opacity = emphasized ? (dragging_scrollbar_ ? 0.70f : 0.40f + 0.30f * hover_progress_)
+                                               : Contains(list_clip, hover_point_) ? 0.40f : 0.0f;
+        brush->SetColor(D2D1::ColorF(palette.text_tertiary, thumb_opacity));
+        render_target_->FillRoundedRectangle(
+            RoundRect(track_left, thumb_top, track_left + thumb_width, thumb_top + thumb_height, thumb_width * 0.5f),
+            brush);
+    }
+    // 回顶部滚动进行中按钮保持可见（否则越过阈值时会闪烁消失）。
+    const bool scroll_to_top_visible =
+        PopupScrollToTopButtonVisible(scroll_offset_) || smooth_scroll_active_;
+    if (scroll_to_top_visible) {
+        const auto button = PopupScrollToTopButtonRectForSize(popup_logical_width_, popup_logical_height_);
+        const bool button_hovered = hover_action_ == UiAction::ScrollToTop || Contains(button, hover_point_);
+        const float button_hover = button_hovered ? hover_progress_ : 0.0f;
+        drawEdgeShadow(button, 15.0f, 0.22f + 0.10f * button_hover, 1.4f);
+        brush->SetColor(D2D1::ColorF(palette.panel_fill, 0.96f));
+        render_target_->FillEllipse(
+            D2D1::Ellipse(D2D1::Point2F((button.left + button.right) * 0.5f, (button.top + button.bottom) * 0.5f),
+                          15.0f, 15.0f),
+            brush);
+        brush->SetColor(D2D1::ColorF(palette.text, 0.16f));
+        render_target_->DrawEllipse(
+            D2D1::Ellipse(D2D1::Point2F((button.left + button.right) * 0.5f, (button.top + button.bottom) * 0.5f),
+                          15.0f, 15.0f),
+            brush, 1.0f);
+        const float cx = (button.left + button.right) * 0.5f;
+        const float cy = (button.top + button.bottom) * 0.5f - 1.0f * button_hover;
+        brush->SetColor(D2D1::ColorF(button_hovered ? palette.text : palette.muted, button_hovered ? 0.96f : 0.82f));
+        render_target_->DrawLine(D2D1::Point2F(cx, cy + 5.0f), D2D1::Point2F(cx, cy - 5.0f), brush, 1.6f);
+        render_target_->DrawLine(D2D1::Point2F(cx - 4.0f, cy - 1.0f), D2D1::Point2F(cx, cy - 5.0f), brush, 1.6f);
+        render_target_->DrawLine(D2D1::Point2F(cx + 4.0f, cy - 1.0f), D2D1::Point2F(cx, cy - 5.0f), brush, 1.6f);
     }
 
-    if (favorite_group_menu_open_) {
+    // ---------- A9 页脚：监听状态 + 快捷键提示 ----------
+    const auto footer = PopupFooterRectForSize(popup_logical_width_, popup_logical_height_);
+    hairline(0.0f, footer.top, surface_width);
+    const float footer_center_y = (footer.top + footer.bottom) * 0.5f;
+    const uint32_t status_color = palette.dark ? 0x7FAE7A : 0x5F8C5B;
+    brush->SetColor(D2D1::ColorF(paused_ ? palette.text_tertiary : status_color, 1.0f));
+    render_target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(content_left + 3.0f, footer_center_y), 2.6f, 2.6f),
+                                brush);
+    if (!paused_) {
+        brush->SetColor(D2D1::ColorF(status_color, 0.18f));
+        render_target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(content_left + 3.0f, footer_center_y), 6.0f, 6.0f),
+                                    brush);
+    }
+    drawText(paused_ ? L"已暂停" : L"监听中", mono_format_,
+             UiRect{content_left + 12.0f, footer.top, content_left + 80.0f, footer.bottom},
+             paused_ ? palette.text_tertiary : palette.muted, 0.94f);
+    drawAlignedText(L"↵ 粘贴    右键 更多    esc",mono_format_,
+        {surface_width-174,footer.top,surface_width-18,footer.bottom},palette.text_tertiary,1,DWRITE_TEXT_ALIGNMENT_TRAILING);
+
+    // ---------- C 收藏夹菜单：宽 180、行高 30、圆角 12 ----------
+    if (favorite_group_menu_open_ || closing_favorite_group_menu_) {
         const auto menu = BuildPopupFavoriteGroupMenuLayout(favorite_groups_.size());
         D2D1_MATRIX_3X2_F previous_transform{};
         render_target_->GetTransform(&previous_transform);
-        applyMotionTransformFromTrigger(PopupMotionTarget::FavoriteMenu, 10.0f, 1.0f,
-                                        tabs.favorite_group, menu.panel);
-        const auto isMenuHovered = [&](PopupFavoriteGroupMenuTarget target, size_t index = 0) {
+        const bool exiting = motion_target_ == PopupMotionTarget::FavoriteMenu && motion_direction_ < 0;
+        const float motion = motionProgressFor(PopupMotionTarget::FavoriteMenu);
+        const auto offset = exiting ? PopupMotionExitOffsetFromTrigger(tabs.favorite_group, menu.panel,
+                                                                      motion_progress_, 10.0f)
+                                    : PopupMotionEnterOffsetFromTrigger(tabs.favorite_group, menu.panel, motion, 10.0f);
+        render_target_->SetTransform(D2D1::Matrix3x2F::Translation(offset.x, offset.y));
+        drawEdgeShadow(menu.panel, 12.0f, 0.42f, 2.0f);
+        brush->SetColor(ColorWithAlpha(palette.panel_fill, palette.dark ? 0.98f : 0.99f));
+        render_target_->FillRoundedRectangle(RoundRect(menu.panel, 12), brush);
+        drawInkPanelFrame(menu.panel, 12.0f, 0.86f, false);
+
+        auto menuRowHover = [&](PopupFavoriteGroupMenuTarget target, size_t index = 0) {
             if (hover_favorite_group_menu_hit_.target != target) {
                 return 0.0f;
             }
@@ -3290,391 +3930,530 @@ void PopupWindow::Paint() {
             return hover_progress_;
         };
         auto drawMenuRow = [&](const UiRect& rect, const std::wstring& label, bool active, float hover,
-                               bool group_row = false, size_t group_index = 0) {
-            const bool delete_hover =
-                group_row &&
-                hover_favorite_group_menu_hit_.target == PopupFavoriteGroupMenuTarget::DeleteGroup &&
-                hover_favorite_group_menu_hit_.group_index == group_index;
-            const float row_hover = delete_hover ? std::max(hover, hover_progress_) : hover;
-            if (row_hover > 0.0f || active) {
-                brush->SetColor(active ? D2D1::ColorF(PopupSubtleAccentFill(palette), 0.82f)
-                                       : D2D1::ColorF(PopupNeutralHoverFill(palette), 0.76f * row_hover));
-                render_target_->FillRoundedRectangle(RoundRect(rect, 10), brush);
-                brush->SetColor(D2D1::ColorF(active ? palette.border_selected : palette.border_hover,
-                                             active ? 0.70f : 0.58f * row_hover));
-                render_target_->DrawRoundedRectangle(RoundRect(rect, 10), brush, active ? 1.0f : 0.8f);
+                               bool group_row, size_t group_index, int count) {
+            if (hover > 0.0f) {
+                brush->SetColor(D2D1::ColorF(palette.paper_hover, 0.94f * hover));
+                render_target_->FillRoundedRectangle(RoundRect(rect, 7), brush);
             }
             if (active) {
-                brush->SetColor(D2D1::ColorF(palette.accent, 0.88f));
-                render_target_->FillRoundedRectangle(
-                    RoundRect(rect.left + 5.0f, rect.top + 9.0f, rect.left + 8.0f, rect.bottom - 9.0f, 1.5f),
-                    brush);
+                // 当前组：前面画对勾并加粗
+                brush->SetColor(D2D1::ColorF(palette.text, 0.92f));
+                const float check_x = rect.left + 10.0f;
+                const float check_y = (rect.top + rect.bottom) * 0.5f;
+                render_target_->DrawLine(D2D1::Point2F(check_x - 3.0f, check_y),
+                                         D2D1::Point2F(check_x - 1.0f, check_y + 2.4f), brush, 1.5f);
+                render_target_->DrawLine(D2D1::Point2F(check_x - 1.0f, check_y + 2.4f),
+                                         D2D1::Point2F(check_x + 3.4f, check_y - 2.4f), brush, 1.5f);
             }
-            render_target_->DrawTextW(label.c_str(), static_cast<UINT32>(label.size()), small_format_,
-                                      Rect(rect.left + 16.0f, rect.top + 8.0f,
-                                           group_row ? rect.right - 36.0f : rect.right - 14.0f,
-                                           rect.bottom - 6.0f),
-                                      active ? accent_brush_ : text_brush_);
+            drawText(label, active ? title_format_ : button_format_,
+                     UiRect{rect.left + 20.0f, rect.top, group_row ? rect.right - 52.0f : rect.right - 12.0f,
+                            rect.bottom},
+                     active ? palette.text : palette.muted, active ? 0.98f : 0.94f);
             if (group_row) {
                 const auto delete_rect = PopupFavoriteGroupMenuDeleteRect(rect);
+                const bool delete_hover = hover_favorite_group_menu_hit_.target ==
+                                              PopupFavoriteGroupMenuTarget::DeleteGroup &&
+                                          hover_favorite_group_menu_hit_.group_index == group_index;
+                // 条目数（等宽）
+                drawText(std::to_wstring(count), mono_format_,
+                         UiRect{delete_rect.left - 34.0f, rect.top, delete_rect.left - 4.0f, rect.bottom},
+                         palette.text_tertiary, 0.90f);
                 if (delete_hover) {
-                    brush->SetColor(D2D1::ColorF(palette.dark ? 0x3A211F : 0xF8DED8, 0.88f));
-                    render_target_->FillEllipse(D2D1::Ellipse(
-                                                    D2D1::Point2F((delete_rect.left + delete_rect.right) * 0.5f,
-                                                                  (delete_rect.top + delete_rect.bottom) * 0.5f),
-                                                    10.0f, 10.0f),
-                                                brush);
+                    brush->SetColor(D2D1::ColorF(palette.danger, 0.12f));
+                    render_target_->FillRoundedRectangle(RoundRect(delete_rect, 5), brush);
                 }
-                brush->SetColor(D2D1::ColorF(delete_hover ? palette.danger : palette.muted,
-                                             delete_hover ? 0.92f : 0.68f));
+                brush->SetColor(D2D1::ColorF(delete_hover ? palette.danger : palette.text_tertiary,
+                                             delete_hover ? 0.94f : 0.68f));
                 const float cx = (delete_rect.left + delete_rect.right) * 0.5f;
                 const float cy = (delete_rect.top + delete_rect.bottom) * 0.5f;
-                render_target_->DrawLine(D2D1::Point2F(cx - 3.2f, cy - 3.2f),
-                                         D2D1::Point2F(cx + 3.2f, cy + 3.2f), brush, 1.15f);
-                render_target_->DrawLine(D2D1::Point2F(cx + 3.2f, cy - 3.2f),
-                                         D2D1::Point2F(cx - 3.2f, cy + 3.2f), brush, 1.15f);
+                render_target_->DrawLine(D2D1::Point2F(cx - 3.2f, cy - 3.2f), D2D1::Point2F(cx + 3.2f, cy + 3.2f),
+                                         brush, 1.2f);
+                render_target_->DrawLine(D2D1::Point2F(cx + 3.2f, cy - 3.2f), D2D1::Point2F(cx - 3.2f, cy + 3.2f),
+                                         brush, 1.2f);
             }
         };
 
-        drawEdgeShadow(menu.panel, 12.0f, 0.36f, 2.0f);
-        brush->SetColor(ColorWithAlpha(palette.dark ? palette.card_fill : palette.panel_fill,
-                                       palette.dark ? 0.98f : 0.99f));
-        render_target_->FillRoundedRectangle(RoundRect(menu.panel, 12), brush);
-        drawInkPanelFrame(menu.panel, 12.0f, 0.84f, false);
-
+        int all_favorites_count = 0;
+        for (const auto& [_, count] : favorite_group_counts_) {
+            all_favorites_count += count;
+        }
         drawMenuRow(menu.all_favorites, L"全部收藏", !active_favorite_group_id_,
-                    isMenuHovered(PopupFavoriteGroupMenuTarget::AllFavorites));
-        brush->SetColor(D2D1::ColorF(palette.border, 0.72f));
+                    menuRowHover(PopupFavoriteGroupMenuTarget::AllFavorites), false, 0, all_favorites_count);
+        brush->SetColor(D2D1::ColorF(palette.text, 0.09f));
         render_target_->FillRectangle(Rect(menu.first_divider), brush);
 
         const size_t visible_groups = PopupFavoriteGroupMenuVisibleGroupCount(favorite_groups_.size());
         for (size_t index = 0; index < visible_groups; ++index) {
             const auto row = PopupFavoriteGroupMenuGroupRect(menu, index);
-            const bool active = active_favorite_group_id_ && favorite_groups_[index].id == *active_favorite_group_id_;
+            const bool active =
+                active_favorite_group_id_ && favorite_groups_[index].id == *active_favorite_group_id_;
             drawMenuRow(row, favorite_groups_[index].name, active,
-                        isMenuHovered(PopupFavoriteGroupMenuTarget::Group, index), true, index);
+                        menuRowHover(PopupFavoriteGroupMenuTarget::Group, index), true, index,
+                        FavoriteGroupItemCount(favorite_groups_[index].id));
         }
-
-        brush->SetColor(D2D1::ColorF(palette.border, 0.72f));
+        brush->SetColor(D2D1::ColorF(palette.text, 0.09f));
         render_target_->FillRectangle(Rect(menu.second_divider), brush);
-        drawMenuRow(menu.new_group, L"\u65b0\u5efa\u6536\u85cf\u5939...", false,
-                    isMenuHovered(PopupFavoriteGroupMenuTarget::NewGroup));
+        drawMenuRow(menu.new_group, L"＋新建收藏夹…", false,
+                    menuRowHover(PopupFavoriteGroupMenuTarget::NewGroup), false, 0, 0);
         render_target_->SetTransform(previous_transform);
     }
 
-    if (pending_favorite_group_delete_) {
-        const auto confirm = FavoriteGroupDeleteConfirmPanelRect();
+    // ---------- C 删除收藏夹确认：朱砂圆形警示 + 遮罩 ----------
+    if (pending_favorite_group_delete_ || closing_delete_confirm_) {
+        const auto confirm = FavoriteGroupDeleteConfirmPanelRect(popup_logical_width_);
         const auto delete_button = FavoriteGroupDeleteConfirmDeleteRect(confirm);
         const auto cancel_button = FavoriteGroupDeleteConfirmCancelRect(confirm);
         UiRect confirm_trigger = tabs.favorite_group;
         const auto menu = BuildPopupFavoriteGroupMenuLayout(favorite_groups_.size());
         const PendingFavoriteGroupDelete confirm_data =
             pending_favorite_group_delete_ ? *pending_favorite_group_delete_ : closing_delete_confirm_snapshot_;
-        if (confirm_data.group_index <
-            PopupFavoriteGroupMenuVisibleGroupCount(favorite_groups_.size())) {
-            const auto row = PopupFavoriteGroupMenuGroupRect(menu, confirm_data.group_index);
-            confirm_trigger = PopupFavoriteGroupMenuDeleteRect(row);
+        if (confirm_data.group_index < PopupFavoriteGroupMenuVisibleGroupCount(favorite_groups_.size())) {
+            confirm_trigger = PopupFavoriteGroupMenuDeleteRect(
+                PopupFavoriteGroupMenuGroupRect(menu, confirm_data.group_index));
         }
         D2D1_MATRIX_3X2_F previous_transform{};
         render_target_->GetTransform(&previous_transform);
-        applyMotionTransformFromTrigger(PopupMotionTarget::DeleteConfirm, 12.0f, 1.0f,
-                                        confirm_trigger, confirm);
-        brush->SetColor(D2D1::ColorF(0x0B1220, palette.dark ? 0.24f : 0.10f));
-        render_target_->FillRoundedRectangle(RoundRect(8.0f, PopupTabsTop() - 4.0f,
-                                                       metrics.width - 8.0f,
-                                                       std::min<float>(metrics.height - 8.0f, confirm.bottom + 18.0f),
-                                                       16.0f),
-                                             brush);
-        drawEdgeShadow(confirm, 12.0f, 0.42f, 2.0f);
-        brush->SetColor(ColorWithAlpha(palette.dark ? palette.card_fill : palette.panel_fill,
-                                       palette.dark ? 0.99f : 0.99f));
+        const bool exiting = motion_target_ == PopupMotionTarget::DeleteConfirm && motion_direction_ < 0;
+        const float motion = motionProgressFor(PopupMotionTarget::DeleteConfirm);
+        const auto offset = exiting
+                                ? PopupMotionExitOffsetFromTrigger(confirm_trigger, confirm, motion_progress_, 12.0f)
+                                : PopupMotionEnterOffsetFromTrigger(confirm_trigger, confirm, motion, 12.0f);
+        render_target_->SetTransform(D2D1::Matrix3x2F::Translation(offset.x, offset.y));
+        // 半透明遮罩
+        brush->SetColor(D2D1::ColorF(palette.dark ? 0x000000 : 0x1C1B19, palette.dark ? 0.40f : 0.12f));
+        render_target_->FillRoundedRectangle(RoundRect(window_surface_rect, PopupWindowEdgeCornerRadius()), brush);
+        drawEdgeShadow(confirm, 12.0f, 0.46f, 2.0f);
+        brush->SetColor(ColorWithAlpha(palette.panel_fill, 0.99f));
         render_target_->FillRoundedRectangle(RoundRect(confirm, 12), brush);
-        drawInkPanelFrame(confirm, 12.0f, 0.88f, false);
-
-        render_target_->DrawTextW(L"\u5220\u9664\u6536\u85cf\u5939", 5, body_format_,
-                                  Rect(confirm.left + 16.0f, confirm.top + 14.0f,
-                                       confirm.right - 16.0f, confirm.top + 38.0f),
-                                  text_brush_);
-        const std::wstring message = L"\u5220\u9664 \"" + confirm_data.name + L"\"\uff1f";
-        render_target_->DrawTextW(message.c_str(), static_cast<UINT32>(message.size()), small_format_,
-                                  Rect(confirm.left + 16.0f, confirm.top + 46.0f,
-                                       confirm.right - 16.0f, confirm.top + 66.0f),
-                                  text_brush_);
-        render_target_->DrawTextW(L"\u6536\u85cf\u5939\u91cc\u7684\u5185\u5bb9\u4e5f\u4f1a\u88ab\u5220\u9664\u3002", 13, small_format_,
-                                  Rect(confirm.left + 16.0f, confirm.top + 68.0f,
-                                       confirm.right - 16.0f, confirm.top + 90.0f),
-                                  muted_brush_);
-
-        const bool delete_hover =
-            hover_delete_confirm_target_ == PopupFavoriteGroupDeleteConfirmTarget::Delete;
-        const bool cancel_hover =
-            hover_delete_confirm_target_ == PopupFavoriteGroupDeleteConfirmTarget::Cancel;
-        drawEdgeShadow(delete_button, 11.0f, delete_hover ? 0.44f : 0.30f, 2.0f);
-        brush->SetColor(delete_hover ? D2D1::ColorF(palette.danger, 0.98f)
-                                     : D2D1::ColorF(palette.danger, 0.90f));
-        render_target_->FillRoundedRectangle(RoundRect(delete_button, 11), brush);
-        brush->SetColor(D2D1::ColorF(0xFFFFFF, 0.34f));
-        render_target_->DrawRoundedRectangle(RoundRect(delete_button, 11), brush, 0.8f);
-
-        drawEdgeShadow(cancel_button, 11.0f, cancel_hover ? 0.34f : 0.22f, 2.0f);
-        brush->SetColor(cancel_hover ? D2D1::ColorF(PopupNeutralHoverFill(palette), 0.96f)
-                                     : D2D1::ColorF(palette.panel_fill, 0.96f));
-        render_target_->FillRoundedRectangle(RoundRect(cancel_button, 11), brush);
-        brush->SetColor(cancel_hover ? D2D1::ColorF(palette.strong_border, 0.66f)
-                                     : D2D1::ColorF(palette.border, 0.82f));
-        render_target_->DrawRoundedRectangle(RoundRect(cancel_button, 11), brush, 1.0f);
-
-        render_target_->DrawTextW(L"删除", 2, centered_small_format_, Rect(delete_button),
-                                  text_brush_);
-        brush->SetColor(D2D1::ColorF(0xFFFFFF, 0.98f));
-        render_target_->DrawTextW(L"删除", 2, centered_small_format_, Rect(delete_button), brush);
-        render_target_->DrawTextW(L"取消", 2, centered_small_format_, Rect(cancel_button), text_brush_);
+        drawInkPanelFrame(confirm, 12.0f, 0.90f, false);
+        // 朱砂圆形警示标记
+        const float warn_cx = confirm.left + 26.0f;
+        const float warn_cy = confirm.top + 26.0f;
+        brush->SetColor(D2D1::ColorF(palette.danger, 0.12f));
+        render_target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(warn_cx, warn_cy), 11.0f, 11.0f), brush);
+        brush->SetColor(D2D1::ColorF(palette.danger, 0.94f));
+        render_target_->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(warn_cx, warn_cy), 11.0f, 11.0f), brush, 1.4f);
+        render_target_->DrawLine(D2D1::Point2F(warn_cx, warn_cy - 5.0f), D2D1::Point2F(warn_cx, warn_cy + 1.0f),
+                                 brush, 1.5f);
+        render_target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(warn_cx, warn_cy + 4.4f), 1.1f, 1.1f), brush);
+        const std::wstring title_text = L"删除收藏夹「" + confirm_data.name + L"」？";
+        drawText(title_text, title_format_,
+                 UiRect{confirm.left + 46.0f, confirm.top + 14.0f, confirm.right - 16.0f, confirm.top + 40.0f},
+                 palette.text, 0.98f);
+        const std::wstring message =
+            L"夹内 " + std::to_wstring(FavoriteGroupItemCount(confirm_data.id)) + L" 条收藏会一并删除，此操作无法撤销。";
+        drawText(message, small_format_,
+                 UiRect{confirm.left + 16.0f, confirm.top + 48.0f, confirm.right - 16.0f, confirm.top + 92.0f},
+                 palette.muted, 0.94f);
+        const bool delete_hover = hover_delete_confirm_target_ == PopupFavoriteGroupDeleteConfirmTarget::Delete;
+        const bool cancel_hover = hover_delete_confirm_target_ == PopupFavoriteGroupDeleteConfirmTarget::Cancel;
+        // 取消（描边）/ 删除（朱砂实底）
+        if (cancel_hover) {
+            brush->SetColor(D2D1::ColorF(palette.paper_hover, 0.96f));
+            render_target_->FillRoundedRectangle(RoundRect(cancel_button, 7), brush);
+        }
+        brush->SetColor(D2D1::ColorF(palette.text, cancel_hover ? 0.28f : 0.16f));
+        render_target_->DrawRoundedRectangle(RoundRect(cancel_button, 7), brush, 1.0f);
+        drawText(L"取消", button_format_, cancel_button, palette.muted, 0.96f);
+        brush->SetColor(D2D1::ColorF(palette.danger, delete_hover ? 1.0f : 0.92f));
+        render_target_->FillRoundedRectangle(RoundRect(delete_button, 7), brush);
+        drawText(L"删除", button_format_, delete_button, 0xFFFFFF, 0.99f);
         render_target_->SetTransform(previous_transform);
     }
 
+    // ---------- B 筛选面板：类型分段条 + 五段预设 + 仅自定义时展开日历 + 底部匹配计数 ----------
     if (filter_open_ || closing_filter_panel_) {
-        const auto filter = BuildPopupFilterLayout();
+        const auto filter = CurrentFilterLayout();
         D2D1_MATRIX_3X2_F previous_transform{};
         render_target_->GetTransform(&previous_transform);
-        applyMotionTransformFromTrigger(PopupMotionTarget::FilterPanel, 16.0f, 1.0f,
-                                        toolbar.filter, filter.panel);
-        const bool filter_motion_active = motion_target_ == PopupMotionTarget::FilterPanel;
-        const bool filter_exiting = filter_motion_active && motion_direction_ < 0;
-        const float filter_opacity = filter_exiting
-                                         ? PopupPopoverExitOpacity(motion_progress_)
-                                         : (filter_motion_active
-                                                ? PopupMotionEnterOpacity(PopupMotionProgress(motion_progress_))
-                                                : 1.0f);
+        const bool exiting = motion_target_ == PopupMotionTarget::FilterPanel && motion_direction_ < 0;
+        const float motion = motionProgressFor(PopupMotionTarget::FilterPanel);
+        const auto offset = exiting
+                                ? PopupMotionExitOffsetFromTrigger(toolbar.filter, filter.panel, motion_progress_, 16.0f)
+                                : PopupMotionEnterOffsetFromTrigger(toolbar.filter, filter.panel, motion, 16.0f);
+        render_target_->SetTransform(D2D1::Matrix3x2F::Translation(offset.x, offset.y));
+        const float filter_opacity = exiting ? PopupPopoverExitOpacity(motion_progress_)
+                                             : (motion_target_ == PopupMotionTarget::FilterPanel
+                                                    ? PopupMotionEnterOpacity(motion)
+                                                    : 1.0f);
         ID2D1Layer* filter_layer = nullptr;
         const bool filter_layer_active =
-            filter_opacity < 0.999f &&
-            SUCCEEDED(render_target_->CreateLayer(nullptr, &filter_layer)) && filter_layer != nullptr;
+            filter_opacity < 0.999f && SUCCEEDED(render_target_->CreateLayer(nullptr, &filter_layer)) &&
+            filter_layer != nullptr;
         if (filter_layer_active) {
-            render_target_->PushLayer(
-                D2D1::LayerParameters(Rect(filter.panel), nullptr, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-                                      D2D1::Matrix3x2F::Identity(), filter_opacity),
-                filter_layer);
+            render_target_->PushLayer(D2D1::LayerParameters(Rect(filter.panel), nullptr,
+                                                            D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                                                            D2D1::Matrix3x2F::Identity(), filter_opacity),
+                                      filter_layer);
         }
         ScopedD2DLayer filter_layer_scope{render_target_, filter_layer, filter_layer_active};
-        const auto isFilterHovered = [&](PopupFilterTarget target) {
-            return hover_filter_target_ == target ? 1.0f : 0.0f;
+
+        drawEdgeShadow(filter.panel, 12.0f, 0.40f, 2.0f);
+        brush->SetColor(ColorWithAlpha(palette.panel_fill, 0.99f));
+        render_target_->FillRoundedRectangle(RoundRect(filter.panel, 12), brush);
+        drawInkPanelFrame(filter.panel, 12.0f, 0.88f, false);
+
+        const auto filterHover = [&](PopupFilterTarget target) {
+            return hover_filter_target_ == target ? hover_progress_ : 0.0f;
         };
-        const auto drawFilterHover = [&](const UiRect& rect, PopupFilterTarget target, float radius = 10.0f,
-                                         bool danger = false) {
-            const float hover = isFilterHovered(target);
+        const auto hoverBackplate = [&](const UiRect& rect, PopupFilterTarget target, float radius,
+                                        bool danger = false) {
+            const float hover = filterHover(target);
             if (hover <= 0.0f) {
                 return;
             }
-            brush->SetColor(D2D1::ColorF(danger ? (palette.dark ? 0x3A211F : 0xF8DED8)
-                                                : PopupNeutralHoverFill(palette),
-                                         0.42f * hover));
+            brush->SetColor(D2D1::ColorF(danger ? palette.danger : palette.paper_hover,
+                                         danger ? 0.12f * hover : 0.94f * hover));
             render_target_->FillRoundedRectangle(RoundRect(rect, radius), brush);
         };
-        const auto fillCircleHover = [&](const UiRect& rect, PopupFilterTarget target, float radius, bool danger = false) {
-            const float hover = isFilterHovered(target);
-            if (hover <= 0.0f) {
-                return;
-            }
-            const D2D1_POINT_2F center =
-                D2D1::Point2F((rect.left + rect.right) * 0.5f, (rect.top + rect.bottom) * 0.5f);
-            brush->SetColor(D2D1::ColorF(danger ? (palette.dark ? 0x3A211F : 0xF8DED8)
-                                                : PopupNeutralHoverFill(palette),
-                                         0.44f * hover));
-            render_target_->FillEllipse(D2D1::Ellipse(center, radius, radius), brush);
-        };
-        const float fx = filter.panel.left;
-        const float fy = filter.panel.top;
-        brush->SetColor(ColorWithAlpha(palette.dark ? palette.card_fill : palette.panel_fill,
-                                       palette.dark ? 0.98f : 0.99f));
-        render_target_->FillRoundedRectangle(RoundRect(filter.panel, 12), brush);
-        drawInkPanelFrame(filter.panel, 12.0f, 0.86f, false);
-        render_target_->DrawTextW(L"\u7b5b\u9009", 2, body_format_, Rect(fx + 16, fy + 12, fx + 128, fy + 34), text_brush_);
-        fillCircleHover(filter.close, PopupFilterTarget::Close, 10.0f, true);
-        brush->SetColor(hover_filter_target_ == PopupFilterTarget::Close
-                            ? D2D1::ColorF(palette.dark ? 0x3A211F : 0xF8DED8, 0.94f)
-                            : ColorWithAlpha(palette.dark ? PopupSurfacePressedFill(palette) : palette.card_fill, 0.90f));
-        render_target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F((filter.close.left + filter.close.right) * 0.5f,
-                                                                (filter.close.top + filter.close.bottom) * 0.5f),
-                                                  10.0f, 10.0f),
-                                    brush);
-        brush->SetColor(hover_filter_target_ == PopupFilterTarget::Close ? D2D1::ColorF(palette.danger, 0.95f)
-                                                                         : D2D1::ColorF(palette.muted, 0.82f));
-        const float close_cx = (filter.close.left + filter.close.right) * 0.5f;
-        const float close_cy = (filter.close.top + filter.close.bottom) * 0.5f;
-        render_target_->DrawLine(D2D1::Point2F(close_cx - 3.4f, close_cy - 3.4f),
-                                 D2D1::Point2F(close_cx + 3.4f, close_cy + 3.4f), brush, 1.15f);
-        render_target_->DrawLine(D2D1::Point2F(close_cx + 3.4f, close_cy - 3.4f),
-                                 D2D1::Point2F(close_cx - 3.4f, close_cy + 3.4f), brush, 1.15f);
-        render_target_->DrawTextW(L"类型", 2, small_format_,
-                                  Rect(filter.type_section.left, filter.type_section.top, filter.type_section.right,
-                                       filter.type_section.top + 18.0f),
-                                  muted_brush_);
-        auto drawChip = [&](const UiRect& rect, const wchar_t* label, bool active, D2D1_COLOR_F color,
-                            PopupFilterTarget target) {
-            const float hover = isFilterHovered(target);
-            if (hover > 0.0f) {
-                brush->SetColor(D2D1::ColorF(PopupNeutralHoverFill(palette), 0.38f * hover));
-                render_target_->FillRoundedRectangle(RoundRect(rect, 14), brush);
-            }
-            brush->SetColor(active ? D2D1::ColorF(color.r, color.g, color.b, std::min(1.0f, color.a + 0.05f * hover))
-                                   : ColorWithAlpha(hover > 0.0f ? PopupNeutralHoverFill(palette) : palette.card_fill,
-                                                    0.78f + 0.12f * hover));
-            render_target_->FillRoundedRectangle(RoundRect(rect, 14), brush);
-            brush->SetColor(active ? D2D1::ColorF(palette.strong_border, 0.82f)
-                                   : D2D1::ColorF(palette.border, 0.50f));
-            render_target_->DrawRoundedRectangle(RoundRect(rect, 14), brush, active ? 0.9f : 0.75f);
-            render_target_->DrawTextW(label, static_cast<UINT32>(wcslen(label)), small_format_,
-                                      Rect(rect.left + 12.0f, rect.top + 5.0f, rect.right - 12.0f, rect.bottom - 5.0f),
-                                      text_brush_);
-        };
-        const bool all_types = filter_kinds_.empty();
-        drawChip(filter.text_chip, L"文本", all_types || filter_kinds_.contains(ClipboardKind::Text),
-                 D2D1::ColorF(PopupSubtleAccentFill(palette), 0.92f), PopupFilterTarget::TextChip);
-        drawChip(filter.image_chip, L"图片", all_types || filter_kinds_.contains(ClipboardKind::Image),
-                 D2D1::ColorF(PopupSubtleAccentFill(palette), 0.92f), PopupFilterTarget::ImageChip);
-        drawChip(filter.file_chip, L"文件", all_types || filter_kinds_.contains(ClipboardKind::Files),
-                 D2D1::ColorF(PopupSubtleAccentFill(palette), 0.92f), PopupFilterTarget::FileChip);
-        drawChip(filter.link_chip, L"链接", all_types || filter_kinds_.contains(ClipboardKind::Link),
-                 D2D1::ColorF(PopupSubtleAccentFill(palette), 0.92f), PopupFilterTarget::LinkChip);
 
-        const bool selecting_start = date_filter_.active_field == PopupDateRangeField::Start;
-        brush->SetColor(ColorWithAlpha(palette.card_fill, 0.84f));
-        render_target_->FillRoundedRectangle(RoundRect(filter.date_card, 14), brush);
-        brush->SetColor(ColorWithAlpha(palette.border, 0.72f));
-        render_target_->DrawRoundedRectangle(RoundRect(filter.date_card, 14), brush, 1.0f);
-        render_target_->DrawTextW(L"日期范围", 4, small_format_,
-                                  Rect(filter.date_card.left + 12.0f, filter.date_card.top + 10.0f,
-                                       filter.date_card.left + 92.0f, filter.date_card.top + 28.0f),
-                                  muted_brush_);
-        const wchar_t* active_hint = selecting_start ? L"\u9009\u62e9\u5f00\u59cb" : L"\u9009\u62e9\u7ed3\u675f";
-        render_target_->DrawTextW(active_hint, static_cast<UINT32>(wcslen(active_hint)), small_format_,
-                                  Rect(filter.date_card.right - 88.0f, filter.date_card.top + 10.0f,
-                                       filter.date_card.right - 12.0f, filter.date_card.top + 28.0f),
-                                  accent_brush_);
-        auto drawDateBox = [&](const UiRect& rect, const wchar_t* label, const std::wstring& value, bool active,
-                               PopupFilterTarget target) {
-            const float hover = isFilterHovered(target);
-            drawFilterHover(rect, target, 11.0f);
-            brush->SetColor(active ? D2D1::ColorF(PopupSubtleAccentFill(palette), 0.80f)
-                                   : ColorWithAlpha(hover > 0.0f ? PopupNeutralHoverFill(palette) : palette.panel_fill,
-                                                    0.88f + 0.10f * hover));
-            render_target_->FillRoundedRectangle(RoundRect(rect, 11), brush);
-            brush->SetColor(active ? D2D1::ColorF(palette.strong_border, 0.82f)
-                                   : D2D1::ColorF(hover > 0.0f ? palette.border_hover : palette.border,
-                                                  hover > 0.0f ? 0.82f : 0.60f));
-            render_target_->DrawRoundedRectangle(RoundRect(rect, 11), brush,
-                                                 active ? 1.35f : (hover > 0.0f ? 1.05f : 0.85f));
-            render_target_->DrawTextW(label, static_cast<UINT32>(wcslen(label)), small_format_,
-                                      Rect(rect.left + 10.0f, rect.top + 2.0f, rect.right - 8.0f, rect.top + 14.0f),
-                                      muted_brush_);
-            brush->SetColor(D2D1::ColorF(palette.text, 0.94f));
-            render_target_->DrawTextW(value.c_str(), static_cast<UINT32>(value.size()),
-                                      date_value_format_ ? date_value_format_ : small_format_,
-                                      Rect(rect.left + 10.0f, rect.top + 15.0f, rect.right - 8.0f,
-                                           rect.bottom - 1.0f),
-                                      brush);
-        };
-        drawDateBox(filter.start_date, L"\u5f00\u59cb\u65e5\u671f", FormatDateValue(date_filter_.start),
-                    date_filter_.active_field == PopupDateRangeField::Start, PopupFilterTarget::StartDate);
-        drawDateBox(filter.end_date, L"结束日期", FormatDateValue(date_filter_.end),
-                    date_filter_.active_field == PopupDateRangeField::End, PopupFilterTarget::EndDate);
+        // 头部：标题 / 重置（仅有条件时）/ ×
+        drawText(L"筛选", title_format_,
+                 UiRect{filter.panel.left + 14.0f, filter.panel.top + 12.0f, filter.panel.left + 90.0f,
+                        filter.panel.top + 36.0f},
+                 palette.text, 0.98f);
+        if (HasActiveFilter()) {
+            const float reset_hover = filterHover(PopupFilterTarget::Reset);
+            if (reset_hover > 0.0f) {
+                brush->SetColor(D2D1::ColorF(palette.paper_hover, 0.94f * reset_hover));
+                render_target_->FillRoundedRectangle(RoundRect(filter.reset, 5), brush);
+            }
+            drawText(L"重置", button_format_, filter.reset,
+                     reset_hover > 0.0f ? palette.danger : palette.text_tertiary, 0.94f);
+        }
+        const float close_hover = filterHover(PopupFilterTarget::Close);
+        if (close_hover > 0.0f) {
+            brush->SetColor(D2D1::ColorF(palette.danger, 0.12f * close_hover));
+            render_target_->FillRoundedRectangle(RoundRect(filter.close, 5), brush);
+        }
+        brush->SetColor(D2D1::ColorF(close_hover > 0.0f ? palette.danger : palette.text_tertiary,
+                                     close_hover > 0.0f ? 0.94f : 0.80f));
+        {
+            const float cx = (filter.close.left + filter.close.right) * 0.5f;
+            const float cy = (filter.close.top + filter.close.bottom) * 0.5f;
+            render_target_->DrawLine(D2D1::Point2F(cx - 3.6f, cy - 3.6f), D2D1::Point2F(cx + 3.6f, cy + 3.6f), brush,
+                                     1.3f);
+            render_target_->DrawLine(D2D1::Point2F(cx + 3.6f, cy - 3.6f), D2D1::Point2F(cx - 3.6f, cy + 3.6f), brush,
+                                     1.3f);
+        }
 
-        const auto calendar = filter.calendar;
-        brush->SetColor(ColorWithAlpha(palette.card_fill, 0.76f));
-        render_target_->FillRoundedRectangle(RoundRect(calendar, 14), brush);
-        brush->SetColor(ColorWithAlpha(palette.border, 0.72f));
-        render_target_->DrawRoundedRectangle(RoundRect(calendar, 14), brush, 1.0f);
-        fillCircleHover(filter.calendar_prev_year, PopupFilterTarget::CalendarPreviousYear, 10.0f);
-        fillCircleHover(filter.calendar_prev, PopupFilterTarget::CalendarPrevious, 10.0f);
-        fillCircleHover(filter.calendar_next, PopupFilterTarget::CalendarNext, 10.0f);
-        fillCircleHover(filter.calendar_next_year, PopupFilterTarget::CalendarNextYear, 10.0f);
-        const auto drawChevron = [&](const UiRect& button, bool next, PopupFilterTarget target, bool double_arrow = false) {
-            const auto glyph = PopupFilterArrowGlyphRect(button);
-            const float cx = (glyph.left + glyph.right) * 0.5f;
-            const float cy = (glyph.top + glyph.bottom) * 0.5f;
-            const float hover = isFilterHovered(target);
-            brush->SetColor(D2D1::ColorF(hover > 0.0f ? palette.text : palette.muted,
-                                         hover > 0.0f ? 0.94f : 0.82f));
-            const auto draw_one = [&](float x_offset) {
-                const float x1 = next ? cx - 2.4f + x_offset : cx + 2.4f + x_offset;
-                const float x2 = next ? cx + 2.8f + x_offset : cx - 2.8f + x_offset;
-                render_target_->DrawLine(D2D1::Point2F(x1, cy - 4.8f), D2D1::Point2F(x2, cy), brush, 1.55f);
-                render_target_->DrawLine(D2D1::Point2F(x2, cy), D2D1::Point2F(x1, cy + 4.8f), brush, 1.55f);
+        // 类型：标签行（右侧显示已选类型）+ 四等分分段条
+        drawText(L"类型", small_format_,
+                 UiRect{filter.type_section.left, filter.type_section.top, filter.type_section.left + 60.0f,
+                        filter.type_section.bottom},
+                 palette.text_tertiary, 0.94f);
+        std::wstring kind_hint = L"全部";
+        if (!filter_kinds_.empty()) {
+            kind_hint.clear();
+            for (const auto kind : filter_kinds_) {
+                if (!kind_hint.empty()) {
+                    kind_hint += L" · ";
+                }
+                kind_hint += KindLabel(static_cast<int>(kind));
+            }
+        }
+        drawAlignedText(kind_hint, small_format_,
+                 UiRect{filter.type_section.right - 150.0f, filter.type_section.top, filter.type_section.right,
+                        filter.type_section.bottom},
+                 palette.text_tertiary, 1.0f,DWRITE_TEXT_ALIGNMENT_TRAILING);
+        brush->SetColor(D2D1::ColorF(palette.paper_hover, palette.dark ? 0.92f : 0.96f));
+        render_target_->FillRoundedRectangle(RoundRect(filter.type_bar, 8), brush);
+        auto drawSegment = [&](const UiRect& rect, const wchar_t* label, bool active, PopupFilterTarget target) {
+            const float hover = filterHover(target);
+            if (active) {
+                drawEdgeShadow(rect, 6.0f, 0.20f, 1.0f);
+                brush->SetColor(D2D1::ColorF(palette.panel_fill, palette.dark ? 0.98f : 1.0f));
+                render_target_->FillRoundedRectangle(RoundRect(rect, 6), brush);
+                brush->SetColor(D2D1::ColorF(palette.text, 0.10f));
+                render_target_->DrawRoundedRectangle(RoundRect(rect, 6), brush, 1.0f);
+            } else if (hover > 0.0f) {
+                brush->SetColor(D2D1::ColorF(palette.panel_fill, 0.55f * hover));
+                render_target_->FillRoundedRectangle(RoundRect(rect, 6), brush);
+            }
+            InkGlyph segment_icon=InkGlyph::Text;
+            const bool type=target==PopupFilterTarget::TextChip || target==PopupFilterTarget::ImageChip ||
+                target==PopupFilterTarget::FileChip || target==PopupFilterTarget::LinkChip;
+            if(target==PopupFilterTarget::ImageChip)segment_icon=InkGlyph::Image;
+            if(target==PopupFilterTarget::FileChip)segment_icon=InkGlyph::File;
+            if(target==PopupFilterTarget::LinkChip)segment_icon=InkGlyph::Link;
+            const float label_width=textWidth(label,button_format_);
+            if(type) {
+                const float left=(rect.left+rect.right-label_width-17)/2;
+                glyph(segment_icon,{left,rect.top+7,left+12,rect.top+19},active?palette.text:palette.muted);
+                drawText(label,button_format_,{left+17,rect.top,rect.right,rect.bottom},active?palette.text:palette.muted,1);
+            } else drawAlignedText(label,button_format_,rect,active?palette.text:palette.muted,1,DWRITE_TEXT_ALIGNMENT_CENTER);
+        };
+        drawSegment(filter.text_chip, L"文本", filter_kinds_.contains(ClipboardKind::Text),
+                    PopupFilterTarget::TextChip);
+        drawSegment(filter.image_chip, L"图片", filter_kinds_.contains(ClipboardKind::Image),
+                    PopupFilterTarget::ImageChip);
+        drawSegment(filter.file_chip, L"文件", filter_kinds_.contains(ClipboardKind::Files),
+                    PopupFilterTarget::FileChip);
+        drawSegment(filter.link_chip, L"链接", filter_kinds_.contains(ClipboardKind::Link),
+                    PopupFilterTarget::LinkChip);
+
+        // 时间：标签行右侧内嵌 MM/DD → MM/DD（当前选端加朱砂下划线）
+        drawText(L"时间", small_format_,
+                 UiRect{filter.date_card.left, filter.date_card.top, filter.date_card.left + 60.0f,
+                        filter.date_card.bottom},
+                 palette.text_tertiary, 0.94f);
+        auto format_short_date = [](const std::optional<PopupCalendarDate>& date) {
+            if (!date) {
+                return std::wstring(L"开始");
+            }
+            wchar_t buffer[16]{};
+            swprintf_s(buffer, L"%02d/%02d", date->month, date->day);
+            return std::wstring(buffer);
+        };
+        const bool start_active = date_filter_.active_field == PopupDateRangeField::Start;
+        const auto start_text = format_short_date(date_filter_.start);
+        const auto end_text = date_filter_.end ? format_short_date(date_filter_.end) : std::wstring(L"结束");
+        const bool show_range=date_filter_.start.has_value() || filter_preset_==kFilterPresetCustom;
+        if(show_range) {
+        drawText(start_text, mono_format_, filter.start_date, start_active ? palette.text : palette.muted, 1.0f);
+        drawText(L"→", mono_format_,
+                 UiRect{filter.start_date.right, filter.start_date.top, filter.end_date.left, filter.end_date.bottom},
+                 palette.text_tertiary, 0.86f);
+        drawText(end_text, mono_format_, filter.end_date, start_active ? palette.muted : palette.text, 0.94f);
+        brush->SetColor(D2D1::ColorF(palette.danger, 0.92f));
+        if (filter_preset_==kFilterPresetCustom && start_active) {
+            render_target_->DrawLine(D2D1::Point2F(filter.start_date.left, filter.start_date.bottom - 1.0f),
+                                     D2D1::Point2F(filter.start_date.right, filter.start_date.bottom - 1.0f), brush,
+                                     1.5f);
+        } else if(filter_preset_==kFilterPresetCustom) {
+            render_target_->DrawLine(D2D1::Point2F(filter.end_date.left, filter.end_date.bottom - 1.0f),
+                                     D2D1::Point2F(filter.end_date.right, filter.end_date.bottom - 1.0f), brush, 1.5f);
+        }
+        }
+        // 五段预设
+        brush->SetColor(D2D1::ColorF(palette.paper_hover, palette.dark ? 0.92f : 0.96f));
+        render_target_->FillRoundedRectangle(RoundRect(filter.preset_bar, 8), brush);
+        constexpr const wchar_t* kPresetLabels[kFilterPresetCount] = {L"不限", L"今天", L"近 7 天", L"近 30 天",
+                                                                      L"自定义"};
+        constexpr PopupFilterTarget kPresetTargets[kFilterPresetCount] = {
+            PopupFilterTarget::PresetAll, PopupFilterTarget::PresetToday, PopupFilterTarget::PresetWeek,
+            PopupFilterTarget::PresetMonth, PopupFilterTarget::PresetCustom};
+        for (int index = 0; index < kFilterPresetCount; ++index) {
+            drawSegment(filter.presets[index], kPresetLabels[index], filter_preset_ == index,
+                        kPresetTargets[index]);
+        }
+
+        // 日历：仅"自定义"时展开；今天朱砂、未来置灰、区间为连续深纸色带 + 端点墨点
+        if (filter.custom_range) {
+            render_target_->PushAxisAlignedClip(Rect(filter.panel.left,filter.calendar.top,filter.panel.right,
+                std::max(filter.calendar.top,filter.footer_divider.top-14)),D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            drawText(FormatMonthTitle(calendar_year_, calendar_month_), button_format_, filter.calendar_title,
+                     palette.text, 0.96f);
+            const auto drawArrow = [&](const UiRect& button, bool next, PopupFilterTarget target,
+                                       bool double_arrow) {
+                hoverBackplate(button, target, 5.0f);
+                const float hover = filterHover(target);
+                const auto glyph = PopupFilterArrowGlyphRect(button);
+                const float cx = (glyph.left + glyph.right) * 0.5f;
+                const float cy = (glyph.top + glyph.bottom) * 0.5f;
+                brush->SetColor(D2D1::ColorF(hover > 0.0f ? palette.text : palette.muted,
+                                             hover > 0.0f ? 0.94f : 0.82f));
+                const auto draw_one = [&](float x_offset) {
+                    const float x1 = next ? cx - 2.2f + x_offset : cx + 2.2f + x_offset;
+                    const float x2 = next ? cx + 2.6f + x_offset : cx - 2.6f + x_offset;
+                    render_target_->DrawLine(D2D1::Point2F(x1, cy - 4.4f), D2D1::Point2F(x2, cy), brush, 1.5f);
+                    render_target_->DrawLine(D2D1::Point2F(x2, cy), D2D1::Point2F(x1, cy + 4.4f), brush, 1.5f);
+                };
+                if (double_arrow) {
+                    draw_one(next ? -2.2f : 2.2f);
+                    draw_one(next ? 2.2f : -2.2f);
+                } else {
+                    draw_one(0.0f);
+                }
             };
-            if (double_arrow) {
-                draw_one(next ? -2.4f : 2.4f);
-                draw_one(next ? 2.4f : -2.4f);
-            } else {
-                draw_one(0.0f);
+            drawArrow(filter.calendar_prev_year, false, PopupFilterTarget::CalendarPreviousYear, true);
+            drawArrow(filter.calendar_prev, false, PopupFilterTarget::CalendarPrevious, false);
+            drawArrow(filter.calendar_next, true, PopupFilterTarget::CalendarNext, false);
+            drawArrow(filter.calendar_next_year, true, PopupFilterTarget::CalendarNextYear, true);
+            for (const auto& label : BuildPopupCalendarWeekdayLabels(filter)) {
+                drawAlignedText(std::wstring(1,label.text),small_format_,label.rect,palette.text_tertiary,1,DWRITE_TEXT_ALIGNMENT_CENTER);
             }
-        };
-        brush->SetColor(ColorWithAlpha(palette.dark ? PopupSurfacePressedFill(palette) : palette.panel_fill, 0.78f));
-        const auto drawArrowBase = [&](const UiRect& rect) {
-            render_target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F((rect.left + rect.right) * 0.5f,
-                                                                    (rect.top + rect.bottom) * 0.5f),
-                                                      10.0f, 10.0f),
-                                        brush);
-        };
-        drawArrowBase(filter.calendar_prev_year);
-        drawArrowBase(filter.calendar_prev);
-        drawArrowBase(filter.calendar_next);
-        drawArrowBase(filter.calendar_next_year);
-        const auto month_title = FormatMonthTitle(calendar_year_, calendar_month_);
-        render_target_->DrawTextW(month_title.c_str(), static_cast<UINT32>(month_title.size()), small_format_,
-                                  Rect(filter.calendar_title), text_brush_);
-        drawChevron(filter.calendar_prev_year, false, PopupFilterTarget::CalendarPreviousYear, true);
-        drawChevron(filter.calendar_prev, false, PopupFilterTarget::CalendarPrevious);
-        drawChevron(filter.calendar_next, true, PopupFilterTarget::CalendarNext);
-        drawChevron(filter.calendar_next_year, true, PopupFilterTarget::CalendarNextYear, true);
-        for (const auto& label : BuildPopupCalendarWeekdayLabels(filter)) {
-            render_target_->DrawTextW(&label.text, 1, centered_small_format_, Rect(label.rect), muted_brush_);
-        }
-        for (const auto& segment : BuildPopupCalendarRangeSegments(filter, calendar_year_, calendar_month_,
-                                                                   date_filter_)) {
-            brush->SetColor(D2D1::ColorF(PopupSubtleAccentFill(palette), 0.72f));
-            render_target_->FillRoundedRectangle(RoundRect(segment.rect, 8), brush);
-        }
-        for (const auto& cell : BuildPopupCalendarCells(filter, calendar_year_, calendar_month_)) {
-            wchar_t text[4]{};
-            _itow_s(cell.date.day, text, 10);
-            const bool selected_start = date_filter_.start && *date_filter_.start == cell.date;
-            const bool selected_end = date_filter_.end && *date_filter_.end == cell.date;
-            const bool date_hovered = hover_filter_date_ && *hover_filter_date_ == cell.date;
-            if (selected_start || selected_end) {
-                brush->SetColor(D2D1::ColorF(PopupSubtleAccentFill(palette), 0.96f));
-                render_target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F((cell.rect.left + cell.rect.right) * 0.5f,
-                                                                        (cell.rect.top + cell.rect.bottom) * 0.5f),
-                                                          9.0f, 9.0f),
-                                            brush);
-                brush->SetColor(D2D1::ColorF(palette.text, 0.98f));
-                render_target_->DrawTextW(text, static_cast<UINT32>(wcslen(text)), centered_small_format_,
-                                          Rect(cell.rect.left, cell.rect.top, cell.rect.right, cell.rect.bottom),
-                                          brush);
-            } else {
-                brush->SetColor(D2D1::ColorF(date_hovered ? palette.text : palette.muted,
-                                             date_hovered ? 0.96f : 0.78f));
-                render_target_->DrawTextW(text, static_cast<UINT32>(wcslen(text)), centered_small_format_,
-                                          Rect(cell.rect.left, cell.rect.top, cell.rect.right, cell.rect.bottom),
-                                          brush);
+            for (const auto& segment : BuildPopupCalendarRangeSegments(filter, calendar_year_, calendar_month_,
+                                                                       date_filter_)) {
+                brush->SetColor(D2D1::ColorF(palette.paper_hover, palette.dark ? 0.94f : 0.98f));
+                render_target_->FillRoundedRectangle(RoundRect(segment.rect, 11.0f), brush);
             }
+            const auto today = TodayDate();
+            for (const auto& cell : BuildPopupCalendarCells(filter, calendar_year_, calendar_month_)) {
+                const bool is_start = date_filter_.start && *date_filter_.start == cell.date;
+                const bool is_end = date_filter_.end && *date_filter_.end == cell.date;
+                const bool is_today = cell.date == today;
+                const bool future = today < cell.date;
+                const bool date_hovered = hover_filter_date_ && *hover_filter_date_ == cell.date;
+                const float cx = (cell.rect.left + cell.rect.right) * 0.5f;
+                const float cy = (cell.rect.top + cell.rect.bottom) * 0.5f;
+                if (is_start || is_end) {
+                    brush->SetColor(D2D1::ColorF(palette.text, 0.94f));
+                    render_target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), 11.0f, 11.0f), brush);
+                } else if (date_hovered && !future) {
+                    brush->SetColor(D2D1::ColorF(palette.paper_hover, 0.98f));
+                    render_target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), 11.0f, 11.0f), brush);
+                }
+                const std::wstring day_text = std::to_wstring(cell.date.day);
+                uint32_t color = palette.muted;
+                float alpha = 0.94f;
+                if (is_start || is_end) {
+                    color = palette.panel_fill;
+                    alpha = 0.99f;
+                } else if (is_today) {
+                    color = palette.danger;
+                    alpha = 0.96f;
+                } else if (future) {
+                    color = palette.text_tertiary;
+                    alpha = 0.45f;
+                } else if (date_hovered) {
+                    color = palette.text;
+                    alpha = 0.96f;
+                }
+                drawAlignedText(day_text,date_value_format_ ? date_value_format_ : mono_format_,cell.rect,color,alpha,DWRITE_TEXT_ALIGNMENT_CENTER);
+            }
+            render_target_->PopAxisAlignedClip();
         }
-        const auto reset_visual = PopupFilterResetVisualRect(filter);
-        drawFilterHover(reset_visual, PopupFilterTarget::Reset, 9.0f, true);
-        if (hover_filter_target_ == PopupFilterTarget::Reset) {
-            brush->SetColor(D2D1::ColorF(palette.danger, 0.92f));
-            render_target_->DrawTextW(L"重置", 2, centered_small_format_, Rect(reset_visual), brush);
-        } else {
-            render_target_->DrawTextW(L"重置", 2, centered_small_format_, Rect(reset_visual), accent_brush_);
-        }
-        const float done_hover = isFilterHovered(PopupFilterTarget::Done);
-        brush->SetColor(D2D1::ColorF(done_hover > 0.0f ? palette.accent_hover : palette.accent,
-                                     0.88f + 0.08f * done_hover));
-        render_target_->FillRoundedRectangle(RoundRect(filter.done, 11), brush);
-        brush->SetColor(D2D1::ColorF(0xFFFFFF, 0.96f));
-        render_target_->DrawTextW(L"完成", 2, centered_small_format_, Rect(filter.done), brush);
+
+        // 底部：发丝线 + 匹配 N 条 + 完成
+        brush->SetColor(D2D1::ColorF(palette.text, 0.09f));
+        render_target_->FillRectangle(Rect(filter.footer_divider), brush);
+        const auto result_count=std::to_wstring(items_.size());
+        const float count_label_width=textWidth(L"匹配 ",small_format_);
+        const float count_value_width=textWidth(result_count,title_format_);
+        drawText(L"匹配 ",small_format_,
+                 UiRect{filter.count_text.left,filter.count_text.top,filter.count_text.left+count_label_width,
+                        filter.count_text.bottom},palette.text_tertiary,1.0f);
+        drawText(result_count,title_format_,
+                 UiRect{filter.count_text.left+count_label_width,filter.count_text.top,
+                        filter.count_text.left+count_label_width+count_value_width,filter.count_text.bottom},
+                 palette.text,1.0f);
+        drawText(L" 条",small_format_,
+                 UiRect{filter.count_text.left+count_label_width+count_value_width,filter.count_text.top,
+                        filter.count_text.right,filter.count_text.bottom},palette.text_tertiary,1.0f);
+        const float done_hover = filterHover(PopupFilterTarget::Done);
+        brush->SetColor(D2D1::ColorF(palette.text, 0.92f + 0.08f * done_hover));
+        render_target_->FillRoundedRectangle(RoundRect(filter.done, 7), brush);
+        drawAlignedText(L"完成",button_format_,filter.done,palette.window_tint,1,DWRITE_TEXT_ALIGNMENT_CENTER);
+
         render_target_->SetTransform(previous_transform);
     }
-    ReleasePtr(brush);
+    // Prototype menus share the same paper, spacing and linear icons as the rows.
+    if (context_menu_open_ || closing_context_menu_) {
+        const float p = PopupMotionProgress(context_motion_progress_);
+        const float alpha = closing_context_menu_ ? 1.0f - p : p;
+        D2D1_MATRIX_3X2_F previous{}; render_target_->GetTransform(&previous);
+        const auto panel = ContextPanelRect();
+        render_target_->SetTransform(D2D1::Matrix3x2F::Scale(0.98f + 0.02f * alpha, 0.98f + 0.02f * alpha,
+            D2D1::Point2F(panel.left, panel.top)) * D2D1::Matrix3x2F::Translation(0, -6.0f * (1-alpha)) * previous);
+        ID2D1Layer* layer = nullptr;
+        const bool layered = alpha < 0.999f && SUCCEEDED(render_target_->CreateLayer(nullptr, &layer));
+        if (layered) render_target_->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(), nullptr,
+            D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1::Matrix3x2F::Identity(), alpha), layer);
+        auto menuSurface = [&](const UiRect& box) {
+            for (int i = 10; i > 0; --i) {
+                const float spread = static_cast<float>(i);
+                brush->SetColor(D2D1::ColorF(0x000000, palette.dark ? 0.018f : 0.008f));
+                render_target_->FillRoundedRectangle(RoundRect(box.left-spread,box.top+3-spread/2,
+                    box.right+spread,box.bottom+3+spread,12+spread/2),brush);
+            }
+            brush->SetColor(D2D1::ColorF(palette.panel_fill)); render_target_->FillRoundedRectangle(RoundRect(box,12),brush);
+            brush->SetColor(D2D1::ColorF(palette.text,0.12f)); render_target_->DrawRoundedRectangle(RoundRect(box,12),brush,1);
+        };
+        menuSurface(panel);
+        const auto context_found = std::find_if(items_.begin(),items_.end(),[&](const auto& i){return context_item_id_ && i.id==*context_item_id_;});
+        const HistoryItem* context_item = context_found == items_.end() ? nullptr : &*context_found;
+        const wchar_t* labels[] = {context_item && context_item->is_pinned ? L"取消置顶" : L"置顶",
+            context_item && context_item->is_favorite ? L"取消收藏" : L"收藏",L"设置备注",L"加入收藏夹",L"上移",L"下移",L"删除"};
+        const InkGlyph icons[] = {InkGlyph::Pin,InkGlyph::Star,InkGlyph::Note,InkGlyph::Folder,
+            InkGlyph::ArrowUp,InkGlyph::ArrowDown,InkGlyph::Trash};
+        for (int row = 0; row < 7; ++row) {
+            const auto rect = ContextRowRect(row);
+            const bool enabled = ContextRowEnabled(row), hovered = context_hover_row_ == row && enabled;
+            if (hovered) {
+                brush->SetColor(D2D1::ColorF(row==6 ? palette.danger : palette.paper_hover,row==6 ? 0.10f : 1.0f));
+                render_target_->FillRoundedRectangle(RoundRect(rect,7),brush);
+            }
+            const uint32_t color = hovered ? (row==6 ? palette.danger : palette.text) : palette.muted;
+            glyph(icons[row],{rect.left+8,rect.top+8.5f,rect.left+21,rect.top+21.5f},color,enabled ? 1.0f : 0.35f);
+            drawText(labels[row],button_format_,{rect.left+29,rect.top,rect.right-16,rect.bottom},color,enabled?1.0f:0.35f);
+            if (row == 3) {
+                brush->SetColor(D2D1::ColorF(color));
+                render_target_->DrawLine(D2D1::Point2F(rect.right-12,rect.top+11),D2D1::Point2F(rect.right-8,rect.top+15),brush,1.2f);
+                render_target_->DrawLine(D2D1::Point2F(rect.right-8,rect.top+15),D2D1::Point2F(rect.right-12,rect.top+19),brush,1.2f);
+            }
+            if (row==3 || row==5) hairline(panel.left+11,rect.bottom+4,panel.right-11);
+        }
+        if (context_submenu_open_) {
+            const auto sub = ContextPanelRect(true); menuSurface(sub);
+            const int count = static_cast<int>(favorite_groups_.size());
+            render_target_->PushAxisAlignedClip(Rect(sub.left+5,sub.top+5,sub.right-5,sub.bottom-5),D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            for (int row=0;row<=count;++row) {
+                const auto rect=ContextRowRect(row,true);
+                const bool active=row<count && context_item && context_item->favorite_group_id==favorite_groups_[row].id;
+                if(context_submenu_hover_row_==row){brush->SetColor(D2D1::ColorF(palette.paper_hover));render_target_->FillRoundedRectangle(RoundRect(rect,7),brush);}
+                if(active || row==count) glyph(row==count?InkGlyph::Plus:InkGlyph::Check,
+                    {rect.left+8,rect.top+8.5f,rect.left+21,rect.top+21.5f},row==count?palette.text_tertiary:palette.text);
+                drawText(row==count?L"新建收藏夹…":favorite_groups_[row].name,button_format_,
+                    {rect.left+29,rect.top,rect.right-8,rect.bottom},row==count?palette.text_tertiary:palette.muted,1);
+                if(row==count-1) hairline(sub.left+11,rect.bottom+4,sub.right-11);
+            }
+            render_target_->PopAxisAlignedClip();
+        }
+        if(layered)render_target_->PopLayer(); ReleasePtr(layer);
+        render_target_->SetTransform(previous);
+    }
+    if (!context_menu_open_ && !filter_open_ && !favorite_group_menu_open_ && !clear_confirm_open_ && !prompt_open_ &&
+        hover_action_!=UiAction::None && static_cast<double>(GetTickCount64())-hover_motion_start_ms_>=450.0) {
+        std::wstring tip;
+        UiRect anchor{};
+        switch(hover_action_) {
+        case UiAction::Pin:tip=L"固定窗口：粘贴后不隐藏";anchor=header.pin;break;
+        case UiAction::Close:tip=L"关闭";anchor=header.close;break;
+        case UiAction::Filter:tip=L"筛选";anchor=toolbar.filter;break;
+        case UiAction::MultiSelect:if(!multi_select_){tip=L"多选";anchor=toolbar.multi_select;}break;
+        case UiAction::ClearAll:tip=L"全部清除（保留收藏）";anchor=toolbar.clear_all;break;
+        case UiAction::AddFavoritePhrase:tip=L"添加常用语";anchor=tabs.add_favorite_phrase;break;
+        default:break;
+        }
+        if(!tip.empty()) {
+            const float width=textWidth(tip,small_format_)+14;
+            const UiRect box{std::max(4.0f,anchor.right-width),anchor.bottom+4,anchor.right,anchor.bottom+24};
+            brush->SetColor(D2D1::ColorF(palette.text));render_target_->FillRoundedRectangle(RoundRect(box,4),brush);
+            drawAlignedText(tip,small_format_,box,palette.window_tint,1,DWRITE_TEXT_ALIGNMENT_CENTER);
+        }
+    }
+    if (clear_confirm_open_ || prompt_open_) {
+        brush->SetColor(D2D1::ColorF(palette.dark?0x000000:0x1C1B19,palette.dark?0.40f:0.12f));
+        render_target_->FillRoundedRectangle(RoundRect(window_surface_rect,14),brush);
+    }
+    if (clear_confirm_open_) {
+        const auto panel=FavoriteGroupDeleteConfirmPanelRect(popup_logical_width_);
+        drawEdgeShadow(panel,12,0.8f,3);
+        brush->SetColor(D2D1::ColorF(palette.panel_fill));render_target_->FillRoundedRectangle(RoundRect(panel,12),brush);
+        brush->SetColor(D2D1::ColorF(palette.text,0.12f));render_target_->DrawRoundedRectangle(RoundRect(panel,12),brush,1);
+        brush->SetColor(D2D1::ColorF(palette.danger,0.10f));
+        render_target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(panel.left+27,panel.top+27),11,11),brush);
+        drawAlignedText(L"!",title_format_,{panel.left+16,panel.top+16,panel.left+38,panel.top+38},palette.danger,1,DWRITE_TEXT_ALIGNMENT_CENTER);
+        drawText(L"全部清除？",title_format_,{panel.left+46,panel.top+16,panel.right-16,panel.top+38},palette.text,1);
+        drawText(L"将删除所有未收藏的历史记录，收藏内容会保留。",detail_format_,
+            {panel.left+46,panel.top+46,panel.right-16,panel.top+94},palette.text_tertiary,1);
+        const auto cancel=FavoriteGroupDeleteConfirmCancelRect(panel),ok=FavoriteGroupDeleteConfirmDeleteRect(panel);
+        brush->SetColor(D2D1::ColorF(palette.text,0.16f));render_target_->DrawRoundedRectangle(RoundRect(cancel,7),brush,1);
+        drawAlignedText(L"取消",button_format_,cancel,palette.muted,1,DWRITE_TEXT_ALIGNMENT_CENTER);
+        brush->SetColor(D2D1::ColorF(palette.danger));render_target_->FillRoundedRectangle(RoundRect(ok,7),brush);
+        drawAlignedText(L"清除",button_format_,ok,0xFFFFFF,1,DWRITE_TEXT_ALIGNMENT_CENTER);
+    }
+    if(!toast_text_.empty()) {
+        const float elapsed=static_cast<float>(static_cast<double>(GetTickCount64())-toast_start_ms_);
+        const float alpha=elapsed>1400 ? 1.0f-std::clamp((elapsed-1400)/200,0.0f,1.0f) : PopupMotionProgress(std::clamp(elapsed/200,0.0f,1.0f));
+        const float width=textWidth(toast_text_,small_format_)+24;
+        const float top=surface_height-42-26+8*(1-alpha);
+        const UiRect box{(surface_width-width)/2,top,(surface_width+width)/2,top+26};
+        brush->SetColor(D2D1::ColorF(palette.text,alpha));render_target_->FillRoundedRectangle(RoundRect(box,14),brush);
+        drawAlignedText(toast_text_,small_format_,box,palette.window_tint,alpha,DWRITE_TEXT_ALIGNMENT_CENTER);
+    }
+    render_target_->SetTransform(D2D1::Matrix3x2F::Identity());
 
     if (render_target_->EndDraw() == D2DERR_RECREATE_TARGET) {
         DiscardDeviceResources();
@@ -3720,9 +4499,10 @@ bool PopupWindow::HandleFilterClick(POINT point) {
         return false;
     }
 
-    const auto layout = BuildPopupFilterLayout();
+    const auto layout = CurrentFilterLayout();
     if (!Contains(layout.panel, point)) {
-        return false;
+        CloseFilterPanelWithMotion();
+        return true;
     }
     if (Contains(layout.close, point)) {
         CloseFilterPanelWithMotion();
@@ -3739,52 +4519,52 @@ bool PopupWindow::HandleFilterClick(POINT point) {
         } else {
             filter_kinds_.insert(kind);
         }
+        scroll_offset_ = 0;
+        ReloadItems();
+        ResizeToCurrentItems();
+        InvalidateRect(hwnd_, nullptr, FALSE);
     };
 
     if (Contains(layout.text_chip, point)) {
         toggle_kind(ClipboardKind::Text);
-        scroll_offset_ = 0;
-        ReloadItems();
-        ResizeToCurrentItems();
-        InvalidateRect(hwnd_, nullptr, FALSE);
         return true;
     }
     if (Contains(layout.image_chip, point)) {
         toggle_kind(ClipboardKind::Image);
-        scroll_offset_ = 0;
-        ReloadItems();
-        ResizeToCurrentItems();
-        InvalidateRect(hwnd_, nullptr, FALSE);
         return true;
     }
     if (Contains(layout.file_chip, point)) {
         toggle_kind(ClipboardKind::Files);
-        scroll_offset_ = 0;
-        ReloadItems();
-        ResizeToCurrentItems();
-        InvalidateRect(hwnd_, nullptr, FALSE);
         return true;
     }
     if (Contains(layout.link_chip, point)) {
         toggle_kind(ClipboardKind::Link);
-        scroll_offset_ = 0;
-        ReloadItems();
-        ResizeToCurrentItems();
-        InvalidateRect(hwnd_, nullptr, FALSE);
         return true;
     }
 
-    if (const auto field = HitTestPopupDateRangeField(layout, static_cast<float>(point.x), static_cast<float>(point.y))) {
-        date_filter_.active_field = *field;
-        const auto& selected_date = *field == PopupDateRangeField::Start ? date_filter_.start : date_filter_.end;
-        if (selected_date) {
-            calendar_year_ = selected_date->year;
-            calendar_month_ = selected_date->month;
-        } else if (*field == PopupDateRangeField::End && date_filter_.start) {
-            calendar_year_ = date_filter_.start->year;
-            calendar_month_ = date_filter_.start->month;
+    // 五段时间预设：点"今天/近 7 天/近 30 天"直接设置区间并重新查询。
+    for (int index = 0; index < kFilterPresetCount; ++index) {
+        if (Contains(layout.presets[index], point)) {
+            ApplyFilterPreset(index);
+            return true;
         }
-        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+
+    if (const auto field = HitTestPopupDateRangeField(layout, static_cast<float>(point.x), static_cast<float>(point.y))) {
+        // 点击区间端点时进入自定义，与原型的内嵌区间操作一致。
+        if (date_filter_.start || filter_preset_ == kFilterPresetCustom) {
+            filter_preset_=kFilterPresetCustom;
+            date_filter_.active_field = *field;
+            const auto& selected_date = *field == PopupDateRangeField::Start ? date_filter_.start : date_filter_.end;
+            if (selected_date) {
+                calendar_year_ = selected_date->year;
+                calendar_month_ = selected_date->month;
+            } else if (*field == PopupDateRangeField::End && date_filter_.start) {
+                calendar_year_ = date_filter_.start->year;
+                calendar_month_ = date_filter_.start->month;
+            }
+            InvalidateRect(hwnd_, nullptr, FALSE);
+        }
         return true;
     }
 
@@ -3811,6 +4591,10 @@ bool PopupWindow::HandleFilterClick(POINT point) {
 
     if (const auto date = HitTestPopupCalendarDate(layout, calendar_year_, calendar_month_,
                                                   static_cast<float>(point.x), static_cast<float>(point.y))) {
+        // 未来的日期不能点。
+        if (TodayDate() < *date) {
+            return true;
+        }
         SelectPopupDateRangeDate(date_filter_, *date);
         scroll_offset_ = 0;
         ReloadItems();
@@ -3819,9 +4603,10 @@ bool PopupWindow::HandleFilterClick(POINT point) {
         return true;
     }
 
-    if (Contains(layout.reset, point)) {
+    if (HasActiveFilter() && Contains(PopupFilterResetVisualRect(layout), point)) {
         filter_kinds_.clear();
         date_filter_ = PopupDateRangeState{};
+        filter_preset_ = 0;
         scroll_offset_ = 0;
         ReloadItems();
         ResizeToCurrentItems();
@@ -3883,7 +4668,7 @@ bool PopupWindow::HandleFavoriteGroupDeleteConfirmClick(POINT point) {
         return false;
     }
 
-    const auto target = HitTestFavoriteGroupDeleteConfirm(point);
+    const auto target = HitTestFavoriteGroupDeleteConfirm(point, popup_logical_width_);
     if (target == PopupFavoriteGroupDeleteConfirmTarget::Panel) {
         return true;
     }
@@ -3905,6 +4690,7 @@ bool PopupWindow::HandleFavoriteGroupDeleteConfirmClick(POINT point) {
         }
 
         store_.DeleteFavoriteGroup(pending.id);
+        RefreshFavoriteGroupCounts();
         pending_favorite_group_delete_.reset();
         hover_delete_confirm_target_ = PopupFavoriteGroupDeleteConfirmTarget::None;
         favorite_group_menu_open_ = false;
@@ -3918,61 +4704,51 @@ bool PopupWindow::HandleFavoriteGroupDeleteConfirmClick(POINT point) {
 }
 
 int PopupWindow::HitTestItem(POINT point) const {
-    if (items_.empty() || point.y < PopupListTop() ||
+    if (items_.empty() || point.y < PopupListTop() || point.y >= PopupListBottomForHeight(popup_logical_height_) ||
         Contains(PopupScrollbarHitRectForSize(popup_logical_width_, popup_logical_height_), point)) {
         return -1;
     }
+    // 与 Paint 共用前缀和：分区标题的高度也计入，命中与绘制不会错位。
+    // 行高固定（只有展开项例外），所以从第一个可见行起最多检查几行就能命中。
+    const float width_delta = static_cast<float>(popup_logical_width_ - PopupMetrics().width);
     const int first_index = FirstVisibleItemIndex();
-    float top = PopupListTop() - (scroll_offset_ - ItemScrollTop(first_index));
     for (int item_index = first_index; item_index < static_cast<int>(items_.size()); ++item_index) {
+        const float top = PopupListTop() + RowTopForIndex(item_index) - scroll_offset_;
+        if (top > point.y) {
+            break;
+        }
         const auto& item = items_[item_index];
+        if (row_transitions_.contains(item.id) && row_transitions_.at(item.id).removing) continue;
         auto card = BuildPopupCardLayout(false, top);
-        const float width_delta = static_cast<float>(popup_logical_width_ - PopupMetrics().width);
         card.card.right += width_delta;
-        card.expand.left += width_delta;
-        card.expand.right += width_delta;
-        const bool expanded = expanded_item_id_ && *expanded_item_id_ == item.id;
-        const float expanded_height = expanded ? ExpandedExtraHeightForItem(item) : 0.0f;
         if (point.x >= card.card.left && point.x <= card.card.right && point.y >= card.card.top &&
-            point.y <= card.card.bottom + expanded_height) {
+            point.y <= card.card.top + ItemScrollHeight(item_index)) {
             return item_index;
-        }
-        if (expanded) {
-            break;
-        }
-        top = card.card.bottom + expanded_height + static_cast<float>(PopupMetrics().card_gap);
-        if (top > static_cast<float>(popup_logical_height_)) {
-            break;
         }
     }
     return -1;
 }
 
 int PopupWindow::HitTestExpandItem(POINT point) const {
-    if (items_.empty() || point.y < PopupListTop() ||
+    if (items_.empty() || point.y < PopupListTop() || point.y >= PopupListBottomForHeight(popup_logical_height_) ||
         Contains(PopupScrollbarHitRectForSize(popup_logical_width_, popup_logical_height_), point)) {
         return -1;
     }
+    const float width_delta = static_cast<float>(popup_logical_width_ - PopupMetrics().width);
     const int first_index = FirstVisibleItemIndex();
-    float top = PopupListTop() - (scroll_offset_ - ItemScrollTop(first_index));
     for (int item_index = first_index; item_index < static_cast<int>(items_.size()); ++item_index) {
+        const float top = PopupListTop() + RowTopForIndex(item_index) - scroll_offset_;
+        if (top > point.y) {
+            break;
+        }
         const auto& item = items_[item_index];
+        if (row_transitions_.contains(item.id) && row_transitions_.at(item.id).removing) continue;
         auto card = BuildPopupCardLayout(false, top);
-        const float width_delta = static_cast<float>(popup_logical_width_ - PopupMetrics().width);
         card.card.right += width_delta;
         card.expand.left += width_delta;
         card.expand.right += width_delta;
-        if (Contains(card.expand, point)) {
+        if (Contains(card.expand, point) && point.y < top + ItemScrollHeight(item_index)) {
             return item_index;
-        }
-        const bool expanded = expanded_item_id_ && *expanded_item_id_ == item.id;
-        if (expanded) {
-            break;
-        }
-        top = card.card.bottom + (expanded ? ExpandedExtraHeightForItem(item) : 0.0f) +
-              static_cast<float>(PopupMetrics().card_gap);
-        if (top > static_cast<float>(popup_logical_height_)) {
-            break;
         }
     }
     return -1;
@@ -3984,7 +4760,8 @@ PopupWindow::UiAction PopupWindow::HitTestAction(POINT point) const {
         Contains(PopupScrollbarHitRectForSize(popup_logical_width_, popup_logical_height_), point)) {
         return UiAction::Scrollbar;
     }
-    if (has_scrollable_content && PopupScrollToTopButtonVisible(scroll_offset_) &&
+    if (has_scrollable_content &&
+        (PopupScrollToTopButtonVisible(scroll_offset_) || smooth_scroll_active_) &&
         Contains(PopupScrollToTopButtonRectForSize(popup_logical_width_, popup_logical_height_), point)) {
         return UiAction::ScrollToTop;
     }
@@ -4016,8 +4793,13 @@ PopupWindow::UiAction PopupWindow::HitTestAction(POINT point) const {
         }
     }
     const auto tabs = BuildPopupTabsLayoutForWidth(view_mode_ == ViewMode::Favorites, popup_logical_width_);
-    if (Contains(tabs.history, point)) return UiAction::HistoryTab;
-    if (Contains(tabs.favorites, point)) return UiAction::FavoritesTab;
+    // 标签的点击区是整段标签栏高度，不只是文字矩形。
+    const auto tabHit = [&](const UiRect& rect) {
+        return point.x >= rect.left && point.x <= rect.right && point.y >= PopupTabsTop() &&
+               point.y <= PopupTabsTop() + static_cast<float>(PopupMetrics().tab_height);
+    };
+    if (tabHit(tabs.history)) return UiAction::HistoryTab;
+    if (tabHit(tabs.favorites)) return UiAction::FavoritesTab;
     if (view_mode_ == ViewMode::Favorites && Contains(tabs.favorite_group, point)) {
         return UiAction::FavoriteGroupMenu;
     }
@@ -4029,68 +4811,158 @@ PopupWindow::UiAction PopupWindow::HitTestAction(POINT point) const {
 
 void PopupWindow::ShowContextMenu(POINT point, int item_index) {
     if (item_index < 0 || item_index >= static_cast<int>(items_.size())) return;
-    const auto& item = items_[item_index];
-    prompt_open_ = true;
-    BeginTransientHideSuppression();
-    HMENU menu = CreatePopupMenu();
-    HMENU group_menu = CreatePopupMenu();
-    for (size_t i = 0; i < favorite_groups_.size() && i < 80; ++i) {
-        AppendMenuW(group_menu, MF_STRING, kContextFavoriteGroupBase + 1 + static_cast<UINT>(i),
-                    favorite_groups_[i].name.c_str());
-    }
-    AppendMenuW(group_menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(group_menu, MF_STRING, kContextFavoriteGroupMax, L"\u65b0\u5efa\u6536\u85cf\u5939...");
-    AppendMenuW(menu, MF_STRING, kContextDelete, L"删除");
-    const auto pin_label = PopupPinMenuLabel(item.is_pinned);
-    const auto favorite_label = PopupFavoriteMenuLabel(item.is_favorite);
-    AppendMenuW(menu, MF_STRING, kContextPin, std::wstring(pin_label).c_str());
-    AppendMenuW(menu, MF_STRING, kContextFavorite, std::wstring(favorite_label).c_str());
-    AppendMenuW(menu, MF_STRING, kContextSetNote, L"设置备注");
-    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(group_menu), L"\u52a0\u5165\u6536\u85cf\u5939");
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, item_index > 0 ? MF_STRING : MF_STRING | MF_GRAYED, kContextMoveUp, L"\u4e0a\u79fb");
-    AppendMenuW(menu, item_index + 1 < static_cast<int>(items_.size()) ? MF_STRING : MF_STRING | MF_GRAYED,
-                kContextMoveDown, L"\u4e0b\u79fb");
-    ClientToScreen(hwnd_, &point);
-    const int command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, point.x, point.y, 0, hwnd_, nullptr);
-    DestroyMenu(menu);
-    BeginTransientHideSuppression();
-    const auto id = item.id;
-    if (command == kContextDelete) DeleteItem(id);
-    if (command == kContextPin) TogglePinned(id);
-    if (command == kContextFavorite) ToggleFavorite(id);
-    if (command == kContextSetNote) PromptEditNote(id);
-    if (command == kContextMoveUp) MoveItemInCurrentList(item_index, -1);
-    if (command == kContextMoveDown) MoveItemInCurrentList(item_index, 1);
-    if (command > kContextFavoriteGroupBase && command < kContextFavoriteGroupMax) {
-        const size_t index = static_cast<size_t>(command - kContextFavoriteGroupBase - 1);
-        if (index < favorite_groups_.size()) {
-            store_.SetFavoriteGroup(id, favorite_groups_[index].id);
-            if (view_mode_ == ViewMode::Favorites) {
-                active_favorite_group_id_ = favorite_groups_[index].id;
-            }
-            ReloadItems();
-            ResizeToCurrentItems();
-            InvalidateRect(hwnd_, nullptr, FALSE);
-        }
-    }
-    if (command == kContextFavoriteGroupMax) {
-        prompt_open_ = true;
-        BeginTransientHideSuppression();
-        if (const auto name = PromptText(hwnd_, instance_, L"\u65b0\u5efa\u6536\u85cf\u5939", L"\u8f93\u5165\u5206\u7ec4\u540d\u79f0")) {
-            const auto group_id = store_.EnsureFavoriteGroup(*name);
-            store_.SetFavoriteGroup(id, group_id);
-            active_favorite_group_id_ = group_id;
-            view_mode_ = ViewMode::Favorites;
-            ReloadItems();
-            ResizeToCurrentItems();
-            InvalidateRect(hwnd_, nullptr, FALSE);
-        }
-        prompt_open_ = false;
-    }
-    prompt_open_ = false;
-    EndTransientHideSuppressionSoon();
+    selected_index_ = item_index;
+    KickSlipAnimation();
+    context_item_id_ = items_[item_index].id;
+    ActivatePopupWindow(hwnd_);
+    context_origin_ = ClientPointToDips(point);
+    context_origin_.x = std::clamp(context_origin_.x, 8L, static_cast<LONG>(popup_logical_width_ - 176));
+    context_origin_.y = std::clamp(context_origin_.y, 8L, static_cast<LONG>(popup_logical_height_ - 248));
+    context_menu_open_ = true;
+    closing_context_menu_ = context_submenu_open_ = false;
+    context_hover_row_ = context_submenu_hover_row_ = -1;
+    context_submenu_scroll_ = 0.0f;
+    context_motion_start_ms_ = static_cast<double>(GetTickCount64());
+    context_motion_progress_ = animations_enabled_ ? 0.0f : 1.0f;
+    filter_open_ = favorite_group_menu_open_ = false;
+    closing_filter_panel_ = closing_favorite_group_menu_ = false;
     SetTimer(hwnd_, kOutsideClickTimer, 50, nullptr);
+    if (animations_enabled_) SetTimer(hwnd_, kAnimationTimer, kAnimationTimerMs, nullptr);
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+UiRect PopupWindow::ContextPanelRect(bool submenu) const {
+    float x = static_cast<float>(context_origin_.x), y = static_cast<float>(context_origin_.y);
+    float width = 168.0f, height = 238.0f;
+    if (submenu) {
+        width = 150.0f;
+        height = 49.0f + 30.0f * static_cast<float>(favorite_groups_.size());
+        height = std::min(height, static_cast<float>(popup_logical_height_ - 16));
+        x = x + 172.0f + width > popup_logical_width_ ? x - 152.0f : x + 172.0f;
+        x = std::max(4.0f, x);
+        y = std::clamp(y + 90.0f, 8.0f, static_cast<float>(popup_logical_height_) - height - 8.0f);
+    }
+    return {x, y, x + width, y + height};
+}
+
+UiRect PopupWindow::ContextRowRect(int row, bool submenu) const {
+    auto panel = ContextPanelRect(submenu);
+    float y = panel.top + 5.0f + static_cast<float>(row) * 30.0f;
+    if (!submenu) { if (row >= 4) y += 9.0f; if (row >= 6) y += 9.0f; }
+    else {
+        if (row == static_cast<int>(favorite_groups_.size())) y += 9.0f;
+        y -= context_submenu_scroll_;
+    }
+    return {panel.left + 5.0f, y, panel.right - 5.0f, y + 30.0f};
+}
+
+int PopupWindow::HitTestContextMenu(POINT point, bool submenu) const {
+    if(!Contains(ContextPanelRect(submenu),point))return -1;
+    const int count = submenu ? static_cast<int>(favorite_groups_.size()) + 1 : 7;
+    for (int row = 0; row < count; ++row) if (Contains(ContextRowRect(row, submenu), point)) return row;
+    return -1;
+}
+
+bool PopupWindow::ContextRowEnabled(int row) const {
+    if (row < 0) return false;
+    if (row != 4 && row != 5) return true;
+    if (!context_item_id_) return false;
+    auto found = std::find_if(items_.begin(), items_.end(), [&](const auto& i) {return i.id == *context_item_id_;});
+    if (found == items_.end()) return false;
+    return row == 4 ? found != items_.begin() : std::next(found) != items_.end();
+}
+
+void PopupWindow::CloseContextMenu() {
+    if (!context_menu_open_) return;
+    context_menu_open_ = false;
+    context_submenu_open_ = false;
+    closing_context_menu_ = animations_enabled_;
+    context_motion_start_ms_ = static_cast<double>(GetTickCount64());
+    context_motion_progress_ = animations_enabled_ ? 0.0f : 1.0f;
+    if (animations_enabled_) SetTimer(hwnd_, kAnimationTimer, kAnimationTimerMs, nullptr);
+    EndTransientHideSuppressionSoon();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void PopupWindow::ExecuteContextCommand(int row, bool submenu) {
+    if (!context_item_id_ || (!submenu && !ContextRowEnabled(row))) return;
+    const auto id = *context_item_id_;
+    const auto item = store_.Get(id);
+    if (!item) { CloseContextMenu(); return; }
+    if (!submenu && row == 3) { context_submenu_open_ = true; InvalidateRect(hwnd_, nullptr, FALSE); return; }
+    CloseContextMenu();
+    BeginTransientHideSuppression();
+    if (submenu) {
+        const size_t count = favorite_groups_.size();
+        if (row >= 0 && static_cast<size_t>(row) < count) {
+            store_.SetFavoriteGroup(id, favorite_groups_[row].id);
+            ShowToast(L"已加入「" + favorite_groups_[row].name + L"」");
+        } else {
+            prompt_open_ = true;
+            InvalidateRect(hwnd_, nullptr, FALSE); UpdateWindow(hwnd_);
+            if (const auto name = PromptText(hwnd_, instance_, L"新建收藏夹", L"输入分组名称", L"", theme_mode_)) {
+                store_.SetFavoriteGroup(id, store_.EnsureFavoriteGroup(*name));
+                ShowToast(L"已加入「" + *name + L"」");
+            }
+            prompt_open_ = false;
+        }
+        ReloadItems(); RefreshFavoriteGroupCounts();
+    } else {
+        switch (row) {
+        case 0: TogglePinned(id); ShowToast(item->is_pinned ? L"已取消置顶" : L"已置顶，始终显示在最上方"); break;
+        case 1: ToggleFavorite(id); ShowToast(item->is_favorite ? L"已取消收藏" : L"已收藏"); break;
+        case 2: PromptEditNote(id); break;
+        case 4: case 5: {
+            const auto found = std::find_if(items_.begin(), items_.end(), [id](const auto& i) {return i.id == id;});
+            const int index = static_cast<int>(found - items_.begin()), next = index + (row == 4 ? -1 : 1);
+            if (next >= 0 && next < static_cast<int>(items_.size()) && items_[index].is_pinned != items_[next].is_pinned)
+                ShowToast(L"置顶与普通记录之间不能互换");
+            else MoveItemInCurrentList(index, row == 4 ? -1 : 1);
+            break;
+        }
+        case 6: DeleteItem(id); break;
+        }
+    }
+    EndTransientHideSuppressionSoon();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void PopupWindow::ShowToast(std::wstring text) {
+    toast_text_ = std::move(text);
+    toast_start_ms_ = static_cast<double>(GetTickCount64());
+    SetTimer(hwnd_, kAnimationTimer, kAnimationTimerMs, nullptr);
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+float PopupWindow::RowMotionProgress(int64_t id) const {
+    const auto motion = row_transitions_.find(id);
+    if (motion == row_transitions_.end()) return 1.0f;
+    return PopupTimedMotionProgress(static_cast<double>(GetTickCount64()) - motion->second.start_ms,
+                                    motion->second.removing ? 210.0 : 260.0, animations_enabled_);
+}
+
+void PopupWindow::BeginRemoval(const std::set<int64_t>& ids) {
+    if (ids.empty()) { ReloadItems(); RefreshFavoriteGroupCounts(); InvalidateRect(hwnd_,nullptr,FALSE); return; }
+    const double now = static_cast<double>(GetTickCount64());
+    for (auto id : ids) {
+        store_.Delete(id);
+        if (animations_enabled_) row_transitions_[id] = {now, true};
+    }
+    selection_.Clear();
+    InvalidateRowMetrics();
+    if (!animations_enabled_) { ReloadItems(); RefreshFavoriteGroupCounts(); }
+    else SetTimer(hwnd_, kAnimationTimer, kAnimationTimerMs, nullptr);
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+float PopupWindow::AnimatedExpandedHeight(const HistoryItem& item) const {
+    if (const auto found = detail_transitions_.find(item.id); found != detail_transitions_.end()) {
+        const auto& motion = found->second;
+        const float p = PopupMotionProgress(PopupTimedMotionProgress(
+            static_cast<double>(GetTickCount64()) - motion.start_ms, 240.0, animations_enabled_));
+        return motion.from + (motion.to - motion.from) * p;
+    }
+    return expanded_item_id_ && *expanded_item_id_ == item.id ? ExpandedExtraHeightForItem(item) : 0.0f;
 }
 
 LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
@@ -4098,11 +4970,10 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
     case WM_PAINT: {
         PAINTSTRUCT ps{};
         BeginPaint(hwnd_, &ps);
-        Paint();
+        if(IsVisible())Paint();
         EndPaint(hwnd_, &ps);
-        if (PopupShouldRedrawNativeSearchAfterParentPaint(search_edit_ != nullptr, moving_window_ || resizing_window_)) {
-            RedrawWindow(search_edit_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
-        }
+        // 原生 EDIT 只有 1px 宽、用来接输入，父窗口又用 WS_CLIPCHILDREN 把它剪掉；之前这里每帧
+        // 用 RDW_UPDATENOW 同步重画一次完全看不到的控件（父窗口还为它处理 WM_CTLCOLOREDIT）。
         return 0;
     }
     case WM_SIZE: {
@@ -4200,6 +5071,19 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
         }
         break;
     case WM_TIMER:
+        if(wparam==kIdleMemoryTimer){TrimIdleWorkingSet(hwnd_,kIdleMemoryTimer);return 0;}
+        if (wparam == kMultiPasteTimer) {
+            KillTimer(hwnd_, kMultiPasteTimer);
+            AdvanceMultiPaste();
+            return 0;
+        }
+        if (wparam == kSearchReloadTimer) {
+            KillTimer(hwnd_, kSearchReloadTimer);
+            ReloadItems();
+            ResizeToCurrentItems();
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return 0;
+        }
         if (wparam == kAnimationTimer) {
             AdvanceMotion();
             return 0;
@@ -4242,6 +5126,19 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
             HandleLongPressTimer();
             return 0;
         }
+        if (wparam == kHoverTimer) {
+            if(!IsVisible()){KillTimer(hwnd_,kHoverTimer);return 0;}
+            // 悬停进度同样按时间推进（90ms），收敛后停表。
+            hover_progress_ = PopupTimedMotionProgress(static_cast<double>(GetTickCount64()) - hover_motion_start_ms_,
+                                                       PopupMotionDurationMs(PopupMotionKind::Hover),
+                                                       animations_enabled_);
+            if (hover_progress_ >= 1.0f) {
+                hover_progress_ = 1.0f;
+                KillTimer(hwnd_, kHoverTimer);
+            }
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return 0;
+        }
         if (wparam == kSearchCaretTimer) {
             if (search_focused_ && GetFocus() == search_edit_) {
                 search_caret_on_ = !search_caret_on_;
@@ -4256,6 +5153,9 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
     case WM_COMMAND:
         if (LOWORD(wparam) == kSearchEditId && HIWORD(wparam) == EN_SETFOCUS && search_edit_) {
             search_focused_ = true;
+            search_focus_from_ = search_focus_to_; search_focus_to_ = 1.0f;
+            search_focus_start_ms_ = static_cast<double>(GetTickCount64());
+            SetTimer(hwnd_, kAnimationTimer, kAnimationTimerMs, nullptr);
             search_caret_on_ = true;
             HideNativeSearchCaret(search_edit_);
             SetTimer(hwnd_, kSearchCaretTimer, GetCaretBlinkTime(), nullptr);
@@ -4264,6 +5164,9 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
         }
         if (LOWORD(wparam) == kSearchEditId && HIWORD(wparam) == EN_KILLFOCUS && search_edit_) {
             search_focused_ = false;
+            search_focus_from_ = search_focus_to_; search_focus_to_ = 0.0f;
+            search_focus_start_ms_ = static_cast<double>(GetTickCount64());
+            SetTimer(hwnd_, kAnimationTimer, kAnimationTimerMs, nullptr);
             search_caret_on_ = false;
             KillTimer(hwnd_, kSearchCaretTimer);
             InvalidateRect(hwnd_, nullptr, FALSE);
@@ -4281,8 +5184,8 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
                 query_ = std::move(value);
                 SyncSearchSelectionFromEdit();
                 search_caret_on_ = true;
-                ReloadItems();
-                ResizeToCurrentItems();
+                // 防抖：先只刷新重绘（搜索框文字要立刻跟随），列表查询合并到定时器里做一次。
+                SetTimer(hwnd_, kSearchReloadTimer, kSearchReloadDelayMs, nullptr);
                 InvalidateRect(hwnd_, nullptr, FALSE);
             } else {
                 SyncSearchSelectionFromEdit();
@@ -4293,16 +5196,29 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
         break;
     case WM_MOUSEMOVE: {
         POINT point = ClientPointToDips(POINT{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)});
+        if (context_menu_open_) {
+            const int subrow = context_submenu_open_ ? HitTestContextMenu(point, true) : -1;
+            const int row = subrow >= 0 ? -1 : HitTestContextMenu(point);
+            if (row == 3) context_submenu_open_ = true;
+            else if (row >= 0) context_submenu_open_ = false;
+            context_hover_row_ = row;
+            context_submenu_hover_row_ = subrow;
+            hover_point_ = point;
+            SetCursor(LoadCursorW(nullptr, subrow >= 0 || ContextRowEnabled(row) ? IDC_HAND : IDC_ARROW));
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return 0;
+        }
         if (moving_window_ || resizing_window_) {
             UpdateWindowMoveOrResize();
             return 0;
         }
         ApplyCursorForPoint(point);
+        // 命中的行只算一次：长按拖动的判定和 hover 状态共用（以前这条路径每帧算两遍）。
+        const int hit_item = HitTestItem(point);
         if (pressed_item_index_ >= 0) {
             constexpr int kDragCancelDistance = 6;
             const bool moved_past_cancel_distance = std::abs(point.x - press_point_.x) > kDragCancelDistance ||
                                                     std::abs(point.y - press_point_.y) > kDragCancelDistance;
-            const int hit_item = HitTestItem(point);
             switch (PopupItemPressMoveActionFor(long_press_selected_, moved_past_cancel_distance, hit_item)) {
             case PopupItemPressMoveAction::CancelPress:
                 CancelItemPress();
@@ -4312,6 +5228,7 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
                     if (*selection != selected_index_) {
                         selected_index_ = *selection;
                         scroll_offset_ = ScrollOffsetToRevealSelection(scroll_offset_, selected_index_);
+                        KickSlipAnimation();
                         InvalidateRect(hwnd_, nullptr, FALSE);
                     }
                 }
@@ -4334,31 +5251,33 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
             tracking_mouse_ = true;
         }
         const auto delete_confirm_target = pending_favorite_group_delete_
-                                               ? HitTestFavoriteGroupDeleteConfirm(point)
+                                               ? HitTestFavoriteGroupDeleteConfirm(point, popup_logical_width_)
                                                : PopupFavoriteGroupDeleteConfirmTarget::None;
-        const PopupFilterTarget filter_target = filter_open_
-                                                    ? HitTestPopupFilterTarget(BuildPopupFilterLayout(), calendar_year_,
-                                                                               calendar_month_,
-                                                                               static_cast<float>(point.x),
-                                                                               static_cast<float>(point.y))
-                                                    : PopupFilterTarget::None;
-        const auto filter_layout = BuildPopupFilterLayout();
-        const auto filter_date = filter_open_ && filter_target == PopupFilterTarget::CalendarDate
-                                     ? HitTestPopupCalendarDate(filter_layout, calendar_year_, calendar_month_,
-                                                               static_cast<float>(point.x),
-                                                               static_cast<float>(point.y))
-                                     : std::optional<PopupCalendarDate>{};
-        const auto favorite_menu_layout = BuildPopupFavoriteGroupMenuLayout(favorite_groups_.size());
-        const auto favorite_menu_hit = favorite_group_menu_open_
-                                           ? HitTestPopupFavoriteGroupMenu(favorite_menu_layout, favorite_groups_.size(),
-                                                                          static_cast<float>(point.x),
-                                                                          static_cast<float>(point.y))
-                                           : PopupFavoriteGroupMenuHit{};
+        // CurrentFilterLayout() 会按日历动效重算整块面板几何，菜单布局也要算一遍；
+        // 只有浮层真的打开时才有意义，关着的时候不要再白白算。
+        PopupFilterTarget filter_target = PopupFilterTarget::None;
+        std::optional<PopupCalendarDate> filter_date;
+        if (filter_open_) {
+            const auto filter_layout = CurrentFilterLayout();
+            filter_target = HitTestPopupFilterTarget(filter_layout, calendar_year_, calendar_month_,
+                                                     static_cast<float>(point.x), static_cast<float>(point.y));
+            if (filter_target == PopupFilterTarget::CalendarDate) {
+                filter_date = HitTestPopupCalendarDate(filter_layout, calendar_year_, calendar_month_,
+                                                       static_cast<float>(point.x), static_cast<float>(point.y));
+            }
+        }
+        PopupFavoriteGroupMenuHit favorite_menu_hit;
+        if (favorite_group_menu_open_) {
+            const auto favorite_menu_layout = BuildPopupFavoriteGroupMenuLayout(favorite_groups_.size());
+            favorite_menu_hit = HitTestPopupFavoriteGroupMenu(favorite_menu_layout, favorite_groups_.size(),
+                                                              static_cast<float>(point.x),
+                                                              static_cast<float>(point.y));
+        }
         const bool popover_hovered = delete_confirm_target != PopupFavoriteGroupDeleteConfirmTarget::None ||
                                      filter_target != PopupFilterTarget::None ||
                                      favorite_menu_hit.target != PopupFavoriteGroupMenuTarget::None;
         const UiAction action = popover_hovered ? UiAction::None : HitTestAction(point);
-        const int item = PopupHoverItemIndex(filter_open_ || favorite_group_menu_open_, HitTestItem(point));
+        const int item = PopupHoverItemIndex(filter_open_ || favorite_group_menu_open_, hit_item);
         if (action != hover_action_ || filter_target != hover_filter_target_ ||
             delete_confirm_target != hover_delete_confirm_target_ || filter_date != hover_filter_date_ ||
             favorite_menu_hit.target != hover_favorite_group_menu_hit_.target ||
@@ -4378,8 +5297,10 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
             hover_item_index_ = action == UiAction::None && !popover_hovered ? item : -1;
             hover_point_ = point;
             if (hover_target_changed) {
-                if (PopupShouldAnimateHoverWhileResizing(resizing_window_)) {
-                    hover_progress_ = 0.0f;
+                hover_progress_ = 0.0f;
+                hover_motion_start_ms_ = static_cast<double>(GetTickCount64());
+                SetTimer(hwnd_,kAnimationTimer,kAnimationTimerMs,nullptr);
+                if (animations_enabled_) {
                     SetTimer(hwnd_, kHoverTimer, 16, nullptr);
                 } else {
                     hover_progress_ = 1.0f;
@@ -4470,7 +5391,29 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
         }
         return 0;
     case WM_KEYDOWN:
+        if (context_menu_open_) {
+            if (wparam == VK_ESCAPE) CloseContextMenu();
+            else if (wparam == VK_DOWN || wparam == VK_UP) {
+                auto& row = context_submenu_open_ ? context_submenu_hover_row_ : context_hover_row_;
+                const int count = context_submenu_open_ ? static_cast<int>(favorite_groups_.size()) + 1 : 7;
+                row = (row + (wparam == VK_DOWN ? 1 : -1) + count) % count;
+                if(context_submenu_open_) {
+                    const float visible=ContextPanelRect(true).Height()-10;
+                    const float top=static_cast<float>(row)*30;
+                    context_submenu_scroll_=std::clamp(context_submenu_scroll_,std::max(0.0f,top+30-visible),top);
+                }
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            } else if (wparam == VK_RIGHT && context_hover_row_ == 3) {
+                context_submenu_open_ = true; context_submenu_hover_row_ = 0; InvalidateRect(hwnd_, nullptr, FALSE);
+            } else if (wparam == VK_LEFT) { context_submenu_open_ = false; InvalidateRect(hwnd_, nullptr, FALSE); }
+            else if (wparam == VK_RETURN) ExecuteContextCommand(context_submenu_open_ ? context_submenu_hover_row_ : context_hover_row_, context_submenu_open_);
+            return 0;
+        }
         if (wparam == VK_ESCAPE) {
+            if (clear_confirm_open_) { clear_confirm_open_ = false; InvalidateRect(hwnd_, nullptr, FALSE); return 0; }
+            if (multi_select_ && !filter_open_ && !favorite_group_menu_open_ && !pending_favorite_group_delete_) {
+                ToggleMultiSelect(); return 0;
+            }
             if (pending_favorite_group_delete_) {
                 CloseFavoriteGroupDeleteConfirmWithMotion();
                 return 0;
@@ -4500,14 +5443,32 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
         }
         break;
     case WM_MOUSEWHEEL: {
-        if (pending_favorite_group_delete_) {
+        POINT wheel_cursor{};GetCursorPos(&wheel_cursor);ScreenToClient(hwnd_,&wheel_cursor);wheel_cursor=ClientPointToDips(wheel_cursor);
+        if(expanded_item_id_ && !context_menu_open_ && !filter_open_ && !clear_confirm_open_) {
+            const int index=HitTestItem(wheel_cursor);
+            if(index>=0 && items_[index].id==*expanded_item_id_ && items_[index].kind!=ClipboardKind::Image &&
+                wheel_cursor.y>PopupListTop()+ItemRowTop(index)-scroll_offset_+PopupMetrics().card_height-2) {
+                const float width=std::max(40.0f,static_cast<float>(popup_logical_width_-140-(multi_select_?28:0)));
+                const float maximum=std::max(0.0f,MeasureDetailTextHeight(ItemDetailText(items_[index]),width)-134);
+                detail_scroll_=std::clamp(detail_scroll_-static_cast<float>(GET_WHEEL_DELTA_WPARAM(wparam))/120*36,0.0f,maximum);
+                InvalidateRect(hwnd_,nullptr,FALSE);return 0;
+            }
+        }
+        if(context_menu_open_ && context_submenu_open_) {
+            const float total=49.0f+30.0f*static_cast<float>(favorite_groups_.size());
+            context_submenu_scroll_=std::clamp(context_submenu_scroll_-static_cast<float>(GET_WHEEL_DELTA_WPARAM(wparam))/120*60,
+                0.0f,std::max(0.0f,total-ContextPanelRect(true).Height()));
+            InvalidateRect(hwnd_,nullptr,FALSE);return 0;
+        }
+        if (pending_favorite_group_delete_ || context_menu_open_ || filter_open_ || clear_confirm_open_) {
             return 0;
         }
-        const float next_offset = PopupScrollOffsetAfterWheelForHeight(static_cast<int>(items_.size()), scroll_offset_,
-                                                                       GET_WHEEL_DELTA_WPARAM(wparam),
-                                                                       popup_logical_height_);
+        const float next_offset = scroll_offset_ - static_cast<float>(GET_WHEEL_DELTA_WPARAM(wparam)) / WHEEL_DELTA * 72.0f;
         if (next_offset != scroll_offset_) {
+            // 用户接管滚动，回到顶部的平滑动画立即让位（与浏览器行为一致）。
+            CancelSmoothScroll();
             scroll_offset_ = ClampSmoothScrollOffset(next_offset);
+            KickSlipAnimation();
             InvalidateRect(hwnd_, nullptr, FALSE);
         }
         return 0;
@@ -4516,6 +5477,34 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
         mouse_down_started_inside_popup_ = true;
         left_button_was_down_ = true;
         POINT point = ClientPointToDips(POINT{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)});
+        if (context_menu_open_) {
+            if (context_submenu_open_ && Contains(ContextPanelRect(true), point)) {
+                const int row = HitTestContextMenu(point, true);
+                if (row >= 0) ExecuteContextCommand(row, true);
+            } else if (Contains(ContextPanelRect(), point)) {
+                const int row = HitTestContextMenu(point);
+                if (row >= 0) ExecuteContextCommand(row);
+            } else CloseContextMenu();
+            return 0;
+        }
+        if (clear_confirm_open_) {
+            const auto panel = FavoriteGroupDeleteConfirmPanelRect(popup_logical_width_);
+            if (Contains(FavoriteGroupDeleteConfirmDeleteRect(panel), point)) {
+                std::set<int64_t> ids;
+                for (const auto& item : items_) if (!item.is_favorite) ids.insert(item.id);
+                store_.Clear();
+                clear_confirm_open_ = false;
+                BeginRemoval(ids);
+                ShowToast(L"已清除历史，收藏已保留");
+            } else if (!Contains(panel, point) || Contains(FavoriteGroupDeleteConfirmCancelRect(panel), point)) {
+                clear_confirm_open_ = false;
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            }
+            return 0;
+        }
+        if (pending_favorite_group_delete_ && HandleFavoriteGroupDeleteConfirmClick(point)) return 0;
+        if (filter_open_ && HandleFilterClick(point)) return 0;
+        if (favorite_group_menu_open_ && HandleFavoriteGroupMenuClick(point)) return 0;
         if (const int resize_edges = ResizeHitTest(point)) {
             BeginWindowResize(resize_edges);
             return 0;
@@ -4585,8 +5574,10 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
             return 0;
         case UiAction::ScrollToTop:
             dragging_scrollbar_ = false;
-            scroll_offset_ = 0.0f;
+            // 预览是 list.scrollTo({top:0, behavior:'smooth'})，不瞬跳。
             selected_index_ = ClampPopupSelectedIndex(static_cast<int>(items_.size()), 0);
+            StartSmoothScrollToTop();
+            KickSlipAnimation();
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
         case UiAction::ExpandItem: {
@@ -4601,7 +5592,17 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
             Hide(L"close-button");
             return 0;
         case UiAction::Pin:
+            pin_motion_from_ = pinned_open_;
             pinned_open_ = !pinned_open_;
+            pin_motion_to_ = pinned_open_;
+            pin_motion_progress_ = 0.0f;
+            pin_motion_start_ms_ = static_cast<double>(GetTickCount64());
+            if (animations_enabled_) {
+                SetTimer(hwnd_, kAnimationTimer, kAnimationTimerMs, nullptr);
+            } else {
+                pin_motion_progress_ = 1.0f;
+            }
+            ShowToast(pinned_open_ ? L"已固定：粘贴后窗口保持打开" : L"已取消固定");
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
         case UiAction::Filter:
@@ -4610,6 +5611,7 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
             } else {
                 filter_open_ = true;
                 closing_filter_panel_ = false;
+                RefreshFavoriteGroupCounts();
                 if (favorite_group_menu_open_) {
                     favorite_group_menu_open_ = false;
                 }
@@ -4624,21 +5626,18 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
             ToggleMultiSelect();
             return 0;
         case UiAction::ClearAll:
-            store_.Clear();
-            ReloadItems();
-            ResizeToCurrentItems();
+            clear_confirm_open_ = true;
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
         case UiAction::SelectAll:
             SelectAllVisible();
             return 0;
-        case UiAction::DeleteSelected:
-            for (const auto id : selection_.SelectedIds()) store_.Delete(id);
-            selection_.Clear();
-            ReloadItems();
-            ResizeToCurrentItems();
-            InvalidateRect(hwnd_, nullptr, FALSE);
+        case UiAction::DeleteSelected: {
+            const auto selected_ids = selection_.SelectedIds();
+            std::set<int64_t> ids(selected_ids.begin(), selected_ids.end());
+            if (!ids.empty()) { BeginRemoval(ids); ShowToast(L"已删除 " + std::to_wstring(ids.size()) + L" 条"); }
             return 0;
+        }
         case UiAction::PasteSelected:
             PasteSelected();
             return 0;
@@ -4658,6 +5657,7 @@ LRESULT PopupWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
             return 0;
         case UiAction::FavoritesTab:
             if (view_mode_ != ViewMode::Favorites) {
+                RefreshFavoriteGroupCounts();
                 view_mode_ = ViewMode::Favorites;
                 filter_open_ = false;
                 favorite_group_menu_open_ = false;
@@ -4720,6 +5720,10 @@ LRESULT CALLBACK PopupWindow::SearchEditSubclassProc(HWND hwnd, UINT message, WP
     const auto hideNativeCaret = [&]() {
         HideNativeSearchCaret(hwnd);
     };
+    if(message==WM_KEYDOWN && (wparam==VK_ESCAPE || wparam==VK_UP || wparam==VK_DOWN || wparam==VK_RETURN ||
+        (self->context_menu_open_ && (wparam==VK_LEFT || wparam==VK_RIGHT))))
+        return self->HandleMessage(message,wparam,lparam);
+    if(message==WM_MOUSEWHEEL)return self->HandleMessage(message,wparam,lparam);
     switch (message) {
     case WM_SETFOCUS:
     case WM_LBUTTONDOWN:

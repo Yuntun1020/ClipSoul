@@ -24,6 +24,13 @@ public:
         }
     }
     bool opened() const { return opened_; }
+    // Close early so the caller can do heavy local work without holding the clipboard.
+    void Close() {
+        if (opened_) {
+            CloseClipboard();
+            opened_ = false;
+        }
+    }
 
 private:
     bool opened_;
@@ -242,6 +249,23 @@ std::filesystem::path SaveDibBytes(const std::filesystem::path& cache_dir, const
     return path;
 }
 
+// 把剪贴板里的 DIB 复制到本地缓冲（必须在剪贴板仍然打开时做），然后立刻解锁。
+// 哈希和写盘是这一步之后的纯本地工作，不需要再占着剪贴板不放。
+std::vector<char> CopyGlobalBytes(HGLOBAL handle) {
+    const SIZE_T size = GlobalSize(handle);
+    if (size < sizeof(BITMAPINFOHEADER)) {
+        return {};
+    }
+    const void* data = GlobalLock(handle);
+    if (!data) {
+        return {};
+    }
+    std::vector<char> bytes(static_cast<size_t>(size));
+    memcpy(bytes.data(), data, static_cast<size_t>(size));
+    GlobalUnlock(handle);
+    return bytes;
+}
+
 std::filesystem::path SaveDibPayload(const std::filesystem::path& cache_dir, HGLOBAL handle) {
     const SIZE_T size = GlobalSize(handle);
     const void* data = GlobalLock(handle);
@@ -263,7 +287,7 @@ std::filesystem::path SaveDibPayload(const std::filesystem::path& cache_dir, HGL
     return path;
 }
 
-std::filesystem::path SaveBitmapPayload(const std::filesystem::path& cache_dir, HBITMAP bitmap) {
+std::vector<char> BitmapToDibBytes(HBITMAP bitmap) {
     BITMAP bitmap_info{};
     if (GetObjectW(bitmap, sizeof(bitmap_info), &bitmap_info) == 0 || bitmap_info.bmWidth <= 0 ||
         bitmap_info.bmHeight <= 0) {
@@ -294,10 +318,10 @@ std::filesystem::path SaveBitmapPayload(const std::filesystem::path& cache_dir, 
         return {};
     }
 
-    return SaveDibBytes(cache_dir, dib);
+    return dib;
 }
 
-std::filesystem::path SavePngPayload(const std::filesystem::path& cache_dir, HGLOBAL handle) {
+std::vector<char> DecodePngToDib(HGLOBAL handle) {
     if (!handle) {
         return {};
     }
@@ -316,7 +340,7 @@ std::filesystem::path SavePngPayload(const std::filesystem::path& cache_dir, HGL
     IWICBitmapDecoder* decoder = nullptr;
     IWICBitmapFrameDecode* frame = nullptr;
     IWICFormatConverter* converter = nullptr;
-    std::filesystem::path path;
+    std::vector<char> dib;
 
     const HRESULT hr_factory =
         CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory));
@@ -331,7 +355,7 @@ std::filesystem::path SavePngPayload(const std::filesystem::path& cache_dir, HGL
         UINT height = 0;
         if (SUCCEEDED(converter->GetSize(&width, &height)) && width > 0 && height > 0) {
             const UINT stride = width * 4u;
-            std::vector<char> dib(sizeof(BITMAPINFOHEADER) + static_cast<size_t>(stride) * height);
+            dib.resize(sizeof(BITMAPINFOHEADER) + static_cast<size_t>(stride) * height);
             auto* header = reinterpret_cast<BITMAPINFOHEADER*>(dib.data());
             header->biSize = sizeof(BITMAPINFOHEADER);
             header->biWidth = static_cast<LONG>(width);
@@ -341,9 +365,9 @@ std::filesystem::path SavePngPayload(const std::filesystem::path& cache_dir, HGL
             header->biCompression = BI_RGB;
             header->biSizeImage = stride * height;
 
-            if (SUCCEEDED(converter->CopyPixels(nullptr, stride, static_cast<UINT>(dib.size() - sizeof(BITMAPINFOHEADER)),
-                                                reinterpret_cast<BYTE*>(dib.data() + sizeof(BITMAPINFOHEADER))))) {
-                path = SaveDibBytes(cache_dir, dib);
+            if (FAILED(converter->CopyPixels(nullptr, stride, static_cast<UINT>(dib.size() - sizeof(BITMAPINFOHEADER)),
+                                             reinterpret_cast<BYTE*>(dib.data() + sizeof(BITMAPINFOHEADER))))) {
+                dib.clear();
             }
         }
     }
@@ -354,7 +378,7 @@ std::filesystem::path SavePngPayload(const std::filesystem::path& cache_dir, HGL
     if (stream) stream->Release();
     if (factory) factory->Release();
     GlobalUnlock(handle);
-    return path;
+    return dib;
 }
 
 } // namespace
@@ -444,6 +468,19 @@ std::optional<CapturedContent> ClipboardCapture::Capture(HWND owner, bool* clipb
             break;
         }
         if (content) {
+            // 图片先把 DIB 字节复制到内存（此时剪贴板还锁着），然后在下面的 scope 析构、
+            // 剪贴板释放之后再哈希 + 写盘：不把一个 20~30 MB 的截图全文哈希和 IO
+            // 都压在“别的程序打不开剪贴板”的这段窗口里。
+            if (!content->pending_dib.empty()) {
+                std::vector<char> dib = std::move(content->pending_dib);
+                content->pending_dib.clear();
+                clipboard.Close();
+                content->payload_path = SaveDibBytes(cache_dir_, dib);
+                if (content->payload_path.empty()) {
+                    return std::nullopt;
+                }
+                content->content_hash = StableHash(content->payload_path.wstring());
+            }
             return content;
         }
         MarkClipboardCapturePlanUnavailable(formats, plan);
@@ -490,13 +527,12 @@ std::optional<CapturedContent> ClipboardCapture::CaptureImage() const {
 
     CapturedContent content;
     content.kind = ClipboardKind::Image;
-    content.payload_path = SaveDibPayload(cache_dir_, handle);
-    if (content.payload_path.empty()) {
+    content.pending_dib = CopyGlobalBytes(handle);
+    if (content.pending_dib.empty()) {
         return std::nullopt;
     }
     content.preview = L"Image / screenshot";
     content.search_text = L"image screenshot";
-    content.content_hash = StableHash(content.payload_path.wstring());
     return content;
 }
 
@@ -508,26 +544,24 @@ std::optional<CapturedContent> ClipboardCapture::CaptureBitmap() const {
 
     CapturedContent content;
     content.kind = ClipboardKind::Image;
-    content.payload_path = SaveBitmapPayload(cache_dir_, bitmap);
-    if (content.payload_path.empty()) {
+    content.pending_dib = BitmapToDibBytes(bitmap);
+    if (content.pending_dib.empty()) {
         return std::nullopt;
     }
     content.preview = L"Image / screenshot";
     content.search_text = L"image screenshot bitmap";
-    content.content_hash = StableHash(content.payload_path.wstring());
     return content;
 }
 
 std::optional<CapturedContent> ClipboardCapture::CapturePng(UINT png_format) const {
     CapturedContent content;
     content.kind = ClipboardKind::Image;
-    content.payload_path = SavePngPayload(cache_dir_, GetClipboardData(png_format));
-    if (content.payload_path.empty()) {
+    content.pending_dib = DecodePngToDib(GetClipboardData(png_format));
+    if (content.pending_dib.empty()) {
         return std::nullopt;
     }
     content.preview = L"Image / screenshot";
     content.search_text = L"image screenshot png";
-    content.content_hash = StableHash(content.payload_path.wstring());
     return content;
 }
 

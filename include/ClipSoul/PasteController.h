@@ -4,6 +4,9 @@
 
 #include <Windows.h>
 
+#include <functional>
+#include <optional>
+
 namespace ClipSoul {
 
 class ClipboardMonitor;
@@ -38,7 +41,12 @@ class PasteController {
 public:
     explicit PasteController(ClipboardMonitor& monitor);
 
+    // Copies a history row to the clipboard. `load_html` is invoked for HTML entries before writing,
+    // because list queries no longer carry the (potentially huge) CF_HTML payload; pass a callable
+    // that reloads the row (e.g. [&](int64_t id) { return store.Get(id); }).
     bool RestoreToClipboard(const HistoryItem& item, HWND owner);
+    bool RestoreToClipboard(const HistoryItem& item, HWND owner,
+                            const std::function<std::optional<HistoryItem>(int64_t)>& load_full_item);
     bool RestoreMultipleToClipboard(const std::vector<HistoryItem>& items, HWND owner);
     void SendPaste(HWND target, PasteShortcutOptions options = {}) const;
 

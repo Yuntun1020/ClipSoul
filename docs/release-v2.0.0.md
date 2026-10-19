@@ -1,0 +1,54 @@
+# ClipSoul v2.0.0
+
+一次以「顺手」和「轻」为目标的版本更新。修复了一批交互与渲染问题，同时把列表绘制、主题切换、数据库查询的开销都降下来了。
+
+## 本版更新
+
+### 修复
+
+- 修复剪贴板列表顶部出现一排空白的问题：滚动到首行时第一行被跳过。
+- 修复取消置顶后高亮跳到列表中部的问题，高亮现在始终停在最新记录上。
+- 修复主题切换时整块面板配色瞬间跳变、滑块越出轨道边缘的问题。
+- 修复设置页「历史上限」输入框内闪出一块纯色方块的问题。
+- 修复搜索光标、选区与鼠标点选位置偏左的问题。
+- 修复多显示器使用不同缩放比例时，弹窗跨屏呼出后尺寸比例异常的问题。
+
+### 优化
+
+- **列表渲染**：行高改为前缀和缓存，绘制、命中测试与滚动几何从 O(n²) 降到 O(1)。
+- **重绘范围**：只重画带增量动效的帧，悬停动画收敛后不再空转整窗重绘。
+- **搜索输入**：增加 90ms 防抖，设置改为快照缓存，输入时不再反复读写磁盘。
+- **主题切换**：配色在 220ms 内插值过渡，文本排版命中缓存，过渡期间不再同步刷新 DWM。
+- **剪贴板占用**：图片捕获改为离开剪贴板锁之后再做哈希与落盘，缩短占用时间。
+- **系统深浅色**：改为缓存读取，仅在系统设置变更广播时失效。
+- **数据库**：补充去重与裁剪所需索引，sort_order 使用高水位缓存，列表查询不再读取 HTML 原文。
+- **体积**：移除未使用的位图图标加载链路与资源，启用 LTO/ICF，可执行文件体积减少约 33%（1.26 MB → 850 KB）。
+
+## 主题预览
+
+| 弹窗（深色） | 设置（浅色） | 设置（深色） |
+| :---: | :---: | :---: |
+| ![弹窗](https://raw.githubusercontent.com/Yuntun1020/ClipSoul/main/docs/screenshots/popup-dark.png) | ![设置浅色](https://raw.githubusercontent.com/Yuntun1020/ClipSoul/main/docs/screenshots/settings-light.png) | ![设置深色](https://raw.githubusercontent.com/Yuntun1020/ClipSoul/main/docs/screenshots/settings-dark.png) |
+
+## 下载文件
+
+- `ClipSoul.exe`
+- `SHA256SUMS.txt`
+
+单文件运行，无需安装。首次启动会在 exe 所在目录生成 `clipsoul.db` 与 `cache\`。
+
+## 校验方式
+
+下载后在 PowerShell 执行：
+
+```powershell
+Get-FileHash -Algorithm SHA256 .\ClipSoul.exe
+```
+
+确认输出值与 `SHA256SUMS.txt` 一致后再运行。本版仍未代码签名，若 Windows SmartScreen 拦截但哈希一致，通常是未签名新程序的信誉问题，请只从本仓库 Release 下载。
+
+## 已知行为
+
+- 未签名 exe 可能触发 Windows Defender / SmartScreen 提示。
+- 修改「存储位置」后需要重启程序生效。
+- 「窗口缩放」默认关闭，开启后允许拖动边缘调整弹窗大小。

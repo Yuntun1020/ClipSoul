@@ -15,7 +15,7 @@ constexpr PopupMetricsData kMetrics{
     40,  // search_height
     28,  // toolbar_height（工具按钮与标签同处一栏）
     40,  // tab_height（标签栏）
-    58,  // card_height（一行记录）
+    60,  // card_height（padding 20 + side: time 19 + gap 3 + expand 18）
     0,   // card_gap（行间用发丝线分隔）
     14,  // corner_radius
     28,  // header_button_size
@@ -176,6 +176,7 @@ int ClampPopupSelectedIndex(int item_count, int selected_index) {
     }
     return std::clamp(selected_index, 0, item_count - 1);
 }
+
 
 int PopupNextSelectedIndex(int item_count, int selected_index) {
     if (item_count <= 0) {
@@ -348,7 +349,7 @@ float PopupScrollbarThumbOpacity(bool hovered, bool dragging, float hover_progre
 }
 
 bool PopupScrollToTopButtonVisible(float scroll_offset) {
-    return scroll_offset > 0.0f;
+    return scroll_offset > 120.0f;
 }
 
 UiRect PopupScrollToTopButtonRectForSize(int logical_width, int logical_height) {
@@ -370,6 +371,48 @@ float PopupMotionProgress(float raw_progress) {
     const float clamped = std::clamp(raw_progress, 0.0f, 1.0f);
     const float inverse = 1.0f - clamped;
     return 1.0f - inverse * inverse * inverse * inverse;
+}
+
+int PopupMotionDurationMs(PopupMotionKind kind) {
+    switch (kind) {
+    case PopupMotionKind::Panel:
+        return 160;
+    case PopupMotionKind::ViewSwitch:
+        return 180;
+    case PopupMotionKind::Arrow:
+        return 220;
+    case PopupMotionKind::MultiSelect:
+        return 200;
+    case PopupMotionKind::Hover:
+        return 90;
+    }
+    return 160;
+}
+
+float PopupTimedMotionProgress(double elapsed_ms, double duration_ms, bool animations_enabled) {
+    if (!animations_enabled || duration_ms <= 0.0) {
+        return 1.0f;
+    }
+    if (elapsed_ms <= 0.0) {
+        return 0.0f;
+    }
+    return static_cast<float>(std::clamp(elapsed_ms / duration_ms, 0.0, 1.0));
+}
+
+PopupSpringState PopupSpringStep(float position, float velocity, float target, float dt_seconds) {
+    // 纸条弹簧：K=520，阻尼比 0.86（略欠阻尼，回弹一次就停），dt 上限 32ms。
+    constexpr float kStiffness = 520.0f;
+    constexpr float kDampingRatio = 0.86f;
+    constexpr float kMaxStep = 0.032f;
+    const float dt = std::clamp(dt_seconds, 0.0f, kMaxStep);
+    if (dt <= 0.0f) {
+        return PopupSpringState{position, velocity};
+    }
+    const float damping = 2.0f * kDampingRatio * std::sqrt(kStiffness);
+    const float acceleration = kStiffness * (target - position) - damping * velocity;
+    const float next_velocity = velocity + acceleration * dt;
+    const float next_position = position + next_velocity * dt;
+    return PopupSpringState{next_position, next_velocity};
 }
 
 float PopupMotionEnterOffset(float progress, float max_offset) {
@@ -441,6 +484,36 @@ float PopupMultiSelectCheckboxOpacity(float progress, bool entering) {
     return entering ? t : 1.0f - t;
 }
 
+float PopupCubicBezierEase(float x1, float y1, float x2, float y2, float progress) {
+    // CSS cubic-bezier(x1,y1,x2,y2)：先由 x 反解参数 t，再取 y。用于预览里的弹性过渡。
+    const float target = std::clamp(progress, 0.0f, 1.0f);
+    if (target <= 0.0f) return 0.0f;
+    if (target >= 1.0f) return 1.0f;
+    const auto bezier = [](float t, float p1, float p2) {
+        const float inv = 1.0f - t;
+        return 3.0f * inv * inv * t * p1 + 3.0f * inv * t * t * p2 + t * t * t;
+    };
+    float low = 0.0f;
+    float high = 1.0f;
+    float t = target;
+    for (int i = 0; i < 24; ++i) {
+        const float value = bezier(t, x1, x2);
+        if (std::fabs(value - target) < 1e-5f) break;
+        if (value < target) low = t; else high = t;
+        t = (low + high) * 0.5f;
+    }
+    return bezier(t, y1, y2);
+}
+
+float PopupPinRotationDegrees(bool pinned, float progress) {
+    // 预览 #pinWin.on svg{transform:rotate(-40deg)}，过渡 260ms cubic-bezier(.3,1.5,.5,1)。
+    const float eased = PopupCubicBezierEase(0.3f, 1.5f, 0.5f, 1.0f, progress);
+    constexpr float kPinnedAngle = -40.0f;
+    const float from = pinned ? 0.0f : kPinnedAngle;
+    const float to = pinned ? kPinnedAngle : 0.0f;
+    return from + (to - from) * eased;
+}
+
 float PopupToggleKnobPosition(bool from_active, bool to_active, float progress) {
     const float from = from_active ? 1.0f : 0.0f;
     const float to = to_active ? 1.0f : 0.0f;
@@ -474,6 +547,61 @@ int PopupPromptEntranceTimerIntervalMs() {
 float PopupMotionEnterOpacity(float progress) {
     constexpr float kStartOpacity = 0.84f;
     return kStartOpacity + (1.0f - kStartOpacity) * std::clamp(progress, 0.0f, 1.0f);
+}
+
+PopupWindowMotionFrame PopupWindowEnterFrame(float raw_progress) {
+    // 预览：.win.enter{animation:winIn 170ms cubic-bezier(.2,.8,.2,1) both}
+    //       @keyframes winIn{from{opacity:0;transform:translateY(8px) scale(.985)}}
+    const float t = std::clamp(raw_progress, 0.0f, 1.0f);
+    const float eased = PopupCubicBezierEase(0.2f, 0.8f, 0.2f, 1.0f, t);
+    PopupWindowMotionFrame frame;
+    frame.opacity = eased;
+    frame.translate_y = 8.0f * (1.0f - eased);
+    frame.scale = 0.985f + 0.015f * eased;
+    return frame;
+}
+
+PopupWindowMotionFrame PopupWindowLeaveFrame(float raw_progress) {
+    // 预览：.win.leave{animation:winOut 120ms cubic-bezier(.4,0,1,1) both}
+    //       @keyframes winOut{to{opacity:0;transform:translateY(4px) scale(.99)}}
+    const float t = std::clamp(raw_progress, 0.0f, 1.0f);
+    const float eased = PopupCubicBezierEase(0.4f, 0.0f, 1.0f, 1.0f, t);
+    PopupWindowMotionFrame frame;
+    frame.opacity = 1.0f - eased;
+    frame.translate_y = 4.0f * eased;
+    frame.scale = 1.0f - 0.01f * eased;
+    return frame;
+}
+
+PopupRowEntranceFrame PopupRowEntranceFrameAt(double elapsed_ms, int entrance_index) {
+    // 预览：.win.enter .row / .sect{animation:rowRise 220ms cubic-bezier(.2,.8,.2,1) both;
+    //                              animation-delay:calc(var(--i)*18ms + 40ms)}
+    //       @keyframes rowRise{from{opacity:0;transform:translateY(5px)}}
+    // entrance_index 就是预览 JS 里的 --i（首项 1，上限 9）。
+    const int index = std::clamp(entrance_index, 0, 9);
+    const double delay_ms = 40.0 + static_cast<double>(index) * 18.0;
+    const double local_ms = std::max(0.0, elapsed_ms - delay_ms);
+    const float t = static_cast<float>(std::clamp(local_ms / 220.0, 0.0, 1.0));
+    const float eased = PopupCubicBezierEase(0.2f, 0.8f, 0.2f, 1.0f, t);
+    PopupRowEntranceFrame frame;
+    frame.opacity = eased;
+    frame.translate_y = 5.0f * (1.0f - eased);
+    return frame;
+}
+
+double PopupRowEntranceTotalMs() {
+    // 最后一档延迟 40 + 9*18 = 202ms，再加 220ms 时长。
+    return 40.0 + 9.0 * 18.0 + 220.0;
+}
+
+float PopupSmoothScrollProgress(float raw_progress) {
+    // Chromium 的 smooth scroll 是 ease-in-out（cubic-bezier(.42,0,.58,1)）。
+    return PopupCubicBezierEase(0.42f, 0.0f, 0.58f, 1.0f, std::clamp(raw_progress, 0.0f, 1.0f));
+}
+
+float PopupSmoothScrollOffset(float from_offset, float to_offset, float raw_progress) {
+    const float eased = PopupSmoothScrollProgress(raw_progress);
+    return from_offset + (to_offset - from_offset) * eased;
 }
 
 float PopupExpandedCardExtraHeightForMeasuredDetail(float measured_detail_height) {
@@ -524,6 +652,58 @@ float PopupExpandedCardExtraHeightForText(std::wstring_view text, float detail_w
 float PopupExpandedCardExtraHeightForText(std::wstring_view text) {
     const float default_detail_width = static_cast<float>(kMetrics.width - kMetrics.margin * 2 - 96);
     return PopupExpandedCardExtraHeightForText(text, default_detail_width);
+}
+
+namespace {
+uint32_t LerpColorChannel(uint32_t from, uint32_t to, float t, int shift) {
+    const uint32_t a = (from >> shift) & 0xFFu;
+    const uint32_t b = (to >> shift) & 0xFFu;
+    const auto mixed = static_cast<uint32_t>(std::lround(static_cast<float>(a) + (static_cast<float>(b) - static_cast<float>(a)) * t));
+    return (mixed & 0xFFu) << shift;
+}
+
+uint32_t LerpRgb(uint32_t from, uint32_t to, float t) {
+    return LerpColorChannel(from, to, t, 16) | LerpColorChannel(from, to, t, 8) | LerpColorChannel(from, to, t, 0);
+}
+} // namespace
+
+PopupThemePalette LerpPopupThemePalette(const PopupThemePalette& from, const PopupThemePalette& to, float t) {
+    const float progress = std::clamp(t, 0.0f, 1.0f);
+    if (progress <= 0.0f) {
+        return from;
+    }
+    if (progress >= 1.0f) {
+        return to;
+    }
+    PopupThemePalette mixed = to;
+    mixed.dark = progress < 0.5f ? from.dark : to.dark;
+    const auto lerp = [progress](uint32_t a, uint32_t b) { return LerpRgb(a, b, progress); };
+    mixed.window_tint = lerp(from.window_tint, to.window_tint);
+    mixed.panel_fill = lerp(from.panel_fill, to.panel_fill);
+    mixed.card_fill = lerp(from.card_fill, to.card_fill);
+    mixed.search_fill = lerp(from.search_fill, to.search_fill);
+    mixed.text = lerp(from.text, to.text);
+    mixed.muted = lerp(from.muted, to.muted);
+    mixed.border = lerp(from.border, to.border);
+    mixed.accent = lerp(from.accent, to.accent);
+    mixed.strong_border = lerp(from.strong_border, to.strong_border);
+    mixed.accent_hover = lerp(from.accent_hover, to.accent_hover);
+    mixed.text_tertiary = lerp(from.text_tertiary, to.text_tertiary);
+    mixed.danger = lerp(from.danger, to.danger);
+    mixed.paper_hover = lerp(from.paper_hover, to.paper_hover);
+    mixed.paper_selected = lerp(from.paper_selected, to.paper_selected);
+    mixed.border_hover = lerp(from.border_hover, to.border_hover);
+    mixed.border_selected = lerp(from.border_selected, to.border_selected);
+    mixed.active_tab = lerp(from.active_tab, to.active_tab);
+    mixed.scrollbar_track = lerp(from.scrollbar_track, to.scrollbar_track);
+    mixed.scrollbar_thumb = lerp(from.scrollbar_thumb, to.scrollbar_thumb);
+    mixed.scrollbar_pressed = lerp(from.scrollbar_pressed, to.scrollbar_pressed);
+    mixed.focus_outline = lerp(from.focus_outline, to.focus_outline);
+    const auto lerp_alpha = [progress](float a, float b) { return a + (b - a) * progress; };
+    mixed.window_opacity = lerp_alpha(from.window_opacity, to.window_opacity);
+    mixed.panel_opacity = lerp_alpha(from.panel_opacity, to.panel_opacity);
+    mixed.card_opacity = lerp_alpha(from.card_opacity, to.card_opacity);
+    return mixed;
 }
 
 PopupThemePalette ResolvePopupThemePalette(int theme_mode, bool system_dark) {
@@ -619,24 +799,29 @@ bool PopupUiIconShouldLoadBitmap(const PopupThemePalette& palette, bool content_
 }
 
 SettingsProjectLayout SettingsWindowProjectLayout() {
+    // Ink Ledger 设置页：左右 18px 内边距，内容右线 = 640 - 18 = 622。
     return SettingsProjectLayout{
-        Rect(30.0f, 458.0f, 604.0f, 576.0f),
-        Rect(54.0f, 500.0f, 222.0f, 536.0f),
-        Rect(44.0f, 544.0f, 592.0f, 545.0f),
-        Rect(54.0f, 550.0f, 592.0f, 570.0f),
+        Rect(18.0f, 552.0f, 622.0f, 676.0f),
+        Rect(466.0f, 584.0f, 574.0f, 612.0f),
+        Rect(18.0f, 621.0f, 622.0f, 622.0f),
+        Rect(466.0f, 632.0f, 622.0f, 670.0f),
     };
 }
 
 SettingsControlLayout SettingsWindowControlLayout() {
+    // 控件只有两档宽度：开关 32×18，其余统一 156×28，右边缘贴齐内容右线。
+    constexpr float kControlLeft = 466.0f;
+    constexpr float kControlRight = 622.0f;
+    constexpr float kToggleLeft = kControlRight - 32.0f;
     return SettingsControlLayout{
-        Rect(170.0f, 83.0f, 268.0f, 105.0f),
-        Rect(236.0f, 120.0f, 274.0f, 142.0f),
-        Rect(236.0f, 154.0f, 274.0f, 176.0f),
-        Rect(225.0f, 394.0f, 263.0f, 416.0f),
-        Rect(150.0f, 356.0f, 250.0f, 384.0f),
-        Rect(258.0f, 356.0f, 340.0f, 384.0f),
-        Rect(348.0f, 356.0f, 430.0f, 384.0f),
-        1,
+        Rect(kControlLeft, 86.0f, kControlRight, 114.0f),
+        Rect(kToggleLeft, 139.0f, kControlRight, 157.0f),
+        Rect(kToggleLeft, 187.0f, kControlRight, 205.0f),
+        Rect(kToggleLeft, 519.0f, kControlRight, 537.0f),
+        Rect(kControlLeft, 466.0f, kControlLeft + 51.0f, 494.0f),
+        Rect(kControlLeft + 52.0f, 466.0f, kControlLeft + 103.0f, 494.0f),
+        Rect(kControlLeft + 104.0f, 466.0f, kControlRight, 494.0f),
+        0,
         false,
         false,
     };
@@ -679,7 +864,7 @@ bool SettingsLimitEditShouldSelectAllOnLoad() {
 }
 
 std::wstring_view PopupSearchPlaceholderText() {
-    return L"\u641c\u7d22\u5386\u53f2\u8bb0\u5f55...";
+    return L"搜索剪贴板\u2026";
 }
 
 std::wstring_view PopupSearchDisplayText(std::wstring_view query) {
@@ -687,15 +872,14 @@ std::wstring_view PopupSearchDisplayText(std::wstring_view query) {
 }
 
 std::wstring PopupEmptyMessage(bool favorites_view, std::wstring_view active_favorite_group) {
-    if (!favorites_view) {
-        return L"\u6682\u65e0\u5386\u53f2\u8bb0\u5f55";
+    return PopupEmptyMessage(favorites_view, active_favorite_group, false);
+}
+
+std::wstring PopupEmptyMessage(bool favorites_view, std::wstring_view, bool has_filters) {
+    if (has_filters) {
+        return L"没有匹配的记录";
     }
-    if (active_favorite_group.empty()) {
-        return L"\u6536\u85cf\u5939\u6682\u65e0\u5185\u5bb9";
-    }
-    std::wstring message(active_favorite_group);
-    message += L"\u6682\u65e0\u5185\u5bb9";
-    return message;
+    return favorites_view ? L"还没有收藏，右键条目即可收藏" : L"复制点什么，它会出现在这里";
 }
 
 std::wstring PopupNotePreviewText(std::wstring_view note) {
@@ -823,7 +1007,8 @@ bool PopupShouldActivateForSearchFocus(bool search_clicked, bool has_native_edit
 
 
 bool PopupShouldAutoFocusSearchOnShow(bool has_native_edit) {
-    return false;
+    // 预览启动时就是 q.focus()：呼出即可打字，搜索框下的墨线也随之从左展开。
+    return has_native_edit;
 }
 
 bool PopupWindowShouldUseNoActivateStyle() {
@@ -986,6 +1171,54 @@ float PopupSectionHeaderHeight() {
     return kSectionHeaderHeight;
 }
 
+PopupSectionPlan PopupSectionPlanFor(size_t item_count, size_t pinned_count) {
+    PopupSectionPlan plan;
+    plan.pinned_count = std::min(pinned_count, item_count);
+    plan.recent_count = item_count - plan.pinned_count;
+    plan.show_pinned_header = plan.pinned_count > 0;
+    plan.show_recent_header = plan.pinned_count > 0 && plan.recent_count > 0;
+    return plan;
+}
+
+int PopupFirstVisibleRowIndex(const std::vector<float>& row_tops, float scroll_offset) {
+    if (row_tops.empty()) {
+        return 0;
+    }
+    // upper_bound gives the first row strictly below the viewport top; step back to the one
+    // that actually covers it. Starting at the upper bound skips the first row whenever the
+    // offset equals its top (which is always true at offset 0), leaving a blank strip.
+    const auto beyond = std::upper_bound(row_tops.begin(), row_tops.end(), scroll_offset);
+    const int covering =
+        beyond == row_tops.begin() ? 0 : static_cast<int>(std::distance(row_tops.begin(), beyond)) - 1;
+    return std::clamp(covering, 0, static_cast<int>(row_tops.size()) - 1);
+}
+
+int PopupDefaultSelectedIndex(const PopupSectionPlan& plan) {
+    // 置顶区只是快捷区：呼出弹窗时默认高亮（回车会粘贴的那一条）应该是最近分组的
+    // 第一条，而不是被置顶的旧条目。没有最近条目时才回落到列表首项。
+    if (plan.recent_count == 0) {
+        return 0;
+    }
+    return static_cast<int>(plan.pinned_count);
+}
+
+float PopupSectionedItemTop(size_t item_index, const PopupSectionPlan& plan, float item_height, float header_height) {
+    const float pinned_header = plan.show_pinned_header ? header_height : 0.0f;
+    if (item_index < plan.pinned_count) {
+        return pinned_header + static_cast<float>(item_index) * item_height;
+    }
+    const float recent_header = plan.show_recent_header ? header_height : 0.0f;
+    return pinned_header + static_cast<float>(plan.pinned_count) * item_height + recent_header +
+           static_cast<float>(item_index - plan.pinned_count) * item_height;
+}
+
+float PopupSectionedListHeight(const PopupSectionPlan& plan, float item_height, float header_height) {
+    const float items = static_cast<float>(plan.pinned_count + plan.recent_count) * item_height;
+    const float headers = (plan.show_pinned_header ? header_height : 0.0f) +
+                          (plan.show_recent_header ? header_height : 0.0f);
+    return items + headers;
+}
+
 UiRect PopupFooterRectForSize(int logical_width, int logical_height) {
     return Rect(0.0f, PopupListBottomForHeight(logical_height), static_cast<float>(logical_width),
                 static_cast<float>(logical_height));
@@ -1021,8 +1254,8 @@ PopupSearchLayout BuildPopupSearchLayoutForWidth(int logical_width) {
                        static_cast<float>(kMetrics.margin + 15), top + 27.5f);
     layout.text = Rect(static_cast<float>(kMetrics.margin + 24), top + 8.0f,
                        static_cast<float>(logical_width - kMetrics.margin - 28), top + 32.0f);
-    layout.clear_button = Rect(static_cast<float>(logical_width - kMetrics.margin - 18), top + 12.0f,
-                               static_cast<float>(logical_width - kMetrics.margin - 2), top + 28.0f);
+    layout.clear_button = Rect(static_cast<float>(logical_width - kMetrics.margin - 20), top + 10.0f,
+                               static_cast<float>(logical_width - kMetrics.margin), top + 30.0f);
     return layout;
 }
 
@@ -1086,15 +1319,16 @@ PopupTabsLayout BuildPopupTabsLayoutForWidth(bool favorites_active, int logical_
     PopupTabsLayout layout;
     layout.history = Rect(left, top + 7.0f, left + 46.0f, top + 33.0f);
     layout.favorites = Rect(layout.history.right + 14.0f, top + 7.0f, layout.history.right + 60.0f, top + 33.0f);
-    const float add_size = 26.0f;
+    const float add_size = 28.0f;
     const float group_left = layout.favorites.right + 10.0f;
     const float group_limit = toolbar.filter.left - 6.0f - add_size - 2.0f;
-    const float group_width = std::clamp(group_limit - group_left, 36.0f, 92.0f);
+    // 先为 28px 添加按钮及右侧 88px 工具区留位，分组按钮使用剩余宽度。
+    const float group_width = std::clamp(group_limit - group_left, 0.0f, 86.0f);
     layout.favorite_group = Rect(group_left, top + 8.0f, group_left + group_width, top + 32.0f);
-    layout.add_favorite_phrase = Rect(layout.favorite_group.right + 2.0f, top + 7.0f,
-                                      layout.favorite_group.right + 2.0f + add_size, top + 33.0f);
+    layout.add_favorite_phrase = Rect(layout.favorite_group.right + 2.0f, top + 6.0f,
+                                      layout.favorite_group.right + 2.0f + add_size, top + 34.0f);
     const UiRect& active = favorites_active ? layout.favorites : layout.history;
-    layout.active_indicator = Rect(active.left, top + 32.5f, active.right, top + 34.0f);
+    layout.active_indicator = Rect(active.left, top + 32.5f, active.left + 26.0f, top + 34.0f);
     layout.divider = Rect(0.0f, top + static_cast<float>(kMetrics.tab_height) - 0.5f,
                           static_cast<float>(logical_width), top + static_cast<float>(kMetrics.tab_height) + 0.5f);
     return layout;
@@ -1118,14 +1352,18 @@ int PopupCalendarRowCount(int year, int month) {
 }
 
 PopupFilterLayout BuildPopupFilterLayout(bool custom_range, int calendar_rows) {
+    return BuildPopupFilterLayout(custom_range, calendar_rows, kMetrics.width);
+}
+
+PopupFilterLayout BuildPopupFilterLayout(bool custom_range, int calendar_rows, int logical_width) {
     // Ink Ledger 筛选面板：统一 14px 内边距；所有区块共用同一左右边线。
     constexpr float kPadX = 14.0f;
     constexpr float kSegHeight = 30.0f;
     constexpr float kLabelHeight = 16.0f;
-    constexpr float kCalRowPitch = 22.0f;
+    constexpr float kCalRowPitch = 26.0f; // 日期高 24 + 行距 2
     const float panel_left = 12.0f;
-    const float panel_right = static_cast<float>(kMetrics.width) - 12.0f;
-    const float top = PopupTabsTop() + 36.0f;
+    const float panel_right = static_cast<float>(std::max(logical_width, 1)) - 12.0f;
+    const float top = 124.0f;
     const float left = panel_left + kPadX;
     const float right = panel_right - kPadX;
     const UiRect hidden = Rect(-100.0f, -100.0f, -99.0f, -99.0f);
@@ -1137,7 +1375,7 @@ PopupFilterLayout BuildPopupFilterLayout(bool custom_range, int calendar_rows) {
     layout.reset = Rect(layout.close.left - 40.0f, top + 14.0f, layout.close.left - 2.0f, top + 34.0f);
 
     // 类型：标签行 + 四等分分段条
-    layout.type_section = Rect(left, top + 42.0f, right, top + 42.0f + kLabelHeight);
+    layout.type_section = Rect(left, top + 48.0f, right, top + 48.0f + kLabelHeight);
     layout.type_bar = Rect(left, layout.type_section.bottom + 6.0f, right, layout.type_section.bottom + 6.0f + kSegHeight);
     {
         const float slot = (layout.type_bar.Width() - 2.0f * 2.0f - 2.0f * 3.0f) / 4.0f;
@@ -1165,15 +1403,15 @@ PopupFilterLayout BuildPopupFilterLayout(bool custom_range, int calendar_rows) {
     float content_bottom = layout.preset_bar.bottom;
     if (custom_range) {
         const int rows = std::clamp(calendar_rows, 4, 6);
-        const float cal_top = layout.preset_bar.bottom + 8.0f;
-        layout.calendar_title = Rect(left, cal_top, right - 96.0f, cal_top + 22.0f);
+        const float cal_top = layout.preset_bar.bottom + 10.0f;
+        layout.calendar_title = Rect(left, cal_top, right - 88.0f, cal_top + 22.0f);
         layout.calendar_next_year = Rect(right - 22.0f, cal_top, right, cal_top + 22.0f);
-        layout.calendar_next = Rect(right - 46.0f, cal_top, right - 24.0f, cal_top + 22.0f);
-        layout.calendar_prev = Rect(right - 70.0f, cal_top, right - 48.0f, cal_top + 22.0f);
-        layout.calendar_prev_year = Rect(right - 94.0f, cal_top, right - 72.0f, cal_top + 22.0f);
-        const float grid_top = cal_top + 22.0f + 2.0f + 16.0f;
-        layout.calendar_grid = Rect(left, grid_top, right, grid_top + static_cast<float>(rows) * kCalRowPitch);
-        layout.calendar = Rect(left, cal_top, right, layout.calendar_grid.bottom + 8.0f);
+        layout.calendar_next = Rect(right - 44.0f, cal_top, right - 22.0f, cal_top + 22.0f);
+        layout.calendar_prev = Rect(right - 66.0f, cal_top, right - 44.0f, cal_top + 22.0f);
+        layout.calendar_prev_year = Rect(right - 88.0f, cal_top, right - 66.0f, cal_top + 22.0f);
+        const float grid_top = cal_top + 22.0f + 4.0f + 18.0f + 2.0f;
+        layout.calendar_grid = Rect(left, grid_top, right, grid_top + static_cast<float>(rows) * kCalRowPitch - 2.0f);
+        layout.calendar = Rect(left, cal_top, right, layout.calendar_grid.bottom);
         content_bottom = layout.calendar.bottom;
     } else {
         layout.calendar = hidden;
@@ -1183,12 +1421,12 @@ PopupFilterLayout BuildPopupFilterLayout(bool custom_range, int calendar_rows) {
         layout.calendar_prev = hidden;
         layout.calendar_next = hidden;
         layout.calendar_next_year = hidden;
-        content_bottom += 12.0f;
     }
 
     // 底部：发丝线 + 匹配 N 条 + 完成
-    layout.footer_divider = Rect(left, content_bottom, right, content_bottom + 1.0f);
-    layout.done = Rect(right - 56.0f, content_bottom + 11.0f, right, content_bottom + 39.0f);
+    layout.footer_divider = Rect(left, content_bottom + 14.0f, right, content_bottom + 15.0f);
+    layout.done = Rect(right - 52.0f, layout.footer_divider.bottom + 12.0f, right,
+                       layout.footer_divider.bottom + 40.0f);
     layout.count_text = Rect(left, layout.done.top, layout.done.left - 8.0f, layout.done.bottom);
     layout.panel = Rect(panel_left, top, panel_right, layout.done.bottom + 14.0f);
     return layout;
@@ -1216,17 +1454,15 @@ size_t PopupFavoriteGroupMenuVisibleGroupCount(size_t group_count) {
 }
 
 PopupFavoriteGroupMenuLayout BuildPopupFavoriteGroupMenuLayout(size_t group_count) {
-    // Ink Ledger 菜单：宽 180，内边距 5，行高 30，分隔线上下各 4px；左边缘对齐分组按钮。
+    // Ink Ledger 菜单：CSS 固定 left 92 / top 124 / width 180，内边距 5，行高 30。
     constexpr float kPanelWidth = 180.0f;
     constexpr float kPanelPadding = 5.0f;
     constexpr float kRowHeight = 30.0f;
     constexpr float kDividerGap = 9.0f;
 
-    const auto tabs = BuildPopupTabsLayout(true);
-    const float left = std::min(tabs.favorite_group.left - 6.0f,
-                                static_cast<float>(kMetrics.width) - 12.0f - kPanelWidth);
+    const float left = 92.0f;
     const float right = left + kPanelWidth;
-    const float top = tabs.favorite_group.bottom + 6.0f;
+    const float top = 124.0f;
     const size_t visible_groups = PopupFavoriteGroupMenuVisibleGroupCount(group_count);
     const float groups_height = static_cast<float>(visible_groups) * kRowHeight;
     const float panel_height = kPanelPadding * 2.0f + kRowHeight + kDividerGap + groups_height + kDividerGap + kRowHeight;
@@ -1303,7 +1539,7 @@ std::vector<PopupCalendarWeekdayLabel> BuildPopupCalendarWeekdayLabels(const Pop
         const float left = layout.calendar_grid.left + static_cast<float>(i) * cell_width;
         labels.push_back(PopupCalendarWeekdayLabel{
             kWeekdays[i],
-            Rect(left, layout.calendar_grid.top - 16.0f, left + cell_width, layout.calendar_grid.top),
+            Rect(left, layout.calendar_grid.top - 20.0f, left + cell_width, layout.calendar_grid.top - 2.0f),
         });
     }
     return labels;
@@ -1320,22 +1556,24 @@ PopupCardLayout BuildPopupCardLayout(bool multi_select, float top) {
     layout.card = Rect(left, top, right, bottom);
     layout.stripe = Rect(left, top, left, top);
     const float media_center = left + 26.0f + shift;
-    layout.image_preview = Rect(media_center - 17.0f, top + 9.0f, media_center + 17.0f, top + 43.0f);
-    layout.file_icon = Rect(media_center - 13.0f, top + 13.0f, media_center + 13.0f, top + 39.0f);
-    layout.checkbox = Rect(left + 11.0f, top + 18.5f, left + 26.0f, top + 33.5f);
+    layout.image_preview = Rect(media_center - 17.0f, top + 11.0f, media_center + 17.0f, top + 45.0f);
+    layout.kind_badge = Rect(media_center - 15.0f, top + 11.0f, media_center + 15.0f, top + 41.0f);
+    layout.file_icon = Rect(media_center - 13.5f, top + 11.0f, media_center + 13.5f, top + 44.0f);
+    layout.checkbox = Rect(left + 13.0f, top + 18.0f, left + 28.0f, top + 33.0f);
     const float text_left = left + 52.0f + shift;
-    layout.time = Rect(right - 52.0f, top + 10.0f, right - 12.0f, top + 29.0f);
+    // CDP 实测五字符 HH:mm（Consolas 10.5px）宽 28.875px。
+    layout.time = Rect(right - 12.0f - 28.875f, top + 10.0f, right - 12.0f, top + 29.0f);
     layout.menu = Rect(right - 12.0f, top + 10.0f, right - 12.0f, top + 29.0f);
-    layout.expand = Rect(right - 34.0f, top + 31.0f, right - 12.0f, top + 51.0f);
+    layout.expand = Rect(right - 32.0f, top + 32.0f, right - 12.0f, top + 50.0f);
     layout.title = Rect(text_left, top + 10.0f, layout.time.left - 8.0f, top + 29.0f);
-    layout.meta = Rect(text_left, top + 31.0f, layout.expand.left - 6.0f, top + 47.0f);
+    layout.meta = Rect(text_left, top + 31.0f, layout.title.right, top + 47.0f);
     return layout;
 }
 
 UiRect PopupCardKindIconRect(const PopupCardLayout& card) {
-    const float center_x = (card.image_preview.left + card.image_preview.right) * 0.5f;
-    const float center_y = (card.image_preview.top + card.image_preview.bottom) * 0.5f;
-    return Rect(center_x - 8.0f, center_y - 8.0f, center_x + 8.0f, center_y + 8.0f);
+    const float center_x = (card.kind_badge.left + card.kind_badge.right) * 0.5f;
+    const float center_y = (card.kind_badge.top + card.kind_badge.bottom) * 0.5f;
+    return Rect(center_x - 7.0f, center_y - 7.0f, center_x + 7.0f, center_y + 7.0f);
 }
 
 float PopupExpandedCardExtraHeight(bool expanded) {
@@ -1783,7 +2021,7 @@ std::vector<PopupCalendarCell> BuildPopupCalendarCells(const PopupFilterLayout& 
     }
 
     const float cell_width = layout.calendar_grid.Width() / 7.0f;
-    constexpr float kRowPitch = 22.0f;
+    constexpr float kRowPitch = 26.0f;
     const int first_weekday = WeekdaySundayFirst(year, month, 1);
     const int days = DaysInMonth(year, month);
     cells.reserve(static_cast<size_t>(days));
@@ -1795,14 +2033,14 @@ std::vector<PopupCalendarCell> BuildPopupCalendarCells(const PopupFilterLayout& 
         const float left = layout.calendar_grid.left + col * cell_width;
         const float top = layout.calendar_grid.top + row * kRowPitch;
         cells.push_back(PopupCalendarCell{PopupCalendarDate{year, month, day},
-                                          Rect(left, top, left + cell_width, top + kRowPitch)});
+                                          Rect(left, top, left + cell_width, top + 24.0f)});
     }
     return cells;
 }
 
 std::vector<PopupCalendarRangeSegment> BuildPopupCalendarRangeSegments(
     const PopupFilterLayout& layout, int year, int month, const PopupDateRangeState& state) {
-    // 区间：每行一条连续的圆角色带，两端收在端点圆心外 11px（与端点墨点同径）。
+    // 区间：每行一条连续的圆角色带，两端收在端点圆心外 12px（与 24px 墨点同径）。
     std::vector<PopupCalendarRangeSegment> segments;
     if (!state.start || !state.end || *state.end < *state.start) {
         return segments;
@@ -1812,7 +2050,7 @@ std::vector<PopupCalendarRangeSegment> BuildPopupCalendarRangeSegments(
     UiRect current{};
     bool active = false;
     float current_top = -1.0f;
-    constexpr float kHalf = 11.0f;
+    constexpr float kHalf = 12.0f;
 
     auto flush = [&]() {
         if (active) {
@@ -1923,6 +2161,57 @@ void SelectPopupDateRangeDate(PopupDateRangeState& state, PopupCalendarDate date
         std::swap(state.start, state.end);
     }
     state.active_field = PopupDateRangeField::Start;
+}
+
+PopupCalendarDate PopupAddDays(PopupCalendarDate date, int days) {
+    // 民用日历 <-> 天数换算（Howard Hinnant 算法），避免时区/DST 干扰。
+    auto days_from_civil = [](int year, int month, int day) -> int64_t {
+        year -= month <= 2 ? 1 : 0;
+        const int era = (year >= 0 ? year : year - 399) / 400;
+        const unsigned year_of_era = static_cast<unsigned>(year - era * 400);
+        const unsigned day_of_year =
+            static_cast<unsigned>((153 * (month + (month > 2 ? -3 : 9)) + 2) / 5 + day - 1);
+        const unsigned day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+        return static_cast<int64_t>(era) * 146097 + static_cast<int64_t>(day_of_era) - 719468;
+    };
+    auto civil_from_days = [](int64_t z) -> PopupCalendarDate {
+        z += 719468;
+        const int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+        const unsigned day_of_era = static_cast<unsigned>(z - era * 146097);
+        const unsigned year_of_era =
+            (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146096) / 365;
+        int year = static_cast<int>(year_of_era) + static_cast<int>(era) * 400;
+        const unsigned day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+        const unsigned mp = (5 * day_of_year + 2) / 153;
+        const unsigned day = day_of_year - (153 * mp + 2) / 5 + 1;
+        const unsigned month = mp + (mp < 10 ? 3 : -9);
+        year += month <= 2 ? 1 : 0;
+        return PopupCalendarDate{year, static_cast<int>(month), static_cast<int>(day)};
+    };
+    return civil_from_days(days_from_civil(date.year, date.month, date.day) + days);
+}
+
+PopupPresetDateRange PopupPresetDateRangeFor(int preset_index, PopupCalendarDate today) {
+    PopupPresetDateRange range;
+    switch (preset_index) {
+    case 0: // 不限
+        break;
+    case 1: // 今天
+        range.start = today;
+        range.end = today;
+        break;
+    case 2: // 近 7 天（含今天）
+        range.start = PopupAddDays(today, -6);
+        range.end = today;
+        break;
+    case 3: // 近 30 天（含今天）
+        range.start = PopupAddDays(today, -29);
+        range.end = today;
+        break;
+    default: // 自定义：由日历决定，不动现有区间
+        break;
+    }
+    return range;
 }
 
 } // namespace ClipSoul

@@ -25,6 +25,45 @@ ClipSoul::CapturedContent TextContent(std::wstring text) {
 }
 } // namespace
 
+TEST_CASE(HistoryQueryCanShowFavoriteBookmarksInHistoryWithoutPhrases) {
+    ClipSoul::HistoryStore store;
+    store.Open(TempDbPath(L"history-with-bookmarks.db"));
+    REQUIRE(store.Add(TextContent(L"normal history")));
+    REQUIRE(store.Add(TextContent(L"bookmarked history")));
+    const auto favorite_id = store.Recent(10, L"").front().id;
+    REQUIRE(store.SetFavorite(favorite_id, true));
+    REQUIRE(store.SetPinned(favorite_id, true));
+    REQUIRE(store.AddFavoritePhrase(L"saved phrase"));
+
+    ClipSoul::HistoryQuery query;
+    query.include_favorites = true;
+    auto items = store.Query(query);
+    REQUIRE_EQ(items.size(), static_cast<size_t>(2));
+    REQUIRE_EQ(items.front().id, favorite_id);
+    REQUIRE(items.front().is_favorite);
+    REQUIRE(items.front().is_pinned);
+    REQUIRE(!items.front().is_phrase);
+    REQUIRE_EQ(store.Recent(10, L"").size(), static_cast<size_t>(1));
+    REQUIRE_EQ(store.Count(query), 2);
+
+    query.text = L"bookmarked";
+    REQUIRE_EQ(store.Count(query), 1);
+    query.text = L"not present";
+    REQUIRE_EQ(store.Count(query), 0);
+    query.text = L"bookmarked";
+    REQUIRE_EQ(store.Query(query).size(), static_cast<size_t>(1));
+    query.text.clear();
+    query.favorites_only = true;
+    REQUIRE_EQ(store.Count(query), 2);
+    REQUIRE_EQ(store.Query(query).size(), static_cast<size_t>(2));
+    store.Clear();
+    query.favorites_only = false;
+    REQUIRE_EQ(store.Count(query), 1);
+    items = store.Query(query);
+    REQUIRE_EQ(items.size(), static_cast<size_t>(1));
+    REQUIRE_EQ(items.front().id, favorite_id);
+}
+
 TEST_CASE(HistoryStoreDefaultsToSixtyItems) {
     ClipSoul::HistoryStore store;
     store.Open(TempDbPath(L"default-limit.db"));

@@ -29,32 +29,32 @@ struct UiOffset {
 struct PopupMetricsData {
     int width = 340;
     int height = 560;
-    int margin = 16;
-    int header_height = 40;
-    int search_height = 44;
-    int toolbar_height = 30;
-    int tab_height = 34;
-    int card_height = 72;
-    int card_gap = 8;
-    int corner_radius = 18;
+    int margin = 18;
+    int header_height = 44;
+    int search_height = 40;
+    int toolbar_height = 28;
+    int tab_height = 40;
+    int card_height = 60;
+    int card_gap = 0;
+    int corner_radius = 14;
     int header_button_size = 28;
     int toolbar_icon_size = 16;
     float glass_tint_opacity = 1.0f;
 };
 
 struct PopupDesignTokenData {
-    int window_padding = 16;
+    int window_padding = 18;
     int section_gap = 16;
     int control_gap = 12;
-    int card_gap = 8;
-    int search_to_toolbar_gap = 12;
-    int toolbar_to_tab_gap = 6;
-    int tab_to_list_gap = 12;
-    int popup_corner_radius = 18;
-    int control_radius = 10;
-    int card_radius = 12;
-    int search_height = 44;
-    int card_height = 72;
+    int card_gap = 0;
+    int search_to_toolbar_gap = 0;
+    int toolbar_to_tab_gap = 0;
+    int tab_to_list_gap = 2;
+    int popup_corner_radius = 14;
+    int control_radius = 7;
+    int card_radius = 9;
+    int search_height = 40;
+    int card_height = 60;
     int title_font_size = 18;
     int section_title_font_size = 14;
     int body_font_size = 13;
@@ -97,6 +97,7 @@ struct PopupCardLayout {
     UiRect time;
     UiRect menu;
     UiRect expand;
+    UiRect kind_badge;
 };
 
 struct PopupTabsLayout {
@@ -215,6 +216,33 @@ struct PopupDateRangeState {
     std::optional<PopupCalendarDate> start;
     std::optional<PopupCalendarDate> end;
     PopupDateRangeField active_field = PopupDateRangeField::Start;
+};
+
+// Ink Ledger 动效：所有进度按真实时间推进，不按固定步长累加。
+enum class PopupMotionKind {
+    Panel,
+    ViewSwitch,
+    Arrow,
+    MultiSelect,
+    Hover,
+};
+
+struct PopupSpringState {
+    float position = 0.0f;
+    float velocity = 0.0f;
+};
+
+// 列表分区：置顶项在前（数据层已按 is_pinned DESC 排序），分区标题按需插入。
+struct PopupSectionPlan {
+    size_t pinned_count = 0;
+    size_t recent_count = 0;
+    bool show_pinned_header = false;
+    bool show_recent_header = false;
+};
+
+struct PopupPresetDateRange {
+    std::optional<PopupCalendarDate> start;
+    std::optional<PopupCalendarDate> end;
 };
 
 struct PopupThemePalette {
@@ -355,6 +383,11 @@ int PopupScrollOffsetAfterWheel(int item_count, int current_offset, short wheel_
 int PopupScrollOffsetAfterWheelForHeight(int item_count, int current_offset, short wheel_delta, int logical_height);
 float PopupScrollOffsetAfterWheelForHeight(int item_count, float current_offset, short wheel_delta, int logical_height);
 int ClampPopupSelectedIndex(int item_count, int selected_index);
+// Index of the row covering `scroll_offset` (the last row whose top is <= the offset).
+// Returns 0 for an empty list and clamps into [0, item_count-1].
+int PopupFirstVisibleRowIndex(const std::vector<float>& row_tops, float scroll_offset);
+// Default highlight when the popup opens: the first entry of the "recent" section.
+int PopupDefaultSelectedIndex(const PopupSectionPlan& plan);
 int PopupNextSelectedIndex(int item_count, int selected_index);
 PopupContinuousPasteStep PopupContinuousPasteSelectionStep(int item_count, int selected_index);
 int PopupScrollOffsetToRevealSelection(int item_count, int current_offset, int selected_index);
@@ -382,6 +415,9 @@ bool PopupScrollToTopButtonVisible(float scroll_offset);
 UiRect PopupScrollToTopButtonRectForSize(int logical_width, int logical_height);
 UiRect PopupListClipRectForHeight(int logical_width, int logical_height);
 float PopupMotionProgress(float raw_progress);
+int PopupMotionDurationMs(PopupMotionKind kind);
+float PopupTimedMotionProgress(double elapsed_ms, double duration_ms, bool animations_enabled);
+PopupSpringState PopupSpringStep(float position, float velocity, float target, float dt_seconds);
 float PopupMotionEnterOffset(float progress, float max_offset);
 float PopupViewSwitchListOffset(int direction, float raw_progress, float max_offset);
 UiOffset PopupMotionEnterOffsetFromTrigger(const UiRect& trigger, const UiRect& panel,
@@ -393,6 +429,9 @@ UiRect PopupTabIndicatorRectForMotion(const UiRect& from, const UiRect& to, floa
 float PopupMultiSelectToolbarOffset(float progress, bool entering);
 float PopupMultiSelectCheckboxOffset(float progress, bool entering);
 float PopupMultiSelectCheckboxOpacity(float progress, bool entering);
+float PopupCubicBezierEase(float x1, float y1, float x2, float y2, float progress);
+// 固定窗口按钮：未固定 0°，固定后 -40°，弹性回弹过渡（预览 #pinWin.on svg）。
+float PopupPinRotationDegrees(bool pinned, float progress);
 float PopupToggleKnobPosition(bool from_active, bool to_active, float progress);
 bool PopupPromptShouldUseSlideAnimation();
 bool PopupPromptShouldUseBlendAnimation();
@@ -401,11 +440,35 @@ int PopupPromptEntranceOffsetPixels();
 int PopupPromptEntranceStepCount();
 int PopupPromptEntranceTimerIntervalMs();
 float PopupMotionEnterOpacity(float progress);
+// 窗口呼出/收起：与预览 .win.enter / .win.leave 一一对应。
+// winIn 170ms cubic-bezier(.2,.8,.2,1)：opacity 0→1，translateY 8px→0，scale .985→1。
+// winOut 120ms cubic-bezier(.4,0,1,1)：opacity 1→0，translateY 0→4px，scale 1→.99。
+struct PopupWindowMotionFrame {
+    float opacity = 1.0f;
+    float translate_y = 0.0f;
+    float scale = 1.0f;
+};
+PopupWindowMotionFrame PopupWindowEnterFrame(float raw_progress);
+PopupWindowMotionFrame PopupWindowLeaveFrame(float raw_progress);
+// 行/分区入场（rowRise 220ms cubic-bezier(.2,.8,.2,1)，延迟 40ms + i*18ms，i 上限 9，1 基索引）。
+struct PopupRowEntranceFrame {
+    float opacity = 1.0f;
+    float translate_y = 0.0f;
+};
+PopupRowEntranceFrame PopupRowEntranceFrameAt(double elapsed_ms, int row_number);
+double PopupRowEntranceTotalMs();
+// 回到顶部：预览里是 list.scrollTo({top:0, behavior:'smooth'})，
+// 浏览器默认约 300ms 的缓入缓出。这里用同一条 progress 驱动滚动位置。
+float PopupSmoothScrollProgress(float raw_progress);
+float PopupSmoothScrollOffset(float from_offset, float to_offset, float raw_progress);
 float PopupExpandedCardExtraHeightForMeasuredDetail(float measured_detail_height);
 float PopupExpandedImageCardExtraHeightForMeasuredDetail(float measured_detail_height);
 float PopupExpandedCardExtraHeightForText(std::wstring_view text);
 float PopupExpandedCardExtraHeightForText(std::wstring_view text, float detail_width);
 PopupThemePalette ResolvePopupThemePalette(int theme_mode, bool system_dark);
+// Blend two palettes; used to cross-fade the window colours while the theme switch animates
+// (`t` is clamped to [0,1]).
+PopupThemePalette LerpPopupThemePalette(const PopupThemePalette& from, const PopupThemePalette& to, float t);
 WindowMaterialPolicy ResolveWindowMaterialPolicy();
 uint32_t PopupDarkUiIconTintColor(const PopupThemePalette& palette);
 uint32_t PopupToolbarLabelColor(const PopupThemePalette& palette, bool active, bool danger);
@@ -421,6 +484,7 @@ bool SettingsLimitEditShouldSelectAllOnLoad();
 std::wstring_view PopupSearchPlaceholderText();
 std::wstring_view PopupSearchDisplayText(std::wstring_view query);
 std::wstring PopupEmptyMessage(bool favorites_view, std::wstring_view active_favorite_group);
+std::wstring PopupEmptyMessage(bool favorites_view, std::wstring_view active_favorite_group, bool has_filters);
 std::wstring PopupNotePreviewText(std::wstring_view note);
 bool PopupFileCanUseImagePreview(std::wstring_view path);
 bool PopupSearchCaretVisible(bool focused, bool blink_on);
@@ -478,6 +542,11 @@ float PopupFooterHeight();
 float PopupListBottomForHeight(int logical_height);
 float PopupSectionHeaderHeight();
 UiRect PopupFooterRectForSize(int logical_width, int logical_height);
+PopupSectionPlan PopupSectionPlanFor(size_t item_count, size_t pinned_count);
+float PopupSectionedItemTop(size_t item_index, const PopupSectionPlan& plan, float item_height, float header_height);
+float PopupSectionedListHeight(const PopupSectionPlan& plan, float item_height, float header_height);
+PopupCalendarDate PopupAddDays(PopupCalendarDate date, int days);
+PopupPresetDateRange PopupPresetDateRangeFor(int preset_index, PopupCalendarDate today);
 PopupHeaderLayout BuildPopupHeaderLayout();
 PopupHeaderLayout BuildPopupHeaderLayoutForWidth(int logical_width);
 PopupSearchLayout BuildPopupSearchLayout();
@@ -492,6 +561,8 @@ PopupTabsLayout BuildPopupTabsLayoutForWidth(bool favorites_active, int logical_
 UiRect PopupFavoriteGroupIconRect(const PopupTabsLayout& tabs);
 PopupFilterLayout BuildPopupFilterLayout();
 PopupFilterLayout BuildPopupFilterLayout(bool custom_range, int calendar_rows);
+// logical_width 是主窗口逻辑宽度；面板左右各留 12px。
+PopupFilterLayout BuildPopupFilterLayout(bool custom_range, int calendar_rows, int logical_width);
 int PopupCalendarRowCount(int year, int month);
 int PopupFilterPresetIndex(PopupFilterTarget target);
 size_t PopupFavoriteGroupMenuVisibleGroupCount(size_t group_count);

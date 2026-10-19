@@ -3,6 +3,7 @@
 #include "ClipSoul/PopupLayout.h"
 
 #include <cmath>
+#include <iterator>
 #include <string>
 
 namespace {
@@ -71,16 +72,16 @@ TEST_CASE(PopupWindowEdgeUsesDwmCornersAndEdgeAlignedStroke) {
 TEST_CASE(PopupDesignTokensLockLayoutTypographyIconAndMotionContracts) {
     const auto tokens = ClipSoul::PopupDesignTokens();
 
-    REQUIRE_EQ(tokens.window_padding, 16);
+    REQUIRE_EQ(tokens.window_padding, 18);
     REQUIRE_EQ(tokens.section_gap, 16);
     REQUIRE_EQ(tokens.control_gap, 12);
-    REQUIRE_EQ(tokens.card_gap, 8);
-    REQUIRE_EQ(tokens.search_to_toolbar_gap, 12);
-    REQUIRE_EQ(tokens.toolbar_to_tab_gap, 6);
-    REQUIRE_EQ(tokens.tab_to_list_gap, 12);
-    REQUIRE_EQ(tokens.popup_corner_radius, 18);
-    REQUIRE_EQ(tokens.control_radius, 10);
-    REQUIRE_EQ(tokens.card_radius, 12);
+    REQUIRE_EQ(tokens.card_gap, 0);
+    REQUIRE_EQ(tokens.search_to_toolbar_gap, 0);
+    REQUIRE_EQ(tokens.toolbar_to_tab_gap, 0);
+    REQUIRE_EQ(tokens.tab_to_list_gap, 2);
+    REQUIRE_EQ(tokens.popup_corner_radius, 14);
+    REQUIRE_EQ(tokens.control_radius, 7);
+    REQUIRE_EQ(tokens.card_radius, 9);
     REQUIRE_EQ(tokens.title_font_size, 18);
     REQUIRE_EQ(tokens.section_title_font_size, 14);
     REQUIRE_EQ(tokens.body_font_size, 13);
@@ -94,8 +95,10 @@ TEST_CASE(PopupDesignTokensLockLayoutTypographyIconAndMotionContracts) {
     REQUIRE_EQ(tokens.tab_motion_ms, 120);
     REQUIRE_EQ(tokens.hover_motion_ms, 80);
     REQUIRE_EQ(tokens.pressed_motion_ms, 60);
-    REQUIRE_EQ(ClipSoul::ScalePopupMetricForDpi(tokens.search_height, 144), 66);
-    REQUIRE_EQ(ClipSoul::ScalePopupMetricForDpi(tokens.card_height, 144), 108);
+    REQUIRE_EQ(tokens.search_height, ClipSoul::PopupMetrics().search_height);
+    REQUIRE_EQ(tokens.card_height, ClipSoul::PopupMetrics().card_height);
+    REQUIRE_EQ(ClipSoul::ScalePopupMetricForDpi(tokens.search_height, 144), 60);
+    REQUIRE_EQ(ClipSoul::ScalePopupMetricForDpi(tokens.card_height, 144), 90);
 }
 
 TEST_CASE(PopupThemePaletteUsesQuietPaperEfficiencyColors) {
@@ -238,7 +241,7 @@ TEST_CASE(PopupDesignSystemLayoutPrioritizesSearchAndCompactRows) {
     REQUIRE_EQ(metrics.margin, 18);
     REQUIRE_EQ(metrics.search_height, 40);
     REQUIRE_EQ(metrics.tab_height, 40);
-    REQUIRE_EQ(metrics.card_height, 58);
+    REQUIRE_EQ(metrics.card_height, 60);
     REQUIRE_EQ(metrics.card_gap, 0);
     REQUIRE_EQ(metrics.toolbar_icon_size, 16);
     REQUIRE(search.box.Height() == 40.0f);
@@ -246,7 +249,7 @@ TEST_CASE(PopupDesignSystemLayoutPrioritizesSearchAndCompactRows) {
     REQUIRE(search.box.bottom <= tabs.history.top);
     REQUIRE(tabs.active_indicator.Height() == 1.5f);
     REQUIRE(tabs.divider.bottom <= ClipSoul::PopupListTop());
-    REQUIRE(card.card.Height() == 58.0f);
+    REQUIRE(card.card.Height() == 60.0f);
     REQUIRE(card.stripe.Width() == 0.0f);
     // 左对齐：搜索图标、标签、行内正文起点共用内容左线
     REQUIRE_EQ(search.icon.left, static_cast<float>(metrics.margin));
@@ -260,6 +263,12 @@ TEST_CASE(PopupTopRhythmKeepsToolbarTabsAndListCompact) {
     const auto toolbar = ClipSoul::BuildPopupToolbarLayout(false);
     const auto tabs = ClipSoul::BuildPopupTabsLayout(false);
 
+    REQUIRE_EQ(metrics.height, 560);
+    REQUIRE_EQ(metrics.header_height, 44);
+    RequireNear(ClipSoul::PopupSearchTop(), 46.0f);
+    RequireNear(ClipSoul::PopupTabsTop(), 86.0f);
+    RequireNear(ClipSoul::PopupListTop(), 128.0f);
+    RequireNear(ClipSoul::PopupSectionHeaderHeight(), 27.0f);
     RequireNear(ClipSoul::PopupTabsTop(), ClipSoul::PopupSearchTop() + static_cast<float>(metrics.search_height));
     REQUIRE_EQ(metrics.tab_height, 40);
     RequireNear(tabs.divider.bottom, ClipSoul::PopupTabsTop() + static_cast<float>(metrics.tab_height) + 0.5f);
@@ -292,11 +301,12 @@ TEST_CASE(PopupIconSlotsUseOutlinedIdleAndFilledActiveStates) {
     REQUIRE_EQ(ClipSoul::PopupFavoriteFolderIconSlotForGroup(true), ClipSoul::PopupFavoriteFolderIconSlot::Filled);
 }
 
-TEST_CASE(PopupEmptyMessageShowsSelectedFavoriteGroupName) {
-    REQUIRE_EQ(ClipSoul::PopupEmptyMessage(false, L""), std::wstring(L"\u6682\u65e0\u5386\u53f2\u8bb0\u5f55"));
-    REQUIRE_EQ(ClipSoul::PopupEmptyMessage(true, L""), std::wstring(L"\u6536\u85cf\u5939\u6682\u65e0\u5185\u5bb9"));
-    REQUIRE_EQ(ClipSoul::PopupEmptyMessage(true, L"\u5de5\u4f5c"),
-               std::wstring(L"\u5de5\u4f5c\u6682\u65e0\u5185\u5bb9"));
+TEST_CASE(PopupEmptyMessageMatchesPrototypeForHistoryAndFavorites) {
+    REQUIRE_EQ(ClipSoul::PopupEmptyMessage(false, L""), std::wstring(L"复制点什么，它会出现在这里"));
+    REQUIRE_EQ(ClipSoul::PopupEmptyMessage(true, L""), std::wstring(L"还没有收藏，右键条目即可收藏"));
+    REQUIRE_EQ(ClipSoul::PopupEmptyMessage(true, L"工作"), std::wstring(L"还没有收藏，右键条目即可收藏"));
+    REQUIRE_EQ(ClipSoul::PopupEmptyMessage(false, L"", true), std::wstring(L"没有匹配的记录"));
+    REQUIRE_EQ(ClipSoul::PopupEmptyMessage(true, L"工作", true), std::wstring(L"没有匹配的记录"));
 }
 
 TEST_CASE(PopupNotePreviewShowsNoteSnippetInsteadOfGenericLabel) {
@@ -403,7 +413,7 @@ TEST_CASE(PopupSearchFieldHasVisiblePlaceholderAndTextArea) {
     const auto metrics = ClipSoul::PopupMetrics();
     const auto search = ClipSoul::BuildPopupSearchLayout();
 
-    REQUIRE_EQ(std::wstring(ClipSoul::PopupSearchPlaceholderText()), std::wstring(L"\u641c\u7d22\u5386\u53f2\u8bb0\u5f55..."));
+    REQUIRE_EQ(std::wstring(ClipSoul::PopupSearchPlaceholderText()), std::wstring(L"搜索剪贴板\u2026"));
     RequireInsidePanel(search.box);
     REQUIRE(search.text.left > search.icon.right + 8.0f);
     REQUIRE(search.text.right <= static_cast<float>(metrics.width - metrics.margin - 12));
@@ -437,8 +447,11 @@ TEST_CASE(PopupSearchClearButtonLayoutAndHitTest) {
     REQUIRE(layout.clear_button.bottom <= layout.box.bottom);
 
     // clear_button 尺寸合理
-    REQUIRE_EQ(layout.clear_button.Width(), 16.0f);
-    REQUIRE_EQ(layout.clear_button.Height(), 16.0f);
+    REQUIRE_EQ(layout.clear_button.Width(), 20.0f);
+    REQUIRE_EQ(layout.clear_button.Height(), 20.0f);
+    RequireNear(layout.clear_button.right, layout.box.right);
+    RequireNear(layout.clear_button.top, layout.box.top + 10.0f);
+    RequireNear(layout.clear_button.bottom, layout.box.bottom - 10.0f);
 
     // clear_button 在 text 右侧
     REQUIRE(layout.clear_button.left >= layout.text.right);
@@ -480,7 +493,9 @@ TEST_CASE(PopupSearchClearButtonAdaptsToWindowWidth) {
     const int wider = metrics.width + 100;
     const auto wider_layout = ClipSoul::BuildPopupSearchLayoutForWidth(wider);
     REQUIRE(wider_layout.clear_button.right <= wider_layout.box.right);
-    REQUIRE_EQ(wider_layout.clear_button.Width(), 16.0f);
+    REQUIRE_EQ(wider_layout.clear_button.Width(), 20.0f);
+    REQUIRE_EQ(wider_layout.clear_button.Height(), 20.0f);
+    REQUIRE_EQ(wider_layout.clear_button.right, wider_layout.box.right);
 
     // 最小宽度
     const auto min_layout = ClipSoul::BuildPopupSearchLayoutForWidth(1);
@@ -489,7 +504,7 @@ TEST_CASE(PopupSearchClearButtonAdaptsToWindowWidth) {
 
 TEST_CASE(PopupSearchDisplayTextShowsQueryOrPlaceholder) {
     REQUIRE_EQ(std::wstring(ClipSoul::PopupSearchDisplayText(L"")),
-               std::wstring(L"\u641c\u7d22\u5386\u53f2\u8bb0\u5f55..."));
+               std::wstring(L"搜索剪贴板\u2026"));
     REQUIRE_EQ(std::wstring(ClipSoul::PopupSearchDisplayText(L"alpha")), std::wstring(L"alpha"));
     REQUIRE(ClipSoul::PopupSearchCaretVisible(true, true));
     REQUIRE(!ClipSoul::PopupSearchCaretVisible(true, false));
@@ -501,7 +516,7 @@ TEST_CASE(PopupSearchDisplayTextShowsQueryOrPlaceholder) {
     REQUIRE_EQ(ClipSoul::PopupSearchCompositionDisplayText(L"", true, L"abc"), std::wstring(L"abc"));
     REQUIRE_EQ(ClipSoul::PopupSearchCompositionDisplayText(L"hi", true, L"bc"), std::wstring(L"hibc"));
     REQUIRE_EQ(std::wstring(ClipSoul::PopupSearchCompositionDisplayText(L"", false, L"")),
-               std::wstring(L"搜索历史记录..."));
+               std::wstring(L"搜索剪贴板\u2026"));
     REQUIRE_EQ(std::wstring(ClipSoul::PopupSearchCompositionDisplayText(L"test", false, L"")),
                std::wstring(L"test"));
     REQUIRE(ClipSoul::PopupSearchCompositionTextColor(true, L""));
@@ -537,7 +552,8 @@ TEST_CASE(PopupSearchDisplayTextShowsQueryOrPlaceholder) {
     REQUIRE(ClipSoul::PopupShouldActivateForSearchFocus(true, true));
     REQUIRE(!ClipSoul::PopupShouldActivateForSearchFocus(false, true));
     REQUIRE(!ClipSoul::PopupShouldActivateForSearchFocus(true, false));
-    REQUIRE(!ClipSoul::PopupShouldAutoFocusSearchOnShow(true));
+    // 预览启动即 q.focus()：有原生搜索框就自动聚焦（墨线随之展开）。
+    REQUIRE(ClipSoul::PopupShouldAutoFocusSearchOnShow(true));
     REQUIRE(!ClipSoul::PopupShouldAutoFocusSearchOnShow(false));
     REQUIRE(ClipSoul::PopupWindowShouldUseNoActivateStyle());
     REQUIRE(!ClipSoul::PopupWindowShouldUseNoActivateStyle(true));
@@ -565,7 +581,8 @@ TEST_CASE(PopupSearchDisplayTextShowsQueryOrPlaceholder) {
     REQUIRE(ClipSoul::PopupShouldUseCurrentWindowWidthForLayout(false, true, 460, 340));
     REQUIRE(ClipSoul::PopupShouldUseCurrentWindowWidthForLayout(true, false, 460, 340));
     REQUIRE(!ClipSoul::PopupShouldUseCurrentWindowWidthForLayout(true, false, 340, 340));
-    REQUIRE(!ClipSoul::PopupShouldAutoFocusSearchOnShow(true));
+    // 预览启动即 q.focus()：有原生搜索框就自动聚焦（墨线随之展开）。
+    REQUIRE(ClipSoul::PopupShouldAutoFocusSearchOnShow(true));
     REQUIRE(!ClipSoul::PopupShouldAutoFocusSearchOnShow(false));
     REQUIRE(ClipSoul::PopupWindowShouldUseNoActivateStyle());
     REQUIRE(ClipSoul::PopupNativeSearchCueBannerShowsWhenFocused());
@@ -661,6 +678,37 @@ TEST_CASE(PopupTabsButtonsAdaptToCurrentWindowWidth) {
     REQUIRE_EQ(resized_tabs.divider.right, static_cast<float>(resized_width));
 }
 
+TEST_CASE(PopupFavoriteControlsReserveSeparateClickTargetsAtSupportedWidths) {
+    const int widths[] = {300, 340, 640};
+    const float group_widths[] = {32.0f, 72.0f, 86.0f};
+    for (int i = 0; i < 3; ++i) {
+        const auto tabs = ClipSoul::BuildPopupTabsLayoutForWidth(true, widths[i]);
+        const auto tools = ClipSoul::BuildPopupToolbarLayoutForWidth(false, widths[i]);
+        const ClipSoul::UiRect targets[] = {tabs.history, tabs.favorites, tabs.favorite_group,
+            tabs.add_favorite_phrase, tools.filter, tools.multi_select, tools.clear_all};
+        RequireNear(tabs.history.Width(), 46.0f);
+        RequireNear(tabs.favorites.left - tabs.history.right, 14.0f);
+        RequireNear(tabs.favorite_group.Width(), group_widths[i]);
+        RequireNear(tabs.add_favorite_phrase.Width(), 28.0f);
+        RequireNear(tabs.add_favorite_phrase.Height(), 28.0f);
+        REQUIRE(tools.filter.left - tabs.add_favorite_phrase.right >= 6.0f);
+        RequireNear(tools.clear_all.right - tools.filter.left, 88.0f);
+        RequireNear(tabs.active_indicator.Width(), 26.0f);
+        for (size_t target = 0; target < std::size(targets); ++target) {
+            REQUIRE(targets[target].Width() > 0.0f);
+            REQUIRE(targets[target].Height() > 0.0f);
+            REQUIRE(targets[target].left >= 18.0f);
+            REQUIRE(targets[target].right <= static_cast<float>(widths[i] - 10));
+            for (size_t other = target + 1; other < std::size(targets); ++other) {
+                REQUIRE(!ClipSoul::RectsOverlap(targets[target], targets[other]));
+            }
+        }
+        const auto icon = ClipSoul::PopupFavoriteGroupIconRect(tabs);
+        REQUIRE(icon.left >= tabs.favorite_group.left);
+        REQUIRE(icon.right <= tabs.favorite_group.right);
+    }
+}
+
 TEST_CASE(PopupMultiSelectToolbarButtonsFitCompactPanel) {
     const auto metrics = ClipSoul::PopupMetrics();
     const auto layout = ClipSoul::BuildPopupToolbarLayout(true);
@@ -680,6 +728,71 @@ TEST_CASE(PopupMultiSelectToolbarButtonsFitCompactPanel) {
     REQUIRE_EQ(layout.paste_selected.right, static_cast<float>(metrics.width - 10));
 }
 
+TEST_CASE(PopupCardGeometryMatchesCssForNormalAndMultiSelectRows) {
+    constexpr float top = 128.0f;
+    for (const bool multi : {false, true}) {
+        const auto card = ClipSoul::BuildPopupCardLayout(multi, top);
+        const float media_left = card.card.left + (multi ? 28.0f : 0.0f);
+        RequireNear(card.card.Height(), 60.0f);
+        RequireNear(card.title.left - media_left, 52.0f);
+        RequireNear(card.title.top - top, 10.0f);
+        RequireNear(card.title.Height(), 19.0f);
+        RequireNear(card.meta.top - top, 31.0f);
+        RequireNear(card.meta.Height(), 16.0f);
+        RequireNear(card.meta.top - card.title.bottom, 2.0f);
+        RequireNear(card.card.bottom - card.meta.bottom, 13.0f);
+        RequireNear(card.card.bottom - card.expand.bottom, 10.0f);
+        RequireNear(card.expand.top - card.time.bottom, 3.0f);
+        RequireNear(card.expand.bottom - card.time.top, 40.0f);
+        RequireNear(card.time.Width(), 28.875f);
+        RequireNear(card.time.left, 291.125f);
+        RequireNear(card.title.right, 283.125f);
+        RequireNear(card.title.Width(), multi ? 195.125f : 223.125f);
+        RequireNear(card.meta.right, card.title.right);
+        RequireNear(card.image_preview.left - media_left, 9.0f);
+        RequireNear(card.image_preview.top - top, 11.0f);
+        RequireNear(card.image_preview.Width(), 34.0f);
+        RequireNear(card.image_preview.Height(), 34.0f);
+        RequireNear(card.kind_badge.left - media_left, 11.0f);
+        RequireNear(card.kind_badge.top - top, 11.0f);
+        RequireNear(card.kind_badge.Width(), 30.0f);
+        RequireNear(card.kind_badge.Height(), 30.0f);
+        RequireNear(card.file_icon.top - top, 11.0f);
+        RequireNear(card.file_icon.Width(), 27.0f);
+        RequireNear(card.file_icon.Height(), 33.0f);
+        RequireNear(card.expand.top - top, 32.0f);
+        RequireNear(card.expand.Width(), 20.0f);
+        RequireNear(card.expand.Height(), 18.0f);
+        REQUIRE(!ClipSoul::RectsOverlap(card.meta, card.expand));
+        REQUIRE(card.image_preview.right <= card.title.left);
+        if (multi) {
+            RequireNear(card.checkbox.right, media_left);
+            RequireNear(card.checkbox.top - top, 18.0f);
+            RequireNear(card.checkbox.Width(), 15.0f);
+        }
+    }
+}
+
+TEST_CASE(PopupSectionedRowsMatchCdpMeasuredPositionsWithoutAccumulatingDrift) {
+    // geometry-light.json: first two pinned rows y=155/215, first recent row y=302.
+    const auto plan = ClipSoul::PopupSectionPlanFor(11, 2);
+    const float measured_tops[] = {155.0f, 215.0f, 302.0f};
+    for (size_t i = 0; i < std::size(measured_tops); ++i) {
+        const float top = ClipSoul::PopupListTop() + ClipSoul::PopupSectionedItemTop(
+            i, plan, static_cast<float>(ClipSoul::PopupMetrics().card_height),
+            ClipSoul::PopupSectionHeaderHeight());
+        const auto card = ClipSoul::BuildPopupCardLayout(false, top);
+        RequireNear(card.card.top, measured_tops[i]);
+        RequireNear(card.card.bottom, measured_tops[i] + 60.0f);
+        RequireNear(card.title.left, 60.0f);
+        RequireNear(card.title.top, measured_tops[i] + 10.0f);
+        RequireNear(card.title.right, 283.125f);
+        RequireNear(card.time.left, 291.125f);
+        RequireNear(card.expand.left, 300.0f);
+        RequireNear(card.expand.top, measured_tops[i] + 32.0f);
+    }
+}
+
 TEST_CASE(PopupCardTextReservesTimeAndMenuArea) {
     const auto normal = ClipSoul::BuildPopupCardLayout(false, 168.0f);
     const auto multi = ClipSoul::BuildPopupCardLayout(true, 168.0f);
@@ -687,7 +800,10 @@ TEST_CASE(PopupCardTextReservesTimeAndMenuArea) {
     REQUIRE(normal.title.right <= normal.time.left - 8.0f);
     REQUIRE(normal.time.right <= normal.menu.left);
     REQUIRE(normal.title.left >= normal.stripe.right + 10.0f);
-    REQUIRE(normal.title.Width() >= 154.0f);
+    RequireNear(normal.title.Width(), 223.125f);
+    RequireNear(multi.title.Width(), 195.125f);
+    RequireNear(normal.time.Width(), 28.875f);
+    RequireNear(normal.title.right, normal.time.left - 8.0f);
     REQUIRE(multi.title.left > normal.title.left);
     REQUIRE(multi.title.right == normal.title.right);
 }
@@ -700,8 +816,8 @@ TEST_CASE(PopupCardMediaRectsSupportImagePreviewAndFileIcon) {
     REQUIRE_EQ(normal.image_preview.Height(), 34.0f);
     REQUIRE(normal.image_preview.left > normal.card.left);
     REQUIRE(normal.title.left >= normal.image_preview.right + 6.0f);
-    REQUIRE_EQ(normal.file_icon.Width(), 26.0f);
-    REQUIRE_EQ(normal.file_icon.Height(), 26.0f);
+    REQUIRE_EQ(normal.file_icon.Width(), 27.0f);
+    REQUIRE_EQ(normal.file_icon.Height(), 33.0f);
     REQUIRE(normal.file_icon.left > normal.image_preview.left);
     REQUIRE(normal.file_icon.right < normal.image_preview.right);
     REQUIRE(multi.image_preview.left > normal.image_preview.left);
@@ -712,17 +828,20 @@ TEST_CASE(PopupCardMediaRectsSupportImagePreviewAndFileIcon) {
 TEST_CASE(PopupCardKindIconRectIsVisuallyCenteredInsideMediaSlot) {
     const auto card = ClipSoul::BuildPopupCardLayout(false, 168.0f);
     const auto icon = ClipSoul::PopupCardKindIconRect(card);
+    const auto& badge = card.kind_badge;
     const auto center_x = [](const ClipSoul::UiRect& rect) { return (rect.left + rect.right) * 0.5f; };
     const auto center_y = [](const ClipSoul::UiRect& rect) { return (rect.top + rect.bottom) * 0.5f; };
 
-    REQUIRE(icon.left > card.image_preview.left);
-    REQUIRE(icon.top > card.image_preview.top);
-    REQUIRE(icon.right < card.image_preview.right);
-    REQUIRE(icon.bottom < card.image_preview.bottom);
-    REQUIRE_EQ(icon.Width(), 16.0f);
-    REQUIRE_EQ(icon.Height(), 16.0f);
-    REQUIRE(std::abs(center_x(icon) - center_x(card.image_preview)) <= 0.01f);
-    REQUIRE(std::abs(center_y(icon) - center_y(card.image_preview)) <= 0.01f);
+    REQUIRE_EQ(badge.Width(), 30.0f);
+    REQUIRE_EQ(badge.Height(), 30.0f);
+    REQUIRE(icon.left > badge.left);
+    REQUIRE(icon.top > badge.top);
+    REQUIRE(icon.right < badge.right);
+    REQUIRE(icon.bottom < badge.bottom);
+    REQUIRE_EQ(icon.Width(), 14.0f);
+    REQUIRE_EQ(icon.Height(), 14.0f);
+    RequireNear(center_x(icon), center_x(badge));
+    RequireNear(center_y(icon), center_y(badge));
 }
 
 TEST_CASE(PopupFavoriteGroupIconRectIsCenteredInButton) {
@@ -767,13 +886,13 @@ TEST_CASE(PopupWindowHeightStaysFixedForEmptyFavorites) {
     REQUIRE_EQ(ClipSoul::PopupHeightForVisibleItems(5), metrics.height);
 }
 
-TEST_CASE(PopupFixedHeightShowsFourCompactCards) {
+TEST_CASE(PopupFixedHeightShowsSixCompleteBrowserMeasuredRows) {
     const auto metrics = ClipSoul::PopupMetrics();
     const float available = ClipSoul::PopupListBottomForHeight(metrics.height) - ClipSoul::PopupListTop();
-    const int six_rows = metrics.card_height * 6;
-
-    REQUIRE(available >= static_cast<float>(six_rows));
+    REQUIRE_EQ(available, 402.0f);
+    REQUIRE_EQ(metrics.card_height * 6, 360);
     REQUIRE_EQ(ClipSoul::PopupVisibleCardCapacity(), 6);
+    REQUIRE(available < static_cast<float>(metrics.card_height * 7));
 }
 
 TEST_CASE(PopupToolbarAndTabsFitLegacyCompactWindowWidth) {
@@ -804,6 +923,17 @@ TEST_CASE(PopupVisibleCapacityTracksCurrentWindowHeight) {
     REQUIRE_EQ(ClipSoul::PopupVisibleCardCapacityForHeight(metrics.height), ClipSoul::PopupVisibleCardCapacity());
     REQUIRE_EQ(ClipSoul::PopupVisibleCardCapacityForHeight(compact_height), 3);
     REQUIRE_EQ(ClipSoul::PopupVisibleCardCapacityForHeight(tall_height), 8);
+}
+
+TEST_CASE(PopupCapacityAndPixelScrollClampAtExactCssRowBoundary) {
+    constexpr int height = 128 + 60 * 3 + 30;
+    REQUIRE_EQ(ClipSoul::PopupVisibleCardCapacityForHeight(height - 1), 2);
+    REQUIRE_EQ(ClipSoul::PopupVisibleCardCapacityForHeight(height), 3);
+    REQUIRE_EQ(ClipSoul::PopupVisibleCardCapacityForHeight(height + 1), 3);
+    REQUIRE_EQ(ClipSoul::PopupVisibleCardCapacityForHeight(100), 0);
+    RequireNear(ClipSoul::ClampPopupScrollOffsetForHeight(4, 999.0f, height), 60.0f);
+    RequireNear(ClipSoul::PopupScrollOffsetToRevealSelectionForHeight(4, 0.0f, 3, height), 60.0f);
+    RequireNear(ClipSoul::ClampPopupScrollOffsetForHeight(3, 999.0f, height), 0.0f);
 }
 
 TEST_CASE(PopupListScrollOffsetClampsToAvailableRows) {
@@ -846,6 +976,80 @@ TEST_CASE(PopupMouseWheelMovesBySmoothPixelsWithinRows) {
     const float up = ClipSoul::PopupScrollOffsetAfterWheelForHeight(12, second, 120, metrics.height);
     REQUIRE(up < second);
     REQUIRE(up > 0.0f);
+}
+
+TEST_CASE(PopupThemePaletteInterpolatesBetweenThemes) {
+    using ClipSoul::LerpPopupThemePalette;
+    using ClipSoul::ResolvePopupThemePalette;
+
+    const auto light = ResolvePopupThemePalette(1, false);
+    const auto dark = ResolvePopupThemePalette(2, false);
+
+    // 端点必须精确返回原配色，否则切换结束时会有一帧跳变。
+    const auto at_zero = LerpPopupThemePalette(light, dark, 0.0f);
+    REQUIRE_EQ(at_zero.window_tint, light.window_tint);
+    REQUIRE_EQ(at_zero.text, light.text);
+    const auto at_one = LerpPopupThemePalette(light, dark, 1.0f);
+    REQUIRE_EQ(at_one.window_tint, dark.window_tint);
+    REQUIRE_EQ(at_one.text, dark.text);
+
+    // 中间帧应当是两端的混合，而且不会越界（缓动带回弹时会被 clamp 住）。
+    const auto middle = LerpPopupThemePalette(light, dark, 0.5f);
+    REQUIRE(middle.window_tint != light.window_tint);
+    REQUIRE(middle.window_tint != dark.window_tint);
+    const auto clamped_low = LerpPopupThemePalette(light, dark, -1.0f);
+    REQUIRE_EQ(clamped_low.window_tint, light.window_tint);
+    const auto clamped_high = LerpPopupThemePalette(light, dark, 2.0f);
+    REQUIRE_EQ(clamped_high.window_tint, dark.window_tint);
+}
+
+TEST_CASE(PopupFirstVisibleRowIndexCoversViewportTop) {
+    using ClipSoul::PopupFirstVisibleRowIndex;
+    const std::vector<float> tops{0.0f, 60.0f, 120.0f, 180.0f};
+
+    // 关键回归：滚动偏移正好等于某行 top 时，必须返回那一行。
+    // 之前用 upper_bound 直接返回下一行，列表顶部会空出一排。
+    REQUIRE_EQ(PopupFirstVisibleRowIndex(tops, 0.0f), 0);
+    REQUIRE_EQ(PopupFirstVisibleRowIndex(tops, 60.0f), 1);
+    REQUIRE_EQ(PopupFirstVisibleRowIndex(tops, 120.0f), 2);
+
+    // 行中间的偏移仍属于该行。
+    REQUIRE_EQ(PopupFirstVisibleRowIndex(tops, 59.0f), 0);
+    REQUIRE_EQ(PopupFirstVisibleRowIndex(tops, 121.0f), 2);
+
+    // 越界时夹到合法范围。
+    REQUIRE_EQ(PopupFirstVisibleRowIndex(tops, 9999.0f), 3);
+    REQUIRE_EQ(PopupFirstVisibleRowIndex({}, 10.0f), 0);
+}
+
+TEST_CASE(PopupDefaultSelectionSkipsPinnedSection) {
+    using ClipSoul::PopupDefaultSelectedIndex;
+    using ClipSoul::PopupSectionPlanFor;
+
+    // 2 条置顶 + 39 条最近：默认高亮最近分组的第一条，而不是置顶的第 1 条。
+    const auto with_pinned = PopupSectionPlanFor(41, 2);
+    REQUIRE_EQ(PopupDefaultSelectedIndex(with_pinned), 2);
+
+    // 没有置顶：仍然是第一条。
+    REQUIRE_EQ(PopupDefaultSelectedIndex(PopupSectionPlanFor(5, 0)), 0);
+
+    // 全是置顶（没有最近条目）：退回列表首项。
+    REQUIRE_EQ(PopupDefaultSelectedIndex(PopupSectionPlanFor(3, 3)), 0);
+
+    // 空列表。
+    REQUIRE_EQ(PopupDefaultSelectedIndex(PopupSectionPlanFor(0, 0)), 0);
+}
+
+TEST_CASE(PopupDefaultSelectionSkipsOnePinnedItem) {
+    using ClipSoul::PopupDefaultSelectedIndex;
+    using ClipSoul::PopupSectionPlanFor;
+    // 复现截图里的场景：1 条置顶 + N 条最近。默认高亮必须是最近分组的第一条（下标 1），
+    // 而不是置顶的那条，否则回车会粘贴一条被置顶的旧记录。
+    for (size_t recent = 1; recent <= 5; ++recent) {
+        const auto plan = PopupSectionPlanFor(recent + 1, 1);
+        REQUIRE_EQ(PopupDefaultSelectedIndex(plan), 1);
+        REQUIRE_EQ(plan.show_recent_header, true);
+    }
 }
 
 TEST_CASE(PopupSelectionStaysBoundToItemWhenListScrolls) {
@@ -975,14 +1179,17 @@ TEST_CASE(PopupScrollbarThumbOpacityReflectsHoverAndDragFeedback) {
     REQUIRE_EQ(ClipSoul::PopupScrollbarThumbOpacity(false, true, 0.0f), 0.90f);
 }
 
-TEST_CASE(PopupScrollToTopButtonAppearsAfterAnySmallScrollAndAvoidsScrollbar) {
+TEST_CASE(PopupScrollToTopButtonAppearsOnlyBeyond120AndAvoidsScrollbar) {
     const auto metrics = ClipSoul::PopupMetrics();
     const int resized_width = metrics.width + 120;
     const int resized_height = metrics.height + 90;
 
+    REQUIRE(!ClipSoul::PopupScrollToTopButtonVisible(-1.0f));
     REQUIRE(!ClipSoul::PopupScrollToTopButtonVisible(0.0f));
-    REQUIRE(ClipSoul::PopupScrollToTopButtonVisible(0.01f));
-    REQUIRE(ClipSoul::PopupScrollToTopButtonVisible(1.0f));
+    REQUIRE(!ClipSoul::PopupScrollToTopButtonVisible(0.01f));
+    REQUIRE(!ClipSoul::PopupScrollToTopButtonVisible(119.99f));
+    REQUIRE(!ClipSoul::PopupScrollToTopButtonVisible(120.0f));
+    REQUIRE(ClipSoul::PopupScrollToTopButtonVisible(120.01f));
 
     const auto rect = ClipSoul::PopupScrollToTopButtonRectForSize(resized_width, resized_height);
     const auto scrollbar_hit = ClipSoul::PopupScrollbarHitRectForSize(resized_width, resized_height);
@@ -1188,8 +1395,8 @@ TEST_CASE(PopupExpandedCardHeightLeavesRoomForWrappedDetailText) {
 TEST_CASE(PopupCardExpandButtonUsesRightSideChevronSlot) {
     const auto card = ClipSoul::BuildPopupCardLayout(false, 168.0f);
 
-    REQUIRE(card.expand.Width() >= 20.0f);
-    REQUIRE(card.expand.Height() >= 18.0f);
+    REQUIRE_EQ(card.expand.Width(), 20.0f);
+    REQUIRE_EQ(card.expand.Height(), 18.0f);
     REQUIRE(card.expand.right <= card.card.right - 8.0f);
     REQUIRE_EQ(card.expand.right, card.time.right);
     REQUIRE(card.expand.top >= card.time.bottom);
@@ -1229,7 +1436,8 @@ TEST_CASE(PopupTabsUseSegmentedTextLayoutNotButtons) {
     REQUIRE_EQ(history.history.left, static_cast<float>(metrics.margin));
     REQUIRE(history.active_indicator.bottom <= history.divider.bottom);
     REQUIRE_EQ(history.active_indicator.left, history.history.left);
-    REQUIRE_EQ(history.active_indicator.right, history.history.right);
+    REQUIRE_EQ(history.active_indicator.right, history.history.left + 26.0f);
+    REQUIRE_EQ(favorites.active_indicator.Width(), 26.0f);
     REQUIRE_EQ(history.divider.left, 0.0f);
     REQUIRE_EQ(history.divider.right, static_cast<float>(metrics.width));
     REQUIRE(favorites.active_indicator.left > history.active_indicator.left);
@@ -1269,7 +1477,11 @@ TEST_CASE(PopupFavoriteGroupMenuUsesInWindowPopoverLayout) {
 
     REQUIRE(layout.panel.left >= 12.0f);
     REQUIRE(layout.panel.right <= static_cast<float>(metrics.width - 12));
-    REQUIRE(layout.panel.Width() >= 170.0f);
+    REQUIRE_EQ(layout.panel.left, 92.0f);
+    REQUIRE_EQ(layout.panel.top, 124.0f);
+    REQUIRE_EQ(layout.panel.Width(), 180.0f);
+    REQUIRE_EQ(layout.all_favorites.Height(), 30.0f);
+    REQUIRE_EQ(layout.new_group.Height(), 30.0f);
     REQUIRE(layout.panel.left <= tabs.favorite_group.left);
     REQUIRE(layout.panel.top > tabs.favorite_group.bottom);
     REQUIRE(layout.panel.bottom < ClipSoul::PopupListTop() + 220.0f);
@@ -1354,7 +1566,8 @@ TEST_CASE(PopupFilterPopoverContainsDateCalendarAndReset) {
     REQUIRE(layout.panel.left >= 12.0f);
     REQUIRE(layout.panel.right <= static_cast<float>(metrics.width - 12));
     REQUIRE(layout.panel.Width() >= 300.0f);
-    REQUIRE(layout.panel.bottom <= ClipSoul::PopupListBottomForHeight(metrics.height));
+    // 六周日历按 CSS 自然高度延伸到 569；不能压缩日期格来迁就列表底线。
+    REQUIRE_EQ(layout.panel.bottom, 569.0f);
     // 统一左右边线：类型条、时间条、日历、底部分隔线都贴同一内容边线
     REQUIRE_EQ(layout.type_bar.left, layout.panel.left + 14.0f);
     REQUIRE_EQ(layout.type_bar.right, layout.panel.right - 14.0f);
@@ -1393,6 +1606,111 @@ TEST_CASE(PopupFilterPopoverContainsDateCalendarAndReset) {
     REQUIRE_EQ(ClipSoul::PopupFilterResetVisualRect(layout).left, layout.reset.left);
 }
 
+TEST_CASE(PopupFilterLayoutMatchesCssRhythmAtEachCalendarHeight) {
+    const auto compact = ClipSoul::BuildPopupFilterLayout(false, 6);
+    RequireNear(compact.panel.left, 12.0f);
+    RequireNear(compact.panel.top, 124.0f);
+    RequireNear(compact.panel.Width(), 316.0f);
+    RequireNear(compact.close.top, 136.0f);
+    RequireNear(compact.close.Height(), 24.0f);
+    RequireNear(compact.type_section.top, 172.0f);
+    RequireNear(compact.type_section.Height(), 16.0f);
+    RequireNear(compact.type_bar.top, 194.0f);
+    RequireNear(compact.type_bar.Height(), 30.0f);
+    RequireNear(compact.date_card.top, 238.0f);
+    RequireNear(compact.preset_bar.top, 260.0f);
+    RequireNear(compact.preset_bar.Height(), 30.0f);
+    RequireNear(compact.footer_divider.top, 304.0f);
+    RequireNear(compact.done.top, 317.0f);
+    RequireNear(compact.done.Height(), 28.0f);
+    RequireNear(compact.panel.bottom, 359.0f);
+    for (int rows = 4; rows <= 6; ++rows) {
+        const auto layout = ClipSoul::BuildPopupFilterLayout(true, rows);
+        const auto labels = ClipSoul::BuildPopupCalendarWeekdayLabels(layout);
+        RequireNear(layout.calendar.top, 300.0f);
+        RequireNear(layout.calendar_title.Height(), 22.0f);
+        RequireNear(labels.front().rect.top, 326.0f);
+        RequireNear(labels.front().rect.Height(), 18.0f);
+        RequireNear(layout.calendar_grid.top, 346.0f);
+        RequireNear(layout.calendar_grid.Height(), static_cast<float>(rows * 26 - 2));
+        RequireNear(layout.calendar.bottom, layout.calendar_grid.bottom);
+        RequireNear(layout.footer_divider.top - layout.calendar.bottom, 14.0f);
+        RequireNear(layout.footer_divider.Height(), 1.0f);
+        RequireNear(layout.done.top - layout.footer_divider.bottom, 12.0f);
+        RequireNear(layout.panel.bottom - layout.done.bottom, 14.0f);
+        RequireNear(layout.panel.bottom, 413.0f + static_cast<float>(rows * 26));
+        RequireNear(layout.calendar_next_year.right - layout.calendar_prev_year.left, 88.0f);
+    }
+    RequireNear(ClipSoul::BuildPopupFilterLayout(true, -1).panel.bottom,
+                ClipSoul::BuildPopupFilterLayout(true, 4).panel.bottom);
+    RequireNear(ClipSoul::BuildPopupFilterLayout(true, 99).panel.bottom,
+                ClipSoul::BuildPopupFilterLayout(true, 6).panel.bottom);
+}
+
+TEST_CASE(PopupFilterWidthOverloadKeepsSegmentsAndDateHitsInsidePanel) {
+    const auto original = ClipSoul::BuildPopupFilterLayout();
+    const auto explicit_default = ClipSoul::BuildPopupFilterLayout(true, 6, 340);
+    RequireNear(original.panel.right, explicit_default.panel.right);
+    RequireNear(original.panel.bottom, explicit_default.panel.bottom);
+    for (const int width : {300, 340, 640}) {
+        for (const bool custom : {false, true}) {
+            const auto layout = ClipSoul::BuildPopupFilterLayout(custom, 5, width);
+            RequireNear(layout.panel.Width(), static_cast<float>(width - 24));
+            RequireNear(layout.type_bar.Width(), static_cast<float>(width - 52));
+            RequireNear(layout.type_bar.top, 194.0f);
+            RequireNear(layout.preset_bar.top, 260.0f);
+            const ClipSoul::UiRect targets[] = {layout.text_chip, layout.image_chip, layout.file_chip,
+                layout.link_chip, layout.presets[0], layout.presets[1], layout.presets[2],
+                layout.presets[3], layout.presets[4], layout.reset, layout.close,
+                layout.start_date, layout.end_date, layout.done};
+            const ClipSoul::PopupFilterTarget expected[] = {ClipSoul::PopupFilterTarget::TextChip,
+                ClipSoul::PopupFilterTarget::ImageChip, ClipSoul::PopupFilterTarget::FileChip,
+                ClipSoul::PopupFilterTarget::LinkChip, ClipSoul::PopupFilterTarget::PresetAll,
+                ClipSoul::PopupFilterTarget::PresetToday, ClipSoul::PopupFilterTarget::PresetWeek,
+                ClipSoul::PopupFilterTarget::PresetMonth, ClipSoul::PopupFilterTarget::PresetCustom,
+                ClipSoul::PopupFilterTarget::Reset, ClipSoul::PopupFilterTarget::Close,
+                ClipSoul::PopupFilterTarget::StartDate, ClipSoul::PopupFilterTarget::EndDate,
+                ClipSoul::PopupFilterTarget::Done};
+            for (size_t i = 0; i < std::size(targets); ++i) {
+                REQUIRE(targets[i].left >= layout.panel.left);
+                REQUIRE(targets[i].right <= layout.panel.right);
+                REQUIRE(targets[i].Width() > 0.0f);
+                REQUIRE_EQ(ClipSoul::HitTestPopupFilterTarget(layout, 2026, 6,
+                    (targets[i].left + targets[i].right) * 0.5f,
+                    (targets[i].top + targets[i].bottom) * 0.5f), expected[i]);
+                for (size_t j = i + 1; j < std::size(targets); ++j) {
+                    REQUIRE(!ClipSoul::RectsOverlap(targets[i], targets[j]));
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE(PopupCalendarUsesFourFiveAndSixRowsWithoutHittingGapsOrFooter) {
+    // February 2026 starts Sunday (4 weeks); June 2026 has 5; May 2026 has 6.
+    const int months[] = {2, 6, 5};
+    for (int i = 0; i < 3; ++i) {
+        const int rows = ClipSoul::PopupCalendarRowCount(2026, months[i]);
+        REQUIRE_EQ(rows, i + 4);
+        const auto layout = ClipSoul::BuildPopupFilterLayout(true, rows);
+        const auto cells = ClipSoul::BuildPopupCalendarCells(layout, 2026, months[i]);
+        RequireNear(cells.back().rect.bottom, layout.calendar_grid.bottom);
+        for (const auto& cell : cells) {
+            RequireNear(cell.rect.Height(), 24.0f);
+            REQUIRE(cell.rect.bottom <= layout.calendar_grid.bottom);
+            const float x = (cell.rect.left + cell.rect.right) * 0.5f;
+            const auto hit = ClipSoul::HitTestPopupCalendarDate(layout, 2026, months[i], x,
+                (cell.rect.top + cell.rect.bottom) * 0.5f);
+            REQUIRE(hit.has_value());
+            REQUIRE(*hit == cell.date);
+            REQUIRE(!ClipSoul::HitTestPopupCalendarDate(layout, 2026, months[i], x,
+                cell.rect.bottom + 1.0f).has_value());
+        }
+        REQUIRE_EQ(ClipSoul::HitTestPopupFilterTarget(layout, 2026, months[i],
+            layout.done.left + 10.0f, layout.done.top + 10.0f), ClipSoul::PopupFilterTarget::Done);
+    }
+}
+
 TEST_CASE(PopupCalendarHitTestUsesRealMonthGrid) {
     const auto layout = ClipSoul::BuildPopupFilterLayout();
     const auto cells = ClipSoul::BuildPopupCalendarCells(layout, 2024, 5);
@@ -1417,11 +1735,12 @@ TEST_CASE(PopupCalendarDateCellsLeaveRoomForSelectionDots) {
     const auto cells = ClipSoul::BuildPopupCalendarCells(layout, 2026, 5);
 
     REQUIRE_EQ(cells.size(), static_cast<size_t>(31));
-    REQUIRE(cells.front().rect.Height() >= 16.0f);
+    REQUIRE_EQ(cells.front().rect.Height(), 24.0f);
     for (size_t index = 7; index < cells.size(); ++index) {
-        REQUIRE(cells[index].rect.top - cells[index - 7].rect.top >= 16.0f);
+        REQUIRE_EQ(cells[index].rect.top - cells[index - 7].rect.top, 26.0f);
+        REQUIRE_EQ(cells[index].rect.top - cells[index - 7].rect.bottom, 2.0f);
     }
-    REQUIRE(cells.back().rect.bottom <= layout.calendar.bottom - 6.0f);
+    REQUIRE_EQ(cells.back().rect.bottom, layout.calendar.bottom);
 }
 
 TEST_CASE(PopupCalendarDateCellsAreWideEnoughForCenteredNumbers) {
@@ -1928,16 +2247,23 @@ TEST_CASE(SettingsWindowProjectButtonAvoidsDividerAndVersionRow) {
 
 TEST_CASE(SettingsWindowControlsStayCenteredWithoutClipping) {
     const auto layout = ClipSoul::SettingsWindowControlLayout();
+    constexpr float kContentRight = 622.0f;
 
-    REQUIRE_EQ(static_cast<int>(layout.limit_edit.left), 170);
-    REQUIRE_EQ(static_cast<int>(layout.limit_edit.top), 83);
-    REQUIRE_EQ(static_cast<int>(layout.limit_edit.bottom), 105);
-    REQUIRE_EQ(static_cast<int>(layout.pause_toggle.top), 120);
-    REQUIRE_EQ(static_cast<int>(layout.startup_toggle.top), 154);
-    REQUIRE_EQ(static_cast<int>(layout.popup_resizable_toggle.top), 394);
-    REQUIRE_EQ(static_cast<int>(layout.theme_system.top), 356);
-    REQUIRE_EQ(static_cast<int>(layout.theme_light.top), 356);
-    REQUIRE_EQ(static_cast<int>(layout.theme_dark.top), 356);
+    // 控件高 28；除开关外右边缘贴齐内容右线（Ink Ledger 对齐规则）。
+    REQUIRE_EQ(static_cast<int>(layout.limit_edit.top), 86);
+    REQUIRE_EQ(static_cast<int>(layout.limit_edit.bottom), 114);
+    REQUIRE_EQ(static_cast<int>(layout.limit_edit.right), static_cast<int>(kContentRight));
+    REQUIRE_EQ(static_cast<int>(layout.limit_edit.Width()), 156);
+    REQUIRE_EQ(static_cast<int>(layout.theme_system.bottom - layout.theme_system.top), 28);
+    REQUIRE_EQ(static_cast<int>(layout.theme_dark.right), static_cast<int>(kContentRight));
+    // 开关统一 32×18
+    for (const auto& toggle : {layout.pause_toggle, layout.startup_toggle, layout.popup_resizable_toggle}) {
+        REQUIRE_EQ(static_cast<int>(toggle.Width()), 32);
+        REQUIRE_EQ(static_cast<int>(toggle.Height()), 18);
+        REQUIRE_EQ(static_cast<int>(toggle.right), static_cast<int>(kContentRight));
+    }
+    REQUIRE(layout.pause_toggle.top < layout.startup_toggle.top);
+    REQUIRE(layout.startup_toggle.top < layout.popup_resizable_toggle.top);
     REQUIRE(!ClipSoul::RectsOverlap(layout.theme_system, layout.theme_light));
     REQUIRE(!ClipSoul::RectsOverlap(layout.theme_light, layout.theme_dark));
     REQUIRE_EQ(ClipSoul::HitTestSettingsThemeTarget(layout,
@@ -1956,6 +2282,60 @@ TEST_CASE(SettingsWindowControlsStayCenteredWithoutClipping) {
     REQUIRE(layout.text_visual_offset <= 1);
     REQUIRE(!layout.uses_internal_dividers);
     REQUIRE(!layout.uses_external_hover_backplates);
+}
+
+TEST_CASE(PinButtonRotatesToFortyDegreesWhenPinned) {
+    using ClipSoul::PopupPinRotationDegrees;
+    // 未固定：0°；固定后：-40°（预览 #pinWin.on svg 的 rotate(-40deg)）。
+    REQUIRE(std::fabs(PopupPinRotationDegrees(false, 1.0f)) < 0.001f);
+    REQUIRE(std::fabs(PopupPinRotationDegrees(true, 1.0f) - (-40.0f)) < 0.001f);
+    // 起始帧不跳变：从当前状态出发。
+    REQUIRE(std::fabs(PopupPinRotationDegrees(true, 0.0f)) < 0.001f);
+    REQUIRE(std::fabs(PopupPinRotationDegrees(false, 0.0f) - (-40.0f)) < 0.001f);
+}
+
+TEST_CASE(PinButtonRotationUsesOvershootingSpringEase) {
+    using ClipSoul::PopupPinRotationDegrees;
+    // cubic-bezier(.3,1.5,.5,1) 会先冲过终点再回落，形成预览里的弹性旋转。
+    float max_angle = 0.0f;
+    bool overshoot = false;
+    for (int step = 0; step <= 100; ++step) {
+        const float angle = PopupPinRotationDegrees(true, static_cast<float>(step) / 100.0f);
+        max_angle = std::min(max_angle, angle);
+        if (angle < -40.05f) {
+            overshoot = true;
+        }
+    }
+    REQUIRE(overshoot);
+    REQUIRE(max_angle > -50.0f);
+    // 越过终点后必须回落到 -40°（弹性回弹只冲过头一次，不来回抖）。
+    const int peak_step = [&] {
+        int best = 0;
+        for (int step = 0; step <= 100; ++step) {
+            if (std::fabs(PopupPinRotationDegrees(true, static_cast<float>(step) / 100.0f) - max_angle) < 0.001f) {
+                best = step;
+                break;
+            }
+        }
+        return best;
+    }();
+    REQUIRE(peak_step > 0);
+    REQUIRE(peak_step < 100);
+    for (int step = peak_step; step <= 100; ++step) {
+        const float angle = PopupPinRotationDegrees(true, static_cast<float>(step) / 100.0f);
+        // 冲过头之后一路回落，始终在 [-43.3, -40] 之间，最终停在 -40°。
+        REQUIRE(angle <= -40.0f + 0.001f);
+        REQUIRE(angle >= -44.0f);
+    }
+}
+
+TEST_CASE(CubicBezierEaseMatchesCssEndpoints) {
+    using ClipSoul::PopupCubicBezierEase;
+    REQUIRE(std::fabs(PopupCubicBezierEase(0.3f, 1.5f, 0.5f, 1.0f, 0.0f)) < 0.0001f);
+    REQUIRE(std::fabs(PopupCubicBezierEase(0.3f, 1.5f, 0.5f, 1.0f, 1.0f) - 1.0f) < 0.0001f);
+    // 越界的进度被夹住，不会外插。
+    REQUIRE(std::fabs(PopupCubicBezierEase(0.3f, 1.5f, 0.5f, 1.0f, -1.0f)) < 0.0001f);
+    REQUIRE(std::fabs(PopupCubicBezierEase(0.3f, 1.5f, 0.5f, 1.0f, 2.0f) - 1.0f) < 0.0001f);
 }
 
 TEST_CASE(SettingsWindowHistoryLimitEditDoesNotAutoSelectAllOnLoad) {
@@ -2004,4 +2384,300 @@ TEST_CASE(PopupFilterHitTestCoversInteractiveMenuTargets) {
                                                   (cell.rect.left + cell.rect.right) / 2.0f,
                                                   (cell.rect.top + cell.rect.bottom) / 2.0f),
                ClipSoul::PopupFilterTarget::CalendarDate);
+}
+
+// ---------- Ink Ledger：时间驱动动效（计划 E） ----------
+
+TEST_CASE(PopupMotionDurationsMatchInkLedgerSpec) {
+    using ClipSoul::PopupMotionKind;
+    REQUIRE_EQ(ClipSoul::PopupMotionDurationMs(PopupMotionKind::Panel), 160);
+    REQUIRE_EQ(ClipSoul::PopupMotionDurationMs(PopupMotionKind::ViewSwitch), 180);
+    REQUIRE_EQ(ClipSoul::PopupMotionDurationMs(PopupMotionKind::Arrow), 220);
+    REQUIRE_EQ(ClipSoul::PopupMotionDurationMs(PopupMotionKind::MultiSelect), 200);
+    REQUIRE_EQ(ClipSoul::PopupMotionDurationMs(PopupMotionKind::Hover), 90);
+}
+
+TEST_CASE(PopupTimedMotionProgressAdvancesByElapsedTime) {
+    // 按时间推进：同样帧数、不同帧率得到同样的进度。
+    const float at_half = ClipSoul::PopupTimedMotionProgress(80.0, 160.0, true);
+    RequireNear(at_half, 0.5f);
+    RequireNear(ClipSoul::PopupTimedMotionProgress(0.0, 160.0, true), 0.0f);
+    RequireNear(ClipSoul::PopupTimedMotionProgress(160.0, 160.0, true), 1.0f);
+    RequireNear(ClipSoul::PopupTimedMotionProgress(400.0, 160.0, true), 1.0f);
+    RequireNear(ClipSoul::PopupTimedMotionProgress(-5.0, 160.0, true), 0.0f);
+    // 系统关闭动画时直接到达终点。
+    RequireNear(ClipSoul::PopupTimedMotionProgress(0.0, 160.0, false), 1.0f);
+    RequireNear(ClipSoul::PopupTimedMotionProgress(10.0, 0.0, true), 1.0f);
+}
+
+TEST_CASE(PopupSpringStepSettlesOnTargetWithoutOvershootingForever) {
+    ClipSoul::PopupSpringState state{0.0f, 0.0f};
+    const float target = 58.0f;
+    int steps = 0;
+    float peak = 0.0f;
+    while (steps < 240) {
+        state = ClipSoul::PopupSpringStep(state.position, state.velocity, target, 1.0f / 60.0f);
+        peak = std::max(peak, state.position);
+        ++steps;
+        if (std::abs(state.position - target) < 0.35f && std::abs(state.velocity) < 6.0f) {
+            break;
+        }
+    }
+    REQUIRE(steps < 120);
+    REQUIRE(std::abs(state.position - target) < 1.0f);
+    // 阻尼比 0.86：允许一次轻微回弹，但任何时刻都不越过目标的 12%。
+    REQUIRE(peak <= target * 1.12f);
+    REQUIRE(peak > 0.9f * target);
+}
+
+TEST_CASE(PopupSpringStepClampsOversizedFrameDelta) {
+    // 卡顿帧（dt=200ms）按 32ms 上限推进，避免弹簧炸开。
+    const auto clamped = ClipSoul::PopupSpringStep(0.0f, 0.0f, 100.0f, 0.2f);
+    const auto capped = ClipSoul::PopupSpringStep(0.0f, 0.0f, 100.0f, 0.032f);
+    RequireNear(clamped.position, capped.position, 0.001f);
+    RequireNear(clamped.velocity, capped.velocity, 0.001f);
+    REQUIRE(clamped.position < 100.0f);
+    const auto frozen = ClipSoul::PopupSpringStep(12.0f, 3.0f, 100.0f, 0.0f);
+    RequireNear(frozen.position, 12.0f);
+    RequireNear(frozen.velocity, 3.0f);
+}
+
+// ---------- Ink Ledger：分区几何（计划 A.5） ----------
+
+TEST_CASE(PopupSectionPlanSplitsPinnedAndRecent) {
+    const auto empty = ClipSoul::PopupSectionPlanFor(0, 0);
+    REQUIRE(!empty.show_pinned_header);
+    REQUIRE(!empty.show_recent_header);
+    REQUIRE_EQ(empty.pinned_count, static_cast<size_t>(0));
+
+    const auto recent_only = ClipSoul::PopupSectionPlanFor(5, 0);
+    REQUIRE(!recent_only.show_pinned_header);
+    REQUIRE(!recent_only.show_recent_header);
+    REQUIRE_EQ(recent_only.recent_count, static_cast<size_t>(5));
+
+    const auto mixed = ClipSoul::PopupSectionPlanFor(6, 2);
+    REQUIRE(mixed.show_pinned_header);
+    REQUIRE(mixed.show_recent_header);
+    REQUIRE_EQ(mixed.pinned_count, static_cast<size_t>(2));
+    REQUIRE_EQ(mixed.recent_count, static_cast<size_t>(4));
+
+    // 全是置顶项时只有"置顶"标题。
+    const auto all_pinned = ClipSoul::PopupSectionPlanFor(3, 3);
+    REQUIRE(all_pinned.show_pinned_header);
+    REQUIRE(!all_pinned.show_recent_header);
+
+    // 数据层给多了也不越界。
+    const auto clamped = ClipSoul::PopupSectionPlanFor(2, 9);
+    REQUIRE_EQ(clamped.pinned_count, static_cast<size_t>(2));
+    REQUIRE_EQ(clamped.recent_count, static_cast<size_t>(0));
+}
+
+TEST_CASE(PopupSectionedItemTopAccountsForHeaders) {
+    const auto plan = ClipSoul::PopupSectionPlanFor(5, 2);
+    const float row = static_cast<float>(ClipSoul::PopupMetrics().card_height);
+    const float header = ClipSoul::PopupSectionHeaderHeight();
+
+    RequireNear(ClipSoul::PopupSectionedItemTop(0, plan, row, header), header);
+    RequireNear(ClipSoul::PopupSectionedItemTop(1, plan, row, header), header + row);
+    // 第二个分区：置顶标题 + 2 行 + "最近"标题
+    RequireNear(ClipSoul::PopupSectionedItemTop(2, plan, row, header), header + 2.0f * row + header);
+    RequireNear(ClipSoul::PopupSectionedItemTop(4, plan, row, header), header + 2.0f * row + header + 2.0f * row);
+    RequireNear(ClipSoul::PopupSectionedListHeight(plan, row, header), 5.0f * row + 2.0f * header);
+
+    const auto plain = ClipSoul::PopupSectionPlanFor(3, 0);
+    RequireNear(ClipSoul::PopupSectionedItemTop(0, plain, row, header), 0.0f);
+    RequireNear(ClipSoul::PopupSectionedItemTop(2, plain, row, header), 2.0f * row);
+    RequireNear(ClipSoul::PopupSectionedListHeight(plain, row, header), 3.0f * row);
+}
+
+// ---------- Ink Ledger：时间预设（计划 B） ----------
+
+TEST_CASE(PopupPresetDateRangeCoversAllTodayWeekMonth) {
+    const ClipSoul::PopupCalendarDate today{2026, 5, 24};
+
+    const auto all = ClipSoul::PopupPresetDateRangeFor(0, today);
+    REQUIRE(!all.start.has_value());
+    REQUIRE(!all.end.has_value());
+
+    const auto today_range = ClipSoul::PopupPresetDateRangeFor(1, today);
+    REQUIRE(today_range.start.has_value());
+    REQUIRE(*today_range.start == today);
+    REQUIRE(*today_range.end == today);
+
+    const auto week = ClipSoul::PopupPresetDateRangeFor(2, today);
+    REQUIRE((*week.start == ClipSoul::PopupCalendarDate{2026, 5, 18}));
+    REQUIRE(*week.end == today);
+
+    const auto month = ClipSoul::PopupPresetDateRangeFor(3, today);
+    REQUIRE((*month.start == ClipSoul::PopupCalendarDate{2026, 4, 25}));
+    REQUIRE(*month.end == today);
+
+    // 自定义不改动区间
+    const auto custom = ClipSoul::PopupPresetDateRangeFor(4, today);
+    REQUIRE(!custom.start.has_value());
+    REQUIRE(!custom.end.has_value());
+}
+
+TEST_CASE(PopupAddDaysCrossesMonthAndYearBoundaries) {
+    using ClipSoul::PopupCalendarDate;
+    REQUIRE((ClipSoul::PopupAddDays(PopupCalendarDate{2026, 3, 1}, -1) == PopupCalendarDate{2026, 2, 28}));
+    REQUIRE((ClipSoul::PopupAddDays(PopupCalendarDate{2024, 3, 1}, -1) == PopupCalendarDate{2024, 2, 29}));
+    REQUIRE((ClipSoul::PopupAddDays(PopupCalendarDate{2026, 1, 1}, -1) == PopupCalendarDate{2025, 12, 31}));
+    REQUIRE((ClipSoul::PopupAddDays(PopupCalendarDate{2026, 12, 31}, 1) == PopupCalendarDate{2027, 1, 1}));
+    REQUIRE((ClipSoul::PopupAddDays(PopupCalendarDate{2026, 5, 24}, -29) == PopupCalendarDate{2026, 4, 25}));
+    REQUIRE((ClipSoul::PopupAddDays(PopupCalendarDate{2026, 5, 24}, 0) == PopupCalendarDate{2026, 5, 24}));
+}
+
+TEST_CASE(SettingsWindowFooterFitsInsideClientArea) {
+    // 设置窗口高度必须容纳 行几何累计 + 底栏，否则"保存/取消"会被裁掉。
+    const auto layout = ClipSoul::SettingsWindowProjectLayout();
+    REQUIRE(layout.version_row.bottom <= 726.0f - 40.0f);
+    REQUIRE(layout.section.bottom <= 726.0f);
+    REQUIRE(layout.project_button.bottom < layout.divider.top);
+}
+
+TEST_CASE(PopupSectionedGeometryMatchesPaintRowOffsets) {
+    // 绘制、命中、滚动共用同一套行偏移：标题高度必须被计入，且顺序单调递增。
+    const auto plan = ClipSoul::PopupSectionPlanFor(4, 2);
+    const float row = static_cast<float>(ClipSoul::PopupMetrics().card_height);
+    const float header = ClipSoul::PopupSectionHeaderHeight();
+    float previous = -1.0f;
+    for (size_t index = 0; index < 4; ++index) {
+        const float top = ClipSoul::PopupSectionedItemTop(index, plan, row, header);
+        REQUIRE(top > previous);
+        previous = top;
+    }
+    // 首行从"置顶"标题之下开始；第二分区跨过第二个标题。
+    RequireNear(ClipSoul::PopupSectionedItemTop(0, plan, row, header), header);
+    RequireNear(ClipSoul::PopupSectionedItemTop(2, plan, row, header), header * 2.0f + row * 2.0f);
+    // 总高 = 行高之和 + 两个标题
+    RequireNear(ClipSoul::PopupSectionedListHeight(plan, row, header), row * 4.0f + header * 2.0f);
+}
+
+TEST_CASE(PopupWindowEnterMatchesPreviewWinInKeyframes) {
+    // 预览：.win.enter{animation:winIn 170ms cubic-bezier(.2,.8,.2,1) both}
+    //       @keyframes winIn{from{opacity:0;transform:translateY(8px) scale(.985)}}
+    const auto start = ClipSoul::PopupWindowEnterFrame(0.0f);
+    REQUIRE(std::fabs(start.opacity) < 0.0001f);
+    RequireNear(start.translate_y, 8.0f);
+    RequireNear(start.scale, 0.985f);
+
+    const auto end = ClipSoul::PopupWindowEnterFrame(1.0f);
+    RequireNear(end.opacity, 1.0f);
+    RequireNear(end.translate_y, 0.0f);
+    RequireNear(end.scale, 1.0f);
+
+    // 位移与缩放都由同一条缓动驱动：透明度越大，剩余上浮越小。
+    float previous_offset = start.translate_y;
+    float previous_opacity = start.opacity;
+    for (int step = 1; step <= 20; ++step) {
+        const auto frame = ClipSoul::PopupWindowEnterFrame(static_cast<float>(step) / 20.0f);
+        REQUIRE(frame.translate_y <= previous_offset + 0.0001f);
+        REQUIRE(frame.opacity >= previous_opacity - 0.0001f);
+        RequireNear(frame.scale, 0.985f + 0.015f * frame.opacity);
+        previous_offset = frame.translate_y;
+        previous_opacity = frame.opacity;
+    }
+
+    // cubic-bezier(.2,.8,.2,1) 起步极快：1/6 处就已过半。
+    REQUIRE(ClipSoul::PopupWindowEnterFrame(0.1667f).opacity > 0.55f);
+}
+
+TEST_CASE(PopupWindowLeaveMatchesPreviewWinOutKeyframes) {
+    // 预览：.win.leave{animation:winOut 120ms cubic-bezier(.4,0,1,1) both}
+    //       @keyframes winOut{to{opacity:0;transform:translateY(4px) scale(.99)}}
+    const auto start = ClipSoul::PopupWindowLeaveFrame(0.0f);
+    RequireNear(start.opacity, 1.0f);
+    RequireNear(start.translate_y, 0.0f);
+    RequireNear(start.scale, 1.0f);
+
+    const auto end = ClipSoul::PopupWindowLeaveFrame(1.0f);
+    REQUIRE(std::fabs(end.opacity) < 0.0001f);
+    RequireNear(end.translate_y, 4.0f);
+    RequireNear(end.scale, 0.99f);
+
+    float previous_opacity = start.opacity;
+    for (int step = 1; step <= 20; ++step) {
+        const auto frame = ClipSoul::PopupWindowLeaveFrame(static_cast<float>(step) / 20.0f);
+        REQUIRE(frame.opacity <= previous_opacity + 0.0001f);
+        RequireNear(frame.translate_y, 4.0f * (1.0f - frame.opacity));
+        RequireNear(frame.scale, 1.0f - 0.01f * (1.0f - frame.opacity));
+        previous_opacity = frame.opacity;
+    }
+}
+
+TEST_CASE(PopupRowEntranceMatchesPreviewRowRiseStagger) {
+    // 预览：animation:rowRise 220ms cubic-bezier(.2,.8,.2,1) both;
+    //       animation-delay:calc(var(--i)*18ms + 40ms)
+    //       @keyframes rowRise{from{opacity:0;transform:translateY(5px)}}
+    // 延迟期间必须保持 from 状态（both 的 backwards fill）。
+    for (int index = 0; index <= 9; ++index) {
+        const double delay = 40.0 + index * 18.0;
+        const auto before = ClipSoul::PopupRowEntranceFrameAt(delay - 1.0, index);
+        REQUIRE(std::fabs(before.opacity) < 0.0001f);
+        RequireNear(before.translate_y, 5.0f);
+
+        const auto done = ClipSoul::PopupRowEntranceFrameAt(delay + 220.0, index);
+        RequireNear(done.opacity, 1.0f);
+        RequireNear(done.translate_y, 0.0f);
+    }
+
+    // 同一时刻，索引越靠后的行进度越少。
+    const double sample_ms = 150.0;
+    float previous = 1.1f;
+    for (int index = 0; index <= 9; ++index) {
+        const auto frame = ClipSoul::PopupRowEntranceFrameAt(sample_ms, index);
+        REQUIRE(frame.opacity <= previous + 0.0001f);
+        previous = frame.opacity;
+    }
+
+    // 索引被夹在 [0,9]：第 10 行与第 9 行同步。
+    const auto clamped_low = ClipSoul::PopupRowEntranceFrameAt(sample_ms, -3);
+    const auto first = ClipSoul::PopupRowEntranceFrameAt(sample_ms, 0);
+    RequireNear(clamped_low.opacity, first.opacity);
+    const auto clamped_high = ClipSoul::PopupRowEntranceFrameAt(sample_ms, 40);
+    const auto ninth = ClipSoul::PopupRowEntranceFrameAt(sample_ms, 9);
+    RequireNear(clamped_high.opacity, ninth.opacity);
+
+    // 总时长要覆盖最后一档（40 + 9*18 + 220）。
+    RequireNear(static_cast<float>(ClipSoul::PopupRowEntranceTotalMs()), 422.0f);
+}
+
+TEST_CASE(PopupSearchUnderlineFocusProgressStartsAtZeroOnShow) {
+    // 呼出时搜索墨线要从左端开始展开（预览 .search::after 的 scaleX 0→1，200ms）。
+    // 起点必须严格为 0，终点为 1，中间按三次方缓出推进。
+    REQUIRE_EQ(ClipSoul::PopupMotionProgress(0.0f), 0.0f);
+    REQUIRE_EQ(ClipSoul::PopupMotionProgress(1.0f), 1.0f);
+    REQUIRE(!ClipSoul::PopupSearchFocusProgress(false, false, 0.0f) > 0.0f);
+    REQUIRE(ClipSoul::PopupSearchFocusProgress(true, false, 0.0f) == 1.0f);
+}
+
+TEST_CASE(PopupSmoothScrollToTopEasesInsteadOfJumping) {
+    // 预览：list.scrollTo({top:0, behavior:'smooth'})，不是瞬跳。
+    const float from = 640.0f;
+    const float to = 0.0f;
+
+    // 起点就在原位，终点精确归零。
+    RequireNear(ClipSoul::PopupSmoothScrollOffset(from, to, 0.0f), from);
+    RequireNear(ClipSoul::PopupSmoothScrollOffset(from, to, 1.0f), to);
+
+    // 单调向上，且不会越过目标（后半段逐帧靠拢）。
+    float previous = from;
+    for (int step = 1; step <= 30; ++step) {
+        const float offset = ClipSoul::PopupSmoothScrollOffset(from, to, static_cast<float>(step) / 30.0f);
+        REQUIRE(offset <= previous + 0.0001f);
+        REQUIRE(offset >= to - 0.0001f);
+        previous = offset;
+    }
+
+    // ease-in-out：中途才是最快的那一段，起点很慢（与瞬跳区分开）。
+    const float at_5pct = ClipSoul::PopupSmoothScrollOffset(from, to, 0.05f);
+    REQUIRE(at_5pct > from * 0.9f);
+    const float at_half = ClipSoul::PopupSmoothScrollOffset(from, to, 0.5f);
+    RequireNear(at_half, from * 0.5f);
+    RequireNear(ClipSoul::PopupSmoothScrollProgress(0.5f), 0.5f);
+
+    // 参数被夹住，越界不会外插。
+    RequireNear(ClipSoul::PopupSmoothScrollOffset(from, to, -1.0f), from);
+    RequireNear(ClipSoul::PopupSmoothScrollOffset(from, to, 2.0f), to);
 }

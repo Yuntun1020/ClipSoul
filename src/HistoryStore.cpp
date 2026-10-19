@@ -167,12 +167,18 @@ void RemoveUnreferencedPayloads(sqlite3* db, const std::vector<std::wstring>& pa
     }
 }
 
-int64_t NextSortOrder(sqlite3* db) {
-    Statement stmt(db, "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM history_items;");
-    if (sqlite3_step(stmt.get()) == SQLITE_ROW) {
-        return sqlite3_column_int64(stmt.get(), 0);
+// MAX(sort_order) walks the sort index on every insert; one copy per clipboard event made that a
+// hot query. The high-water mark is cached and only re-queried when the cheap fast path cannot be
+// trusted (first use, or after an operation that can lower the maximum, e.g. EnforceLimit/Delete).
+int64_t NextSortOrder(sqlite3* db, int64_t& cached_max) {
+    if (cached_max > 0) {
+        return ++cached_max;
     }
-    return 1;
+    Statement stmt(db, "SELECT COALESCE(MAX(sort_order), 0) FROM history_items;");
+    if (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+        cached_max = sqlite3_column_int64(stmt.get(), 0);
+    }
+    return ++cached_max;
 }
 
 // v1: HTML entries used to hash the raw CF_HTML block (header offsets / SourceURL included), so the
@@ -307,6 +313,8 @@ std::wstring FormatHotkey(unsigned modifiers, unsigned vk) {
 struct HistoryStore::Impl {
     sqlite3* db = nullptr;
     std::filesystem::path path;
+    // High-water mark for sort_order; 0 means "unknown, re-read from the table".
+    int64_t sort_order_high_water = 0;
 
     ~Impl() {
         if (db) {
@@ -333,9 +341,14 @@ void HistoryStore::Open(const std::filesystem::path& database_path) {
         ThrowSqlite(impl_->db, "sqlite open failed");
     }
     impl_->path = database_path;
+    impl_->sort_order_high_water = 0;
 
     Exec(impl_->db, "PRAGMA journal_mode=WAL;");
     Exec(impl_->db, "PRAGMA synchronous=NORMAL;");
+    // 常驻的剪贴板历史是小库：把临时表放内存、给页缓存一个合理上限，避免每次启动/查询都碰磁盘。
+    TryExec(impl_->db, "PRAGMA temp_store=MEMORY;");
+    TryExec(impl_->db, "PRAGMA cache_size=-2048;");   // 2 MB
+    TryExec(impl_->db, "PRAGMA busy_timeout=2000;");  // 遇到外部进程短暂占用时等待而不是立刻失败
     Exec(impl_->db,
          "CREATE TABLE IF NOT EXISTS history_items ("
          "id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -361,12 +374,22 @@ void HistoryStore::Open(const std::filesystem::path& database_path) {
     TryExec(impl_->db, "ALTER TABLE history_items ADD COLUMN favorite_group_id INTEGER;");
     TryExec(impl_->db, "ALTER TABLE history_items ADD COLUMN note TEXT NOT NULL DEFAULT '';");
     TryExec(impl_->db, "ALTER TABLE history_items ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0;");
-    Exec(impl_->db, "UPDATE history_items SET sort_order = id WHERE sort_order = 0;");
+    // 只在真有 sort_order=0 的遗留行时才回填；之前每次启动都写一遍整表。
+    {
+        Statement legacy(impl_->db, "SELECT 1 FROM history_items WHERE sort_order = 0 LIMIT 1;");
+        if (sqlite3_step(legacy.get()) == SQLITE_ROW) {
+            Exec(impl_->db, "UPDATE history_items SET sort_order = id WHERE sort_order = 0;");
+        }
+    }
     Exec(impl_->db,
          "CREATE INDEX IF NOT EXISTS idx_history_sort ON history_items(is_pinned DESC, sort_order DESC, id DESC);");
     // Used by the per-copy duplicate checks in Add(); without them every copy scans the whole table.
     Exec(impl_->db, "CREATE INDEX IF NOT EXISTS idx_history_hash ON history_items(content_hash);");
     Exec(impl_->db, "CREATE INDEX IF NOT EXISTS idx_history_created ON history_items(created_at);");
+    // The 3-second "same text twice" dedup in Add() restricts on created_at first, so a composite
+    // index lets SQLite cut the table down to a handful of rows before comparing the (large) text.
+    Exec(impl_->db,
+         "CREATE INDEX IF NOT EXISTS idx_history_created_text ON history_items(created_at, text);");
     MigrateLegacyHtmlHashes(impl_->db);
     Exec(impl_->db,
          "CREATE TABLE IF NOT EXISTS favorite_groups ("
@@ -504,12 +527,14 @@ bool HistoryStore::Add(const CapturedContent& content) {
             }
         }
         // Secondary deduplication: same text within 3 seconds handles different hashes from rapid clipboard events.
+        // 这里的 `WHERE text = ?` 没有索引，每次复制都要把整张表的长文本比一遍（text 是最大的列）。
+        // 限定在最近 3 秒内，走 idx_history_created 先裁出很小的一段再比文本。
         if (!content.text.empty()) {
             Statement remove_text_dup(impl_->db,
-                                      "DELETE FROM history_items WHERE text = ? AND created_at >= ? "
+                                      "DELETE FROM history_items WHERE created_at >= ? AND text = ? "
                                       "AND is_favorite = 0 AND is_phrase = 0 AND id <> ?;");
-            BindText(remove_text_dup.get(), 1, content.text);
-            sqlite3_bind_int64(remove_text_dup.get(), 2, created_at - 3);
+            sqlite3_bind_int64(remove_text_dup.get(), 1, created_at - 3);
+            BindText(remove_text_dup.get(), 2, content.text);
             sqlite3_bind_int64(remove_text_dup.get(), 3, keep_id);
             if (sqlite3_step(remove_text_dup.get()) != SQLITE_DONE) {
                 ThrowSqlite(impl_->db, "sqlite delete text duplicate history failed");
@@ -527,7 +552,7 @@ bool HistoryStore::Add(const CapturedContent& content) {
             BindText(stmt.get(), 5, content.payload_path.wstring());
             BindText(stmt.get(), 6, content.preview);
             BindText(stmt.get(), 7, content.search_text);
-            sqlite3_bind_int64(stmt.get(), 8, NextSortOrder(impl_->db));
+            sqlite3_bind_int64(stmt.get(), 8, NextSortOrder(impl_->db, impl_->sort_order_high_water));
             sqlite3_bind_int64(stmt.get(), 9, *existing_id);
             if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
                 ThrowSqlite(impl_->db, "sqlite move history item to top failed");
@@ -546,7 +571,7 @@ bool HistoryStore::Add(const CapturedContent& content) {
             BindText(stmt.get(), 7, content.preview);
             BindText(stmt.get(), 8, content.search_text);
             BindText(stmt.get(), 9, content.content_hash);
-            sqlite3_bind_int64(stmt.get(), 10, NextSortOrder(impl_->db));
+            sqlite3_bind_int64(stmt.get(), 10, NextSortOrder(impl_->db, impl_->sort_order_high_water));
             if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
                 ThrowSqlite(impl_->db, "sqlite insert history failed");
             }
@@ -607,7 +632,7 @@ bool HistoryStore::AddFavoritePhrase(std::wstring_view text, std::wstring_view n
     BindText(stmt.get(), 4, normalized);
     BindText(stmt.get(), 5, normalized);
     BindText(stmt.get(), 6, hash);
-    sqlite3_bind_int64(stmt.get(), 7, NextSortOrder(impl_->db));
+    sqlite3_bind_int64(stmt.get(), 7, NextSortOrder(impl_->db, impl_->sort_order_high_water));
     BindOptionalInt64(stmt.get(), 8, group_id);
     BindText(stmt.get(), 9, normalized_note);
 
@@ -673,7 +698,9 @@ std::vector<HistoryItem> HistoryStore::Query(const HistoryQuery& query) const {
     }
 
     std::ostringstream sql;
-    sql << "SELECT id, kind, created_at, text, html, files, payload_path, preview, search_text, content_hash, "
+    // html（CF_HTML 原文）可能有几十 KB~MB，列表只需要预览和元信息；它只在真正粘贴单条时用，
+    // 由 Get(id) 单独读出。列表查询因此不再把每行的 html 都复制进内存。
+    sql << "SELECT id, kind, created_at, text, files, payload_path, preview, search_text, content_hash, "
            "is_pinned, is_favorite, is_phrase, favorite_group_id, note FROM history_items WHERE 1=1";
 
     const auto normalized_query = NormalizeSearchNeedle(query.text);
@@ -698,7 +725,8 @@ std::vector<HistoryItem> HistoryStore::Query(const HistoryQuery& query) const {
             sql << " AND favorite_group_id = ?";
         }
     } else {
-        sql << " AND is_phrase = 0 AND is_favorite = 0";
+        sql << " AND is_phrase = 0";
+        if (!query.include_favorites) sql << " AND is_favorite = 0";
     }
     sql << " ORDER BY is_pinned DESC, sort_order DESC, id DESC";
     if (!has_query) {
@@ -732,19 +760,18 @@ std::vector<HistoryItem> HistoryStore::Query(const HistoryQuery& query) const {
         item.kind = static_cast<ClipboardKind>(sqlite3_column_int(stmt.get(), 1));
         item.created_at_unix = sqlite3_column_int64(stmt.get(), 2);
         item.text = DbText(stmt.get(), 3);
-        item.html = DbUtf8(stmt.get(), 4);
-        item.files = SplitFiles(DbText(stmt.get(), 5));
-        item.payload_path = DbText(stmt.get(), 6);
-        item.preview = DbText(stmt.get(), 7);
-        item.search_text = DbText(stmt.get(), 8);
-        item.content_hash = DbText(stmt.get(), 9);
-        item.is_pinned = sqlite3_column_int(stmt.get(), 10) != 0;
-        item.is_favorite = sqlite3_column_int(stmt.get(), 11) != 0;
-        item.is_phrase = sqlite3_column_int(stmt.get(), 12) != 0;
-        if (sqlite3_column_type(stmt.get(), 13) != SQLITE_NULL) {
-            item.favorite_group_id = sqlite3_column_int64(stmt.get(), 13);
+        item.files = SplitFiles(DbText(stmt.get(), 4));
+        item.payload_path = DbText(stmt.get(), 5);
+        item.preview = DbText(stmt.get(), 6);
+        item.search_text = DbText(stmt.get(), 7);
+        item.content_hash = DbText(stmt.get(), 8);
+        item.is_pinned = sqlite3_column_int(stmt.get(), 9) != 0;
+        item.is_favorite = sqlite3_column_int(stmt.get(), 10) != 0;
+        item.is_phrase = sqlite3_column_int(stmt.get(), 11) != 0;
+        if (sqlite3_column_type(stmt.get(), 12) != SQLITE_NULL) {
+            item.favorite_group_id = sqlite3_column_int64(stmt.get(), 12);
         }
-        item.note = DbText(stmt.get(), 14);
+        item.note = DbText(stmt.get(), 13);
         if (has_query && !HistoryItemMatchesSearch(item, normalized_query)) {
             continue;
         }
@@ -754,6 +781,55 @@ std::vector<HistoryItem> HistoryStore::Query(const HistoryQuery& query) const {
         }
     }
     return items;
+}
+
+int HistoryStore::Count(const HistoryQuery& query) const {
+    if (!impl_->db) throw std::runtime_error("database is not open");
+    std::ostringstream sql;
+    sql << "SELECT COUNT(*) FROM history_items WHERE 1=1";
+    const auto needle=NormalizeSearchNeedle(query.text);
+    const bool has_query=!needle.empty();
+    if(!query.kinds.empty()) {
+        sql << " AND kind IN (";
+        for(size_t i=0;i<query.kinds.size();++i){if(i)sql << ",";sql << "?";}
+        sql << ")";
+    }
+    if(query.start_unix)sql << " AND created_at >= ?";
+    if(query.end_unix)sql << " AND created_at <= ?";
+    if(query.favorites_only){
+        sql << " AND is_favorite = 1";
+        if(query.favorite_group_id)sql << " AND favorite_group_id = ?";
+    } else {
+        sql << " AND is_phrase = 0";
+        if(!query.include_favorites)sql << " AND is_favorite = 0";
+    }
+    if(has_query)sql << " AND (text LIKE ? ESCAPE '\\' OR preview LIKE ? ESCAPE '\\' OR search_text LIKE ? ESCAPE '\\' OR note LIKE ? ESCAPE '\\')";
+    sql << ";";
+    Statement stmt(impl_->db,sql.str().c_str());
+    int bind=1;
+    for(auto kind:query.kinds)sqlite3_bind_int(stmt.get(),bind++,static_cast<int>(kind));
+    if(query.start_unix)sqlite3_bind_int64(stmt.get(),bind++,*query.start_unix);
+    if(query.end_unix)sqlite3_bind_int64(stmt.get(),bind++,*query.end_unix);
+    if(query.favorites_only && query.favorite_group_id)sqlite3_bind_int64(stmt.get(),bind++,*query.favorite_group_id);
+    if(has_query){
+        std::wstring escaped;
+        escaped.reserve(needle.size()+2);escaped.push_back(L'%');
+        for(wchar_t ch:needle){if(ch==L'%'||ch==L'_'||ch==L'\\')escaped.push_back(L'\\');escaped.push_back(ch);}
+        escaped.push_back(L'%');
+        for(int i=0;i<4;++i)BindText(stmt.get(),bind++,escaped);
+    }
+    return sqlite3_step(stmt.get())==SQLITE_ROW?sqlite3_column_int(stmt.get(),0):0;
+}
+
+std::map<int64_t,int> HistoryStore::FavoriteGroupCounts() const {
+    if (!impl_->db) throw std::runtime_error("database is not open");
+    std::map<int64_t,int> counts;
+    Statement stmt(impl_->db,"SELECT favorite_group_id, COUNT(*) FROM history_items WHERE is_favorite = 1 GROUP BY favorite_group_id;");
+    while(sqlite3_step(stmt.get())==SQLITE_ROW){
+        if(sqlite3_column_type(stmt.get(),0)!=SQLITE_NULL)
+            counts[sqlite3_column_int64(stmt.get(),0)]=sqlite3_column_int(stmt.get(),1);
+    }
+    return counts;
 }
 
 std::optional<HistoryItem> HistoryStore::Get(int64_t id) const {
@@ -926,6 +1002,9 @@ bool HistoryStore::Delete(int64_t id) {
         ThrowSqlite(impl_->db, "sqlite delete history failed");
     }
     const bool deleted = sqlite3_changes(impl_->db) > 0;
+    if (deleted) {
+        impl_->sort_order_high_water = 0;
+    }
     RemoveUnreferencedPayloads(impl_->db, payloads);
     return deleted;
 }
@@ -937,6 +1016,7 @@ void HistoryStore::Clear() {
     const auto payloads =
         CollectPayloadPaths(impl_->db, "SELECT payload_path FROM history_items WHERE is_favorite = 0;");
     Exec(impl_->db, "DELETE FROM history_items WHERE is_favorite = 0;");
+    impl_->sort_order_high_water = 0;
     RemoveUnreferencedPayloads(impl_->db, payloads);
 }
 
@@ -949,18 +1029,52 @@ void HistoryStore::EnforceLimit() {
             limit = std::max(1, sqlite3_column_int(setting.get(), 0));
         }
     }
+    // 旧写法是 DELETE ... WHERE id NOT IN (SELECT id ... ORDER BY ... LIMIT ?)，每次复制都要把
+    // 整张表读出来排序再比一遍 id。改成两步：先找出第 limit 条的分界线（走 idx_history_sort，
+    // 一条索引扫描），再按 (is_pinned, sort_order, id) 阈值删掉它之后的行。
+    int64_t cut_pinned = 0;
+    int64_t cut_order = 0;
+    int64_t cut_id = 0;
+    bool has_cut = false;
+    {
+        Statement boundary(impl_->db,
+                           "SELECT is_pinned, sort_order, id FROM history_items WHERE is_favorite = 0 "
+                           "ORDER BY is_pinned DESC, sort_order DESC, id DESC LIMIT 1 OFFSET ?;");
+        // The row at index limit-1 is the last one we keep; everything after it is over the limit.
+        sqlite3_bind_int(boundary.get(), 1, limit - 1);
+        if (sqlite3_step(boundary.get()) == SQLITE_ROW) {
+            has_cut = true;
+            cut_pinned = sqlite3_column_int64(boundary.get(), 0);
+            cut_order = sqlite3_column_int64(boundary.get(), 1);
+            cut_id = sqlite3_column_int64(boundary.get(), 2);
+        }
+    }
+    if (!has_cut) {
+        return; // 未超出上限：没有要删的行。
+    }
+
     static constexpr char kOverflowFilter[] =
-        "FROM history_items WHERE is_favorite = 0 AND id NOT IN ("
-        "SELECT id FROM history_items WHERE is_favorite = 0 "
-        "ORDER BY is_pinned DESC, sort_order DESC, id DESC LIMIT ?);";
-    const auto payloads = CollectPayloadPaths(impl_->db,
-                                              (std::string("SELECT payload_path ") + kOverflowFilter).c_str(),
-                                              [&](sqlite3_stmt* stmt) { sqlite3_bind_int(stmt, 1, limit); });
+        "FROM history_items WHERE is_favorite = 0 AND (is_pinned < ? OR "
+        "(is_pinned = ? AND (sort_order < ? OR (sort_order = ? AND id < ?))));";
+    const auto payloads = CollectPayloadPaths(
+        impl_->db, (std::string("SELECT payload_path ") + kOverflowFilter).c_str(), [&](sqlite3_stmt* stmt) {
+            sqlite3_bind_int64(stmt, 1, cut_pinned);
+            sqlite3_bind_int64(stmt, 2, cut_pinned);
+            sqlite3_bind_int64(stmt, 3, cut_order);
+            sqlite3_bind_int64(stmt, 4, cut_order);
+            sqlite3_bind_int64(stmt, 5, cut_id);
+        });
     Statement stmt(impl_->db, (std::string("DELETE ") + kOverflowFilter).c_str());
-    sqlite3_bind_int(stmt.get(), 1, limit);
+    sqlite3_bind_int64(stmt.get(), 1, cut_pinned);
+    sqlite3_bind_int64(stmt.get(), 2, cut_pinned);
+    sqlite3_bind_int64(stmt.get(), 3, cut_order);
+    sqlite3_bind_int64(stmt.get(), 4, cut_order);
+    sqlite3_bind_int64(stmt.get(), 5, cut_id);
     if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
         ThrowSqlite(impl_->db, "sqlite enforce limit failed");
     }
+    // 删掉的可能是 sort_order 最大的那些行，缓存的水位线要重新读一次。
+    impl_->sort_order_high_water = 0;
     RemoveUnreferencedPayloads(impl_->db, payloads);
 }
 

@@ -255,6 +255,8 @@ bool App::HotkeyAvailable(unsigned modifiers, unsigned vk) const {
 
 void App::RefreshPopupTheme() {
     if (popup_) {
+        // Settings may have just been saved; make the popup re-read them instead of using its cache.
+        popup_->InvalidateSettingsCache();
         popup_->UpdateBehaviorFromSettings();
         popup_->Refresh();
     }
@@ -264,6 +266,8 @@ void App::RefreshPopupTheme() {
 }
 
 void App::RefreshThemeForSystemChange() {
+    // The system preference may have changed; drop the cached registry answer before anything repaints.
+    InvalidateSystemDarkTheme();
     if (!ThemeChangeShouldRefreshPalette(settings_.theme_mode)) {
         if (popup_) {
             popup_->RefreshTheme();
@@ -373,7 +377,8 @@ void App::OnContinuousPasteHotkey(HWND target) {
     const auto items = store_.Query(query);
     const auto selected_id = popup_ ? popup_->SelectedItemId() : std::nullopt;
     if (const auto item = continuous_paste_.NextFromSelection(items, selected_id)) {
-        if (paste_controller_.RestoreToClipboard(*item, hwnd_)) {
+        auto load_full = [this](int64_t id) { return store_.Get(id); };
+        if (paste_controller_.RestoreToClipboard(*item, hwnd_, load_full)) {
             paste_controller_.SendPaste(target, PasteShortcutOptions{false});
             if (popup_) {
                 popup_->AdvanceSelectionAfterContinuousPaste();

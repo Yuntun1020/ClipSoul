@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <map>
 #include <optional>
 #include <set>
 #include <string>
@@ -27,6 +28,9 @@ struct CapturedContent {
     std::wstring preview;
     std::wstring search_text;
     std::wstring content_hash;
+    // Image captures decode under the clipboard lock but must hash/write the file after releasing
+    // it, so the raw DIB is carried here until Capture() finishes the file.
+    std::vector<char> pending_dib;
 };
 
 struct HistoryItem {
@@ -54,6 +58,7 @@ struct HistoryQuery {
     std::optional<int64_t> start_unix;
     std::optional<int64_t> end_unix;
     bool favorites_only = false;
+    bool include_favorites = false;
     std::optional<int64_t> favorite_group_id;
 };
 
@@ -101,6 +106,8 @@ public:
     std::vector<FavoriteGroup> FavoriteGroups() const;
     std::vector<HistoryItem> Recent(int limit, std::wstring_view query) const;
     std::vector<HistoryItem> Query(const HistoryQuery& query) const;
+    int Count(const HistoryQuery& query) const;
+    std::map<int64_t, int> FavoriteGroupCounts() const;
     std::optional<HistoryItem> Get(int64_t id) const;
     bool SetPinned(int64_t id, bool pinned);
     bool SetFavorite(int64_t id, bool favorite);
@@ -122,6 +129,7 @@ public:
     void Toggle(int64_t id);
     void Clear();
     bool IsSelected(int64_t id) const;
+    size_t Count() const { return ids_.size(); }
     std::vector<int64_t> SelectedIds() const;
 
 private:

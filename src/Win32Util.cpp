@@ -135,20 +135,39 @@ void SetPopupWindowChromeAttributes(HWND hwnd, int theme_mode) {
     DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &border_color, sizeof(border_color));
 }
 
+namespace {
+// Reading the registry costs three syscalls, and IsSystemDarkTheme() is called from paint-time code
+// (palette resolution, icon tinting, WM_CTLCOLOREDIT). Cache the answer and only re-read it when the
+// shell tells us the personalization settings changed (WM_SETTINGCHANGE / WM_THEMECHANGED).
+bool g_system_dark_theme = false;
+bool g_system_dark_theme_valid = false;
+} // namespace
+
 bool IsSystemDarkTheme() {
+    if (g_system_dark_theme_valid) {
+        return g_system_dark_theme;
+    }
+
+    bool dark = false;
     HKEY key = nullptr;
     if (RegOpenKeyExW(HKEY_CURRENT_USER,
                       L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize", 0,
-                      KEY_QUERY_VALUE, &key) != ERROR_SUCCESS) {
-        return false;
+                      KEY_QUERY_VALUE, &key) == ERROR_SUCCESS) {
+        DWORD value = 1;
+        DWORD size = sizeof(value);
+        const bool ok = RegQueryValueExW(key, L"AppsUseLightTheme", nullptr, nullptr,
+                                         reinterpret_cast<LPBYTE>(&value), &size) == ERROR_SUCCESS;
+        dark = ok && value == 0;
+        RegCloseKey(key);
     }
 
-    DWORD value = 1;
-    DWORD size = sizeof(value);
-    const bool ok = RegQueryValueExW(key, L"AppsUseLightTheme", nullptr, nullptr,
-                                     reinterpret_cast<LPBYTE>(&value), &size) == ERROR_SUCCESS;
-    RegCloseKey(key);
-    return ok && value == 0;
+    g_system_dark_theme = dark;
+    g_system_dark_theme_valid = true;
+    return dark;
+}
+
+void InvalidateSystemDarkTheme() {
+    g_system_dark_theme_valid = false;
 }
 
 bool SetStartWithWindows(bool enabled) {

@@ -2,634 +2,616 @@
 
 #include "ClipSoul/PopupLayout.h"
 #include "ClipSoul/TextUtil.h"
+#include "ClipSoul/Win32Util.h"
 
-#include <windowsx.h>
+#include <commctrl.h>
 
 #include <algorithm>
 #include <cmath>
+#include <initializer_list>
 #include <string>
 #include <utility>
 
 namespace ClipSoul::popup_detail {
 namespace {
 
-constexpr int kPhraseEditId = 4101;
-constexpr int kPhraseSaveId = 4102;
-constexpr int kPhraseCancelId = 4103;
-constexpr int kPhraseNoteEditId = 4104;
-constexpr wchar_t kPhrasePromptClass[] = L"ClipSoul.FavoritePhrasePrompt";
-constexpr int kTextPromptEditId = 4201;
-constexpr wchar_t kTextPromptClass[] = L"ClipSoul.TextPrompt";
-constexpr UINT_PTR kPhraseHoverTimer = 62;
-constexpr UINT_PTR kPromptEntranceTimer = 63;
-constexpr DWORD kChildWindowEntranceMs = 120;
-constexpr wchar_t kPromptEntranceTopProp[] = L"ClipSoul.PromptEntranceTop";
-constexpr wchar_t kPromptEntranceStepProp[] = L"ClipSoul.PromptEntranceStep";
+constexpr wchar_t kPromptClass[] = L"ClipSoul.PopupPrompt";
+constexpr int kEditId = 4101;
+constexpr int kNoteId = 4104;
+constexpr int kCloseId = 4105;
+constexpr UINT_PTR kEntranceTimer = 63;
 
-void ShowChildWindowWithEntrance(HWND hwnd) {
-    if (PopupPromptShouldUseSlideAnimation() &&
-        AnimateWindow(hwnd, kChildWindowEntranceMs, AW_ACTIVATE | AW_SLIDE | AW_VER_POSITIVE)) {
-        return;
-    }
-    if (PopupPromptShouldUseBlendAnimation() && AnimateWindow(hwnd, kChildWindowEntranceMs, AW_ACTIVATE | AW_BLEND)) {
-        return;
-    }
-    if (PopupPromptShouldUsePositionNudgeAnimation()) {
-        RECT rect{};
-        if (GetWindowRect(hwnd, &rect)) {
-            const int offset = PopupPromptEntranceOffsetPixels();
-            SetWindowPos(hwnd, nullptr, rect.left, rect.top + offset, 0, 0,
-                         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-            ShowWindow(hwnd, SW_SHOW);
-            UpdateWindow(hwnd);
-            SetPropW(hwnd, kPromptEntranceTopProp, IntToPtr(rect.top));
-            SetPropW(hwnd, kPromptEntranceStepProp, IntToPtr(0));
-            SetTimer(hwnd, kPromptEntranceTimer, PopupPromptEntranceTimerIntervalMs(), nullptr);
-            return;
-        }
-    }
-    ShowWindow(hwnd, SW_SHOW);
+COLORREF PromptColor(uint32_t rgb) {
+    return RGB((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
 }
 
-bool AdvancePromptEntranceAnimation(HWND hwnd) {
-    auto top_handle = GetPropW(hwnd, kPromptEntranceTopProp);
-    if (!top_handle) {
-        KillTimer(hwnd, kPromptEntranceTimer);
-        return false;
-    }
-    const int top = PtrToInt(top_handle);
-    const int step = PtrToInt(GetPropW(hwnd, kPromptEntranceStepProp)) + 1;
-    const int steps = std::max(1, PopupPromptEntranceStepCount());
-    RECT rect{};
-    if (!GetWindowRect(hwnd, &rect)) {
-        KillTimer(hwnd, kPromptEntranceTimer);
-        RemovePropW(hwnd, kPromptEntranceTopProp);
-        RemovePropW(hwnd, kPromptEntranceStepProp);
-        return true;
-    }
-    const float progress = PopupMotionProgress(static_cast<float>(std::min(step, steps)) / static_cast<float>(steps));
-    const int offset = PopupPromptEntranceOffsetPixels();
-    const int y = top + static_cast<int>(std::lround(static_cast<float>(offset) * (1.0f - progress)));
-    SetWindowPos(hwnd, nullptr, rect.left, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-    if (step >= steps) {
-        KillTimer(hwnd, kPromptEntranceTimer);
-        RemovePropW(hwnd, kPromptEntranceTopProp);
-        RemovePropW(hwnd, kPromptEntranceStepProp);
-        SetWindowPos(hwnd, nullptr, rect.left, top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-    } else {
-        SetPropW(hwnd, kPromptEntranceStepProp, IntToPtr(step));
-    }
-    return true;
+COLORREF PromptMix(COLORREF from, COLORREF to, float amount) {
+    const auto channel = [amount](int a, int b) {
+        return static_cast<int>(std::lround(a + (b - a) * amount));
+    };
+    return RGB(channel(GetRValue(from), GetRValue(to)), channel(GetGValue(from), GetGValue(to)),
+               channel(GetBValue(from), GetBValue(to)));
 }
 
-void CloseChildWindowWithExit(HWND hwnd) {
-    KillTimer(hwnd, kPromptEntranceTimer);
-    RemovePropW(hwnd, kPromptEntranceTopProp);
-    RemovePropW(hwnd, kPromptEntranceStepProp);
-    DestroyWindow(hwnd);
+bool PromptAnimationsEnabled() {
+    BOOL client_animation = TRUE;
+    ANIMATIONINFO animation{sizeof(animation), TRUE};
+    SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &client_animation, 0);
+    SystemParametersInfoW(SPI_GETANIMATION, sizeof(animation), &animation, 0);
+    return client_animation && animation.iMinAnimate;
 }
 
-void SetPromptCursorForTarget(int target) {
-    SetCursor(LoadCursorW(nullptr, target == 0 ? IDC_ARROW : IDC_HAND));
-}
+struct PromptLayout {
+    RECT title{};
+    RECT subtitle{};
+    RECT field{};
+    RECT label{};
+    RECT note{};
+    RECT cancel{};
+    RECT save{};
+    RECT close{};
+    int height = 0;
+};
 
-HMENU ControlId(int id) {
-    return reinterpret_cast<HMENU>(static_cast<INT_PTR>(id));
-}
-
-struct PhrasePromptState {
+struct PromptState {
     HINSTANCE instance = nullptr;
+    HWND owner = nullptr;
     HWND hwnd = nullptr;
     HWND edit = nullptr;
     HWND note_edit = nullptr;
-    std::wstring text;
-    std::wstring note;
+    HWND cancel = nullptr;
+    HWND save = nullptr;
+    HWND close = nullptr;
+    HWND hovered = nullptr;
+    HWND ime_edit = nullptr;
+    UINT dpi = 96;
+    int theme_mode = 0;
+    bool phrase = false;
+    bool group = false;
     bool accepted = false;
-    bool tracking_mouse = false;
-    int hover_target = 0;
-    float hover_progress = 0.0f;
-};
-
-struct TextPromptState {
-    HINSTANCE instance = nullptr;
-    HWND hwnd = nullptr;
-    HWND edit = nullptr;
+    bool entering = false;
+    ULONGLONG entrance_start = 0;
+    int entrance_top = 0;
     std::wstring title;
     std::wstring subtitle;
     std::wstring initial_text;
     std::wstring text;
-    bool accepted = false;
-    bool tracking_mouse = false;
-    int hover_target = 0;
-    float hover_progress = 0.0f;
+    std::wstring note;
+    PopupThemePalette palette{};
+    PromptLayout layout{};
+    HFONT title_font = nullptr;
+    HFONT subtitle_font = nullptr;
+    HFONT field_font = nullptr;
+    HFONT label_font = nullptr;
+    HFONT button_font = nullptr;
+    HBRUSH paper_brush = nullptr;
+
+    int Px(float dip) const { return static_cast<int>(std::lround(dip * dpi / 96.0f)); }
+
+    void ClearFonts() {
+        for (HFONT font : {title_font, subtitle_font, field_font, label_font, button_font}) {
+            if (font) DeleteObject(font);
+        }
+    }
+
+    ~PromptState() {
+        ClearFonts();
+        if (paper_brush) DeleteObject(paper_brush);
+    }
 };
 
-void StyleChildControl(HWND control) {
-    auto font = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
-    SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+void RefreshPromptPalette(PromptState& state) {
+    // Explicit light/dark settings take precedence over the system preference.
+    state.palette = ResolvePopupThemePalette(state.theme_mode, IsSystemDarkTheme());
+    if (state.paper_brush) DeleteObject(state.paper_brush);
+    state.paper_brush = CreateSolidBrush(PromptColor(state.palette.window_tint));
+    if (state.hwnd) RedrawWindow(state.hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
 }
 
-void DrawCenteredText(HDC dc, const RECT& rect, const wchar_t* text) {
-    DrawTextW(dc, text, static_cast<int>(wcslen(text)), const_cast<RECT*>(&rect),
-              DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+HFONT CreatePromptFont(const PromptState& state, float dip, int weight = FW_NORMAL) {
+    return CreateFontW(-state.Px(dip), 0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                       OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                       DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
 }
 
-void DrawGdiRoundedPanel(HDC dc, const RECT& rect, int radius, COLORREF fill, COLORREF stroke) {
+void RefreshPromptFonts(PromptState& state) {
+    state.ClearFonts();
+    state.title_font = CreatePromptFont(state, 14, FW_SEMIBOLD);
+    state.subtitle_font = CreatePromptFont(state, 11.5f);
+    state.field_font = CreatePromptFont(state, 13);
+    state.label_font = CreatePromptFont(state, 11);
+    state.button_font = CreatePromptFont(state, 12);
+    for (HWND control : {state.edit, state.note_edit}) {
+        if (control) SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(state.field_font), TRUE);
+    }
+    for (HWND control : {state.cancel, state.save, state.close}) {
+        if (control) SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(state.button_font), TRUE);
+    }
+}
+
+int PromptLineHeight(HDC dc, HFONT font) {
+    HGDIOBJ previous = SelectObject(dc, font);
+    TEXTMETRICW metrics{};
+    GetTextMetricsW(dc, &metrics);
+    SelectObject(dc, previous);
+    return metrics.tmHeight;
+}
+
+PromptLayout MeasurePrompt(const PromptState& state, int width) {
+    const auto px = [&state](float dip) { return state.Px(dip); };
+    PromptLayout layout;
+    const int left = px(16);
+    const int right = width - px(16);
+    layout.close = {right - px(24), px(16), right, px(40)};
+    layout.title = {left, px(16), layout.close.left - px(8), px(40)};
+    HDC dc = GetDC(state.hwnd);
+    HGDIOBJ previous = SelectObject(dc, state.subtitle_font);
+    RECT subtitle{left, 0, right, 0};
+    DrawTextW(dc, state.subtitle.c_str(), -1, &subtitle, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
+    const int subtitle_height = std::max(static_cast<int>(subtitle.bottom), PromptLineHeight(dc, state.subtitle_font));
+    layout.subtitle = {left, px(43), right, px(43) + subtitle_height};
+    const int line_height = PromptLineHeight(dc, state.field_font);
+    const int field_top = layout.subtitle.bottom + px(12);
+    layout.field = {left, field_top, right, field_top + line_height * (state.phrase ? 4 : 1) + px(16)};
+    int content_bottom = layout.field.bottom;
+    if (state.phrase) {
+        const int label_top = content_bottom + px(10);
+        layout.label = {left, label_top, right, label_top + PromptLineHeight(dc, state.label_font)};
+        layout.note = {left, layout.label.bottom + px(5), right,
+                       layout.label.bottom + px(5) + line_height + px(16)};
+        content_bottom = layout.note.bottom;
+    }
+    SelectObject(dc, state.button_font);
+    SIZE text_size{};
+    GetTextExtentPoint32W(dc, L"保存", 2, &text_size);
+    const int button_width = text_size.cx + px(28);
+    const int buttons_top = content_bottom + px(14);
+    layout.save = {right - button_width, buttons_top, right, buttons_top + px(28)};
+    layout.cancel = {layout.save.left - px(6) - button_width, buttons_top,
+                     layout.save.left - px(6), buttons_top + px(28)};
+    layout.height = layout.save.bottom + px(14);
+    SelectObject(dc, previous);
+    ReleaseDC(state.hwnd, dc);
+    return layout;
+}
+
+void PositionControl(HWND control, const RECT& rect) {
+    if (control) MoveWindow(control, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, TRUE);
+}
+
+void PositionPromptControls(PromptState& state) {
+    const auto position_edit = [&state](HWND edit, RECT rect, bool multiline) {
+        if (!edit) return;
+        InflateRect(&rect, -state.Px(10), -state.Px(8));
+        PositionControl(edit, rect);
+        SendMessageW(edit, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, 0);
+        if (multiline) {
+            RECT client{};
+            GetClientRect(edit, &client);
+            SendMessageW(edit, EM_SETRECTNP, 0, reinterpret_cast<LPARAM>(&client));
+        }
+    };
+    position_edit(state.edit, state.layout.field, state.phrase);
+    position_edit(state.note_edit, state.layout.note, false);
+    PositionControl(state.cancel, state.layout.cancel);
+    PositionControl(state.save, state.layout.save);
+    PositionControl(state.close, state.layout.close);
+}
+
+void SetPromptRegion(PromptState& state, int width, int height) {
+    // RoundRect/region APIs take the ellipse diameter, CSS specifies the radius.
+    HRGN region = CreateRoundRectRgn(0, 0, width + 1, height + 1, state.Px(24), state.Px(24));
+    if (region && !SetWindowRgn(state.hwnd, region, TRUE)) DeleteObject(region);
+}
+
+void AnchorPrompt(PromptState& state) {
+    RECT owner_client{};
+    GetClientRect(state.owner, &owner_client);
+    POINT origin{};
+    ClientToScreen(state.owner, &origin);
+    const int width = std::max(1, static_cast<int>(owner_client.right - owner_client.left) - 2 * state.Px(20));
+    state.layout = MeasurePrompt(state, width);
+    state.entrance_top = origin.y + state.Px(104);
+    SetWindowPos(state.hwnd, nullptr, origin.x + state.Px(20), state.entrance_top, width,
+                 state.layout.height, SWP_NOZORDER | SWP_NOACTIVATE);
+    SetPromptRegion(state, width, state.layout.height);
+    PositionPromptControls(state);
+}
+
+void FinishPromptEntrance(PromptState& state) {
+    KillTimer(state.hwnd, kEntranceTimer);
+    if (!state.entering) return;
+    state.entering = false;
+    RECT rect{};
+    GetWindowRect(state.hwnd, &rect);
+    SetWindowPos(state.hwnd, nullptr, rect.left, state.entrance_top, 0, 0,
+                 SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    SetLayeredWindowAttributes(state.hwnd, 0, 255, LWA_ALPHA);
+}
+
+void ShowPrompt(PromptState& state) {
+    if (PromptAnimationsEnabled()) {
+        state.entering = true;
+        state.entrance_start = GetTickCount64();
+        RECT rect{};
+        GetWindowRect(state.hwnd, &rect);
+        SetWindowPos(state.hwnd, nullptr, rect.left, state.entrance_top + state.Px(10), 0, 0,
+                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        SetLayeredWindowAttributes(state.hwnd, 0, 0, LWA_ALPHA);
+        if (!SetTimer(state.hwnd, kEntranceTimer, 16, nullptr)) FinishPromptEntrance(state);
+    }
+    ShowWindow(state.hwnd, SW_SHOW);
+    SetFocus(state.edit);
+    SendMessageW(state.edit, EM_SETSEL, 0, -1);
+    UpdateWindow(state.hwnd);
+}
+
+void AdvancePromptEntrance(PromptState& state) {
+    if (!PromptAnimationsEnabled()) {
+        FinishPromptEntrance(state);
+        return;
+    }
+    const float elapsed = static_cast<float>(GetTickCount64() - state.entrance_start);
+    const float progress = std::clamp(elapsed / 200.0f, 0.0f, 1.0f);
+    const float eased = 1.0f - std::pow(1.0f - progress, 3.0f);
+    RECT rect{};
+    GetWindowRect(state.hwnd, &rect);
+    SetWindowPos(state.hwnd, nullptr, rect.left,
+                 state.entrance_top + static_cast<int>(std::lround(state.Px(10) * (1.0f - eased))),
+                 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    SetLayeredWindowAttributes(state.hwnd, 0,
+                               static_cast<BYTE>(255 * std::min(1.0f, elapsed / 130.0f)), LWA_ALPHA);
+    if (progress >= 1.0f) FinishPromptEntrance(state);
+}
+
+void DrawRoundedPanel(HDC dc, const RECT& rect, int radius, int stroke_width, COLORREF fill, COLORREF stroke) {
     HBRUSH brush = CreateSolidBrush(fill);
-    HPEN pen = CreatePen(PS_SOLID, 1, stroke);
+    HPEN pen = CreatePen(PS_SOLID, stroke_width, stroke);
     HGDIOBJ old_brush = SelectObject(dc, brush);
     HGDIOBJ old_pen = SelectObject(dc, pen);
-    RoundRect(dc, rect.left, rect.top, rect.right, rect.bottom, radius, radius);
+    RoundRect(dc, rect.left, rect.top, rect.right, rect.bottom, radius * 2, radius * 2);
     SelectObject(dc, old_pen);
     SelectObject(dc, old_brush);
     DeleteObject(pen);
     DeleteObject(brush);
 }
 
-void FillGdiSolid(HDC dc, const RECT& rect, COLORREF fill) {
-    HBRUSH brush = CreateSolidBrush(fill);
-    FillRect(dc, &rect, brush);
-    DeleteObject(brush);
+void DrawPromptText(HDC dc, HFONT font, COLORREF color, RECT rect, const std::wstring& text, UINT flags) {
+    HGDIOBJ previous = SelectObject(dc, font);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, color);
+    DrawTextW(dc, text.c_str(), -1, &rect, flags | DT_NOPREFIX);
+    SelectObject(dc, previous);
 }
 
-COLORREF PromptCanvasFill() {
-    return RGB(246, 241, 232);
+void PaintPrompt(PromptState& state) {
+    PAINTSTRUCT ps{};
+    HDC dc = BeginPaint(state.hwnd, &ps);
+    RECT client{};
+    GetClientRect(state.hwnd, &client);
+    HDC memory = CreateCompatibleDC(dc);
+    HBITMAP bitmap = CreateCompatibleBitmap(dc, client.right, client.bottom);
+    HGDIOBJ previous = SelectObject(memory, bitmap);
+    const auto& palette = state.palette;
+    HBRUSH surface = CreateSolidBrush(PromptColor(palette.panel_fill));
+    FillRect(memory, &client, surface);
+    DeleteObject(surface);
+    RECT panel{0, 0, client.right, client.bottom};
+    DrawRoundedPanel(memory, panel, state.Px(12), std::max(1, state.Px(1)),
+                     PromptColor(palette.panel_fill), PromptColor(palette.border));
+    const auto draw_field = [&](const RECT& rect, HWND edit) {
+        const bool focused = GetFocus() == edit;
+        DrawRoundedPanel(memory, rect, state.Px(7), std::max(1, state.Px(focused ? 1.2f : 1.0f)),
+                         PromptColor(palette.window_tint),
+                         PromptColor(focused ? palette.text : palette.strong_border));
+    };
+    draw_field(state.layout.field, state.edit);
+    if (state.phrase) {
+        draw_field(state.layout.note, state.note_edit);
+        DrawPromptText(memory, state.label_font, PromptColor(palette.text_tertiary), state.layout.label,
+                       L"备注", DT_SINGLELINE | DT_VCENTER);
+    }
+    DrawPromptText(memory, state.title_font, PromptColor(palette.text), state.layout.title,
+                   state.title, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+    DrawPromptText(memory, state.subtitle_font, PromptColor(palette.text_tertiary), state.layout.subtitle,
+                   state.subtitle, DT_WORDBREAK);
+    BitBlt(dc, 0, 0, client.right, client.bottom, memory, 0, 0, SRCCOPY);
+    SelectObject(memory, previous);
+    DeleteObject(bitmap);
+    DeleteDC(memory);
+    EndPaint(state.hwnd, &ps);
 }
 
-COLORREF PromptSurfaceFill() {
-    return RGB(251, 248, 242);
+void DrawPromptButton(const PromptState& state, const DRAWITEMSTRUCT& item) {
+    const auto& palette = state.palette;
+    const bool hovered = state.hovered == item.hwndItem || (item.itemState & ODS_SELECTED);
+    const bool close = item.CtlID == kCloseId;
+    const bool save = item.CtlID == IDOK;
+    COLORREF fill = PromptColor(palette.panel_fill);
+    COLORREF text = PromptColor(palette.muted);
+    COLORREF border = PromptColor(palette.strong_border);
+    HBRUSH surface = CreateSolidBrush(fill);
+    FillRect(item.hDC, &item.rcItem, surface);
+    DeleteObject(surface);
+    if (close) {
+        text = PromptColor(hovered ? palette.danger : palette.text_tertiary);
+        if (hovered) {
+            fill = PromptMix(fill, PromptColor(palette.danger), palette.dark ? 0.15f : 0.10f);
+            DrawRoundedPanel(item.hDC, item.rcItem, state.Px(5), std::max(1, state.Px(1)), fill, fill);
+        }
+        HPEN pen = CreatePen(PS_SOLID, std::max(1, state.Px(1)), text);
+        HGDIOBJ previous = SelectObject(item.hDC, pen);
+        const int cx = (item.rcItem.left + item.rcItem.right) / 2;
+        const int cy = (item.rcItem.top + item.rcItem.bottom) / 2;
+        const int half = state.Px(3.5f);
+        MoveToEx(item.hDC, cx - half, cy - half, nullptr);
+        LineTo(item.hDC, cx + half, cy + half);
+        MoveToEx(item.hDC, cx + half, cy - half, nullptr);
+        LineTo(item.hDC, cx - half, cy + half);
+        SelectObject(item.hDC, previous);
+        DeleteObject(pen);
+    } else {
+        if (save) {
+            fill = PromptColor(hovered ? palette.accent_hover : palette.accent);
+            border = fill;
+            text = PromptColor(palette.window_tint);
+        } else if (hovered) {
+            fill = PromptColor(palette.paper_hover);
+            text = PromptColor(palette.text);
+        }
+        DrawRoundedPanel(item.hDC, item.rcItem, state.Px(7), std::max(1, state.Px(1)), fill, border);
+        DrawPromptText(item.hDC, state.button_font, text, item.rcItem,
+                       save ? (state.group ? L"创建" : L"保存") : L"取消", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+    if ((item.itemState & ODS_FOCUS) && !(item.itemState & ODS_NOFOCUSRECT)) {
+        RECT focus = item.rcItem;
+        InflateRect(&focus, -state.Px(3), -state.Px(3));
+        DrawFocusRect(item.hDC, &focus);
+    }
 }
 
-COLORREF PromptHoverFill() {
-    return RGB(240, 231, 217);
+std::wstring ReadPromptEdit(HWND edit) {
+    const int length = GetWindowTextLengthW(edit);
+    std::wstring text(static_cast<size_t>(length) + 1, L'\0');
+    GetWindowTextW(edit, text.data(), length + 1);
+    text.resize(static_cast<size_t>(length));
+    return text;
 }
 
-COLORREF PromptBorderColor() {
-    return RGB(216, 208, 197);
-}
-
-COLORREF PromptStrongBorderColor() {
-    return RGB(185, 169, 149);
-}
-
-COLORREF PromptTextColor() {
-    return RGB(33, 30, 25);
-}
-
-COLORREF PromptMutedColor() {
-    return RGB(105, 100, 91);
-}
-
-COLORREF PromptPrimaryColor(bool hovered) {
-    return hovered ? RGB(102, 114, 95) : RGB(115, 130, 107);
-}
-
-COLORREF PromptDangerColor() {
-    return RGB(169, 81, 72);
-}
-
-COLORREF PromptDangerFill() {
-    return RGB(248, 229, 224);
-}
-
-bool IsPromptEditMessage(HWND edit, HWND candidate) {
-    return edit && candidate && (candidate == edit || IsChild(edit, candidate));
-}
-
-void DispatchPromptMessage(HWND prompt, HWND edit, HWND note_edit, MSG& message) {
-    if (IsPromptEditMessage(edit, message.hwnd) || IsPromptEditMessage(note_edit, message.hwnd)) {
-        TranslateMessage(&message);
-        DispatchMessageW(&message);
+void AcceptPrompt(PromptState& state) {
+    state.text = state.phrase ? NormalizeEditableNote(ReadPromptEdit(state.edit))
+                              : NormalizeWhitespace(ReadPromptEdit(state.edit));
+    // An empty note is a successful edit; a group/phrase must contain text.
+    if (state.text.empty() && (state.phrase || state.group)) {
+        SetFocus(state.edit);
         return;
     }
-    if (!IsDialogMessageW(prompt, &message)) {
-        TranslateMessage(&message);
-        DispatchMessageW(&message);
-    }
+    if (state.phrase) state.note = NormalizeWhitespace(ReadPromptEdit(state.note_edit));
+    state.accepted = true;
+    DestroyWindow(state.hwnd);
 }
 
-int PhraseHitTarget(int x, int y) {
-    if (x >= 286 && x <= 310 && y >= 12 && y <= 36) return 1;
-    if (x >= 146 && x <= 216 && y >= 236 && y <= 264) return 2;
-    if (x >= 228 && x <= 298 && y >= 236 && y <= 264) return 3;
-    return 0;
-}
-
-int TextPromptHitTarget(int x, int y) {
-    if (x >= 286 && x <= 310 && y >= 12 && y <= 36) return 1;
-    if (x >= 146 && x <= 216 && y >= 158 && y <= 186) return 2;
-    if (x >= 228 && x <= 298 && y >= 158 && y <= 186) return 3;
-    return 0;
-}
-
-LRESULT CALLBACK TextPromptProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
-    auto* state = reinterpret_cast<TextPromptState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-    if (message == WM_NCCREATE) {
-        const auto* create = reinterpret_cast<CREATESTRUCTW*>(lparam);
-        state = static_cast<TextPromptState*>(create->lpCreateParams);
-        state->hwnd = hwnd;
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+LRESULT CALLBACK PromptControlProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam,
+                                   UINT_PTR subclass_id, DWORD_PTR reference) {
+    auto& state = *reinterpret_cast<PromptState*>(reference);
+    if (message == WM_NCDESTROY) {
+        RemoveWindowSubclass(hwnd, PromptControlProc, subclass_id);
+        return DefSubclassProc(hwnd, message, wparam, lparam);
     }
-
-    switch (message) {
-    case WM_CREATE:
-        state->initial_text = TextForMultilineEdit(state->initial_text);
-        state->edit = CreateWindowExW(0, L"EDIT", state->initial_text.c_str(),
-                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_AUTOVSCROLL |
-                                          ES_WANTRETURN,
-                                      24, 82, 272, 58, hwnd, ControlId(kTextPromptEditId),
-                                      state->instance, nullptr);
-        StyleChildControl(state->edit);
-        SetFocus(state->edit);
-        return 0;
-    case WM_PAINT: {
-        PAINTSTRUCT ps{};
-        HDC dc = BeginPaint(hwnd, &ps);
-        RECT rc{};
-        GetClientRect(hwnd, &rc);
-        HDC mem_dc = CreateCompatibleDC(dc);
-        HBITMAP bitmap = CreateCompatibleBitmap(dc, rc.right - rc.left, rc.bottom - rc.top);
-        HGDIOBJ old_bitmap = SelectObject(mem_dc, bitmap);
-        FillGdiSolid(mem_dc, rc, PromptCanvasFill());
-        RECT panel_rect{0, 0, rc.right - 1, rc.bottom - 1};
-        DrawGdiRoundedPanel(mem_dc, panel_rect, 18, PromptCanvasFill(), PromptBorderColor());
-        RECT input_rect{22, 78, 298, 144};
-        DrawGdiRoundedPanel(mem_dc, input_rect, 12, PromptSurfaceFill(), PromptBorderColor());
-
-        const bool save_hover = state->hover_target == 2 && state->hover_progress > 0.0f;
-        RECT save_button{146, 158, 216, 186};
-        DrawGdiRoundedPanel(mem_dc, save_button, 12, PromptPrimaryColor(save_hover),
-                            PromptPrimaryColor(save_hover));
-        const bool cancel_hover = state->hover_target == 3 && state->hover_progress > 0.0f;
-        RECT cancel_button{228, 158, 298, 186};
-        DrawGdiRoundedPanel(mem_dc, cancel_button, 12,
-                            cancel_hover ? PromptHoverFill() : PromptSurfaceFill(),
-                            cancel_hover ? PromptStrongBorderColor() : PromptBorderColor());
-
-        SetBkMode(mem_dc, TRANSPARENT);
-        auto font = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
-        HGDIOBJ old_font = SelectObject(mem_dc, font);
-        SetTextColor(mem_dc, PromptTextColor());
-        TextOutW(mem_dc, 22, 18, state->title.c_str(), static_cast<int>(state->title.size()));
-        if (state->hover_target == 1 && state->hover_progress > 0.0f) {
-            RECT close_rect{286, 12, 310, 36};
-            DrawGdiRoundedPanel(mem_dc, close_rect, 8, PromptDangerFill(), PromptDangerColor());
-        }
-        HPEN close_pen = CreatePen(PS_SOLID, 2,
-                                   state->hover_target == 1 ? PromptDangerColor() : PromptMutedColor());
-        HGDIOBJ old_pen = SelectObject(mem_dc, close_pen);
-        MoveToEx(mem_dc, 294, 20, nullptr);
-        LineTo(mem_dc, 302, 28);
-        MoveToEx(mem_dc, 302, 20, nullptr);
-        LineTo(mem_dc, 294, 28);
-        SelectObject(mem_dc, old_pen);
-        DeleteObject(close_pen);
-        SetTextColor(mem_dc, PromptMutedColor());
-        TextOutW(mem_dc, 22, 48, state->subtitle.c_str(), static_cast<int>(state->subtitle.size()));
-        SetTextColor(mem_dc, PromptSurfaceFill());
-        DrawCenteredText(mem_dc, save_button, L"保存");
-        SetTextColor(mem_dc, PromptTextColor());
-        DrawCenteredText(mem_dc, cancel_button, L"取消");
-        SelectObject(mem_dc, old_font);
-        BitBlt(dc, 0, 0, rc.right - rc.left, rc.bottom - rc.top, mem_dc, 0, 0, SRCCOPY);
-        SelectObject(mem_dc, old_bitmap);
-        DeleteObject(bitmap);
-        DeleteDC(mem_dc);
-        EndPaint(hwnd, &ps);
-        return 0;
-    }
-    case WM_LBUTTONDOWN: {
-        const int target = TextPromptHitTarget(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
-        if (target == 1 || target == 3) {
-            CloseChildWindowWithExit(hwnd);
-            return 0;
-        }
-        if (target == 2) {
-            const int length = GetWindowTextLengthW(state->edit);
-            std::wstring value(static_cast<size_t>(length) + 1, L'\0');
-            if (length > 0) {
-                GetWindowTextW(state->edit, value.data(), length + 1);
+    const bool edit = hwnd == state.edit || hwnd == state.note_edit;
+    if (edit) {
+        if (message == WM_IME_STARTCOMPOSITION) state.ime_edit = hwnd;
+        if (message == WM_IME_ENDCOMPOSITION) state.ime_edit = nullptr;
+        if (message == WM_PAINT) {
+            const LRESULT result = DefSubclassProc(hwnd, message, wparam, lparam);
+            if (GetWindowTextLengthW(hwnd) == 0 && state.ime_edit != hwnd) {
+                RECT client{};
+                GetClientRect(hwnd, &client);
+                const wchar_t* placeholder = hwnd == state.note_edit ? L"可选" : state.phrase ? L"输入常用语内容"
+                                                             : state.group ? L"例如：工作" : L"例如：公司地址";
+                HDC dc = GetDC(hwnd);
+                DrawPromptText(dc, state.field_font, PromptColor(state.palette.text_tertiary), client,
+                               placeholder, DT_SINGLELINE | DT_TOP);
+                ReleaseDC(hwnd, dc);
             }
-            value.resize(static_cast<size_t>(length));
-            state->text = NormalizeEditableNote(value);
-            state->accepted = !state->text.empty();
-            CloseChildWindowWithExit(hwnd);
-            return 0;
+            return result;
         }
-        break;
-    }
-    case WM_TIMER:
-        if (wparam == kPromptEntranceTimer) {
-            AdvancePromptEntranceAnimation(hwnd);
-            return 0;
-        }
-        if (wparam == kPhraseHoverTimer) {
-            state->hover_progress = std::min(1.0f, state->hover_progress + 0.18f);
-            if (state->hover_progress >= 1.0f) KillTimer(hwnd, kPhraseHoverTimer);
-            InvalidateRect(hwnd, nullptr, FALSE);
-            return 0;
-        }
-        break;
-    case WM_ERASEBKGND:
-        return 1;
-    case WM_MOUSEMOVE: {
-        if (!state->tracking_mouse) {
-            TRACKMOUSEEVENT track{sizeof(track), TME_LEAVE, hwnd, 0};
-            TrackMouseEvent(&track);
-            state->tracking_mouse = true;
-        }
-        const int target = TextPromptHitTarget(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
-        SetPromptCursorForTarget(target);
-        if (target != state->hover_target) {
-            state->hover_target = target;
-            state->hover_progress = 0.0f;
-            SetTimer(hwnd, kPhraseHoverTimer, 16, nullptr);
-            InvalidateRect(hwnd, nullptr, FALSE);
-        }
-        return 0;
-    }
-    case WM_SETCURSOR:
-        if (LOWORD(lparam) == HTCLIENT) {
-            POINT cursor{};
-            GetCursorPos(&cursor);
-            ScreenToClient(hwnd, &cursor);
-            SetPromptCursorForTarget(TextPromptHitTarget(cursor.x, cursor.y));
+    } else {
+        if (message == WM_SETCURSOR && LOWORD(lparam) == HTCLIENT) {
+            SetCursor(LoadCursorW(nullptr, IDC_HAND));
             return TRUE;
         }
-        break;
-    case WM_MOUSELEAVE:
-        state->tracking_mouse = false;
-        state->hover_target = 0;
-        state->hover_progress = 0.0f;
-        KillTimer(hwnd, kPhraseHoverTimer);
-        InvalidateRect(hwnd, nullptr, FALSE);
-        return 0;
-    case WM_CLOSE:
-        CloseChildWindowWithExit(hwnd);
-        return 0;
+        if (message == WM_MOUSEMOVE && state.hovered != hwnd) {
+            if (state.hovered) InvalidateRect(state.hovered, nullptr, FALSE);
+            state.hovered = hwnd;
+            TRACKMOUSEEVENT track{sizeof(track), TME_LEAVE, hwnd, 0};
+            TrackMouseEvent(&track);
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        if (message == WM_MOUSELEAVE && state.hovered == hwnd) {
+            state.hovered = nullptr;
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
     }
-    return DefWindowProcW(hwnd, message, wparam, lparam);
+    return DefSubclassProc(hwnd, message, wparam, lparam);
 }
 
-LRESULT CALLBACK PhrasePromptProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
-    auto* state = reinterpret_cast<PhrasePromptState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+HWND CreatePromptControl(PromptState& state, const wchar_t* type, const wchar_t* text, DWORD style, int id) {
+    HWND control = CreateWindowExW(0, type, text, WS_CHILD | WS_VISIBLE | WS_TABSTOP | style,
+                                    0, 0, 1, 1, state.hwnd,
+                                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), state.instance, nullptr);
+    if (control) SetWindowSubclass(control, PromptControlProc, 1, reinterpret_cast<DWORD_PTR>(&state));
+    return control;
+}
+
+LRESULT CALLBACK PromptProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    auto* state = reinterpret_cast<PromptState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     if (message == WM_NCCREATE) {
         const auto* create = reinterpret_cast<CREATESTRUCTW*>(lparam);
-        state = static_cast<PhrasePromptState*>(create->lpCreateParams);
+        state = static_cast<PromptState*>(create->lpCreateParams);
         state->hwnd = hwnd;
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
     }
-
+    if (!state) return DefWindowProcW(hwnd, message, wparam, lparam);
     switch (message) {
     case WM_CREATE: {
-        state->edit = CreateWindowExW(0, L"EDIT", L"",
-                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_AUTOVSCROLL |
-                                          ES_WANTRETURN,
-                                      24, 78, 272, 70, hwnd, ControlId(kPhraseEditId),
-                                      state->instance, nullptr);
-        StyleChildControl(state->edit);
-        state->note_edit = CreateWindowExW(0, L"EDIT", L"",
-                                           WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_AUTOVSCROLL |
-                                               ES_WANTRETURN,
-                                           24, 176, 272, 44, hwnd, ControlId(kPhraseNoteEditId),
-                                           state->instance, nullptr);
-        StyleChildControl(state->note_edit);
-        SetFocus(state->edit);
+        const std::wstring initial = NormalizeWhitespace(state->initial_text);
+        const DWORD edit_style = state->phrase ? ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN : ES_AUTOHSCROLL;
+        state->edit = CreatePromptControl(*state, L"EDIT", initial.c_str(), edit_style, kEditId);
+        if (state->phrase) state->note_edit = CreatePromptControl(*state, L"EDIT", L"", ES_AUTOHSCROLL, kNoteId);
+        state->cancel = CreatePromptControl(*state, L"BUTTON", L"取消", BS_OWNERDRAW, IDCANCEL);
+        state->save = CreatePromptControl(*state, L"BUTTON", state->group ? L"创建" : L"保存", BS_OWNERDRAW, IDOK);
+        state->close = CreatePromptControl(*state, L"BUTTON", L"关闭", BS_OWNERDRAW, kCloseId);
+        if (!state->edit || (state->phrase && !state->note_edit) || !state->cancel || !state->save || !state->close) {
+            return -1;
+        }
+        RefreshPromptFonts(*state);
+        AnchorPrompt(*state);
         return 0;
     }
-    case WM_PAINT: {
-        PAINTSTRUCT ps{};
-        HDC dc = BeginPaint(hwnd, &ps);
-        RECT rc{};
-        GetClientRect(hwnd, &rc);
-        HDC mem_dc = CreateCompatibleDC(dc);
-        HBITMAP bitmap = CreateCompatibleBitmap(dc, rc.right - rc.left, rc.bottom - rc.top);
-        HGDIOBJ old_bitmap = SelectObject(mem_dc, bitmap);
-        FillGdiSolid(mem_dc, rc, PromptCanvasFill());
-
-        RECT panel_rect{0, 0, rc.right - 1, rc.bottom - 1};
-        DrawGdiRoundedPanel(mem_dc, panel_rect, 18, PromptCanvasFill(), PromptBorderColor());
-        RECT input_rect{22, 74, 298, 150};
-        DrawGdiRoundedPanel(mem_dc, input_rect, 12, PromptSurfaceFill(), PromptBorderColor());
-        RECT note_rect{22, 172, 298, 222};
-        DrawGdiRoundedPanel(mem_dc, note_rect, 12, PromptSurfaceFill(), PromptBorderColor());
-
-        const bool save_hover = state->hover_target == 2 && state->hover_progress > 0.0f;
-        RECT save_button{146, 236, 216, 264};
-        DrawGdiRoundedPanel(mem_dc, save_button, 12, PromptPrimaryColor(save_hover),
-                            PromptPrimaryColor(save_hover));
-
-        const bool cancel_hover = state->hover_target == 3 && state->hover_progress > 0.0f;
-        RECT cancel_button{228, 236, 298, 264};
-        DrawGdiRoundedPanel(mem_dc, cancel_button, 12,
-                            cancel_hover ? PromptHoverFill() : PromptSurfaceFill(),
-                            cancel_hover ? PromptStrongBorderColor() : PromptBorderColor());
-
-        SetBkMode(mem_dc, TRANSPARENT);
-        auto font = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
-        HGDIOBJ old_font = SelectObject(mem_dc, font);
-        SetTextColor(mem_dc, PromptTextColor());
-        TextOutW(mem_dc, 22, 18, L"\u6dfb\u52a0\u5e38\u7528\u8bed", 5);
-        if (state->hover_target == 1 && state->hover_progress > 0.0f) {
-            RECT close_rect{286, 12, 310, 36};
-            DrawGdiRoundedPanel(mem_dc, close_rect, 8, PromptDangerFill(), PromptDangerColor());
-        }
-        HPEN close_pen = CreatePen(PS_SOLID, 2,
-                                   state->hover_target == 1 ? PromptDangerColor() : PromptMutedColor());
-        HGDIOBJ old_pen = SelectObject(mem_dc, close_pen);
-        MoveToEx(mem_dc, 294, 20, nullptr);
-        LineTo(mem_dc, 302, 28);
-        MoveToEx(mem_dc, 302, 20, nullptr);
-        LineTo(mem_dc, 294, 28);
-        SelectObject(mem_dc, old_pen);
-        DeleteObject(close_pen);
-        SetTextColor(mem_dc, PromptMutedColor());
-        TextOutW(mem_dc, 22, 48, L"保存后会出现在收藏夹", 10);
-        TextOutW(mem_dc, 22, 154, L"备注", 2);
-        SetTextColor(mem_dc, PromptSurfaceFill());
-        RECT save_rect{146, 236, 216, 264};
-        DrawCenteredText(mem_dc, save_rect, L"保存");
-        SetTextColor(mem_dc, PromptTextColor());
-        RECT cancel_rect{228, 236, 298, 264};
-        DrawCenteredText(mem_dc, cancel_rect, L"取消");
-        SelectObject(mem_dc, old_font);
-        BitBlt(dc, 0, 0, rc.right - rc.left, rc.bottom - rc.top, mem_dc, 0, 0, SRCCOPY);
-        SelectObject(mem_dc, old_bitmap);
-        DeleteObject(bitmap);
-        DeleteDC(mem_dc);
-        EndPaint(hwnd, &ps);
+    case WM_PAINT:
+        PaintPrompt(*state);
         return 0;
-    }
-    case WM_LBUTTONDOWN: {
-        const int x = GET_X_LPARAM(lparam);
-        const int y = GET_Y_LPARAM(lparam);
-        const int target = PhraseHitTarget(x, y);
-        if (target == 1) {
-            CloseChildWindowWithExit(hwnd);
-            return 0;
-        }
-        if (target == 2) {
-            const int length = GetWindowTextLengthW(state->edit);
-            std::wstring value(static_cast<size_t>(length) + 1, L'\0');
-            if (length > 0) {
-                GetWindowTextW(state->edit, value.data(), length + 1);
-            }
-            value.resize(static_cast<size_t>(length));
-            state->text = NormalizeWhitespace(value);
-            const int note_length = GetWindowTextLengthW(state->note_edit);
-            std::wstring note_value(static_cast<size_t>(note_length) + 1, L'\0');
-            if (note_length > 0) {
-                GetWindowTextW(state->note_edit, note_value.data(), note_length + 1);
-            }
-            note_value.resize(static_cast<size_t>(note_length));
-            state->note = NormalizeEditableNote(note_value);
-            state->accepted = !state->text.empty();
-            CloseChildWindowWithExit(hwnd);
-            return 0;
-        }
-        if (target == 3) {
-            CloseChildWindowWithExit(hwnd);
-            return 0;
-        }
-        break;
-    }
-    case WM_TIMER:
-        if (wparam == kPromptEntranceTimer) {
-            AdvancePromptEntranceAnimation(hwnd);
-            return 0;
-        }
-        if (wparam == kPhraseHoverTimer) {
-            state->hover_progress = std::min(1.0f, state->hover_progress + 0.18f);
-            if (state->hover_progress >= 1.0f) KillTimer(hwnd, kPhraseHoverTimer);
-            InvalidateRect(hwnd, nullptr, FALSE);
-            return 0;
-        }
-        break;
     case WM_ERASEBKGND:
         return 1;
-    case WM_MOUSEMOVE: {
-        if (!state->tracking_mouse) {
-            TRACKMOUSEEVENT track{sizeof(track), TME_LEAVE, hwnd, 0};
-            TrackMouseEvent(&track);
-            state->tracking_mouse = true;
-        }
-        const int target = PhraseHitTarget(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
-        SetPromptCursorForTarget(target);
-        if (target != state->hover_target) {
-            state->hover_target = target;
-            state->hover_progress = 0.0f;
-            SetTimer(hwnd, kPhraseHoverTimer, 16, nullptr);
-            InvalidateRect(hwnd, nullptr, FALSE);
-        }
-        return 0;
-    }
-    case WM_SETCURSOR:
-        if (LOWORD(lparam) == HTCLIENT) {
-            POINT cursor{};
-            GetCursorPos(&cursor);
-            ScreenToClient(hwnd, &cursor);
-            SetPromptCursorForTarget(PhraseHitTarget(cursor.x, cursor.y));
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORSTATIC:
+        SetTextColor(reinterpret_cast<HDC>(wparam), PromptColor(state->palette.text));
+        SetBkColor(reinterpret_cast<HDC>(wparam), PromptColor(state->palette.window_tint));
+        return reinterpret_cast<LRESULT>(state->paper_brush);
+    case WM_DRAWITEM:
+        if (wparam == IDOK || wparam == IDCANCEL || wparam == kCloseId) {
+            DrawPromptButton(*state, *reinterpret_cast<DRAWITEMSTRUCT*>(lparam));
             return TRUE;
         }
         break;
-    case WM_MOUSELEAVE:
-        state->tracking_mouse = false;
-        state->hover_target = 0;
-        state->hover_progress = 0.0f;
-        KillTimer(hwnd, kPhraseHoverTimer);
-        InvalidateRect(hwnd, nullptr, FALSE);
-        return 0;
     case WM_COMMAND:
+        if (HIWORD(wparam) == BN_CLICKED) {
+            if (LOWORD(wparam) == IDOK) {
+                AcceptPrompt(*state);
+                return 0;
+            }
+            if (LOWORD(wparam) == IDCANCEL || LOWORD(wparam) == kCloseId) {
+                DestroyWindow(hwnd);
+                return 0;
+            }
+        }
+        if (HIWORD(wparam) == EN_SETFOCUS || HIWORD(wparam) == EN_KILLFOCUS || HIWORD(wparam) == EN_CHANGE) {
+            InvalidateRect(hwnd, nullptr, FALSE);
+            InvalidateRect(reinterpret_cast<HWND>(lparam), nullptr, FALSE);
+            return 0;
+        }
         break;
+    case WM_TIMER:
+        if (wparam == kEntranceTimer) {
+            AdvancePromptEntrance(*state);
+            return 0;
+        }
+        break;
+    case WM_DPICHANGED:
+        FinishPromptEntrance(*state);
+        state->dpi = HIWORD(wparam);
+        if (!state->title_font) return 0;
+        RefreshPromptFonts(*state);
+        AnchorPrompt(*state);
+        InvalidateRect(hwnd, nullptr, TRUE);
+        return 0;
+    case WM_SETTINGCHANGE:
+    case WM_THEMECHANGED:
+        RefreshPromptPalette(*state);
+        if (!PromptAnimationsEnabled()) FinishPromptEntrance(*state);
+        return 0;
     case WM_CLOSE:
-        CloseChildWindowWithExit(hwnd);
+        DestroyWindow(hwnd);
+        return 0;
+    case WM_DESTROY:
+        KillTimer(hwnd, kEntranceTimer);
         return 0;
     }
     return DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+bool RunPrompt(PromptState& state) {
+    WNDCLASSW wc{};
+    wc.lpfnWndProc = PromptProc;
+    wc.hInstance = state.instance;
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.lpszClassName = kPromptClass;
+    wc.style = CS_DROPSHADOW;
+    RegisterClassW(&wc);
+    const UINT owner_dpi = GetDpiForWindow(state.owner);
+    state.dpi = owner_dpi ? owner_dpi : 96;
+    RefreshPromptPalette(state);
+    POINT origin{};
+    ClientToScreen(state.owner, &origin);
+    HWND hwnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED, kPromptClass,
+                                state.title.c_str(), WS_POPUP | WS_CLIPCHILDREN,
+                                origin.x + state.Px(20), origin.y + state.Px(104), 1, 1,
+                                state.owner, nullptr, state.instance, &state);
+    if (!hwnd) return false;
+    SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
+    const BOOL owner_enabled = IsWindowEnabled(state.owner);
+    EnableWindow(state.owner, FALSE);
+    ShowPrompt(state);
+    MSG message{};
+    int result = 0;
+    while (IsWindow(hwnd) && (result = static_cast<int>(GetMessageW(&message, nullptr, 0, 0))) > 0) {
+        const bool prompt_message = message.hwnd == hwnd || IsChild(hwnd, message.hwnd);
+        if (prompt_message && message.message == WM_KEYDOWN && !state.ime_edit) {
+            if (message.wParam == VK_ESCAPE) {
+                DestroyWindow(hwnd);
+                continue;
+            }
+            if (message.wParam == VK_RETURN && !(state.phrase && message.hwnd == state.edit)) {
+                // Buttons keep their own Enter action, including Cancel and Close.
+                if (message.hwnd == state.cancel || message.hwnd == state.close) DestroyWindow(hwnd);
+                else AcceptPrompt(state);
+                continue;
+            }
+        }
+        // Let the edit/IME consume composition keys, even Escape/Enter.
+        if ((state.ime_edit && message.hwnd == state.ime_edit) || !IsDialogMessageW(hwnd, &message)) {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+    }
+    if (IsWindow(hwnd)) DestroyWindow(hwnd);
+    if (IsWindow(state.owner)) {
+        EnableWindow(state.owner, owner_enabled);
+        if (owner_enabled) {
+            SetForegroundWindow(state.owner);
+            SetFocus(state.owner);
+        }
+    }
+    if (result == 0 && message.message == WM_QUIT) PostQuitMessage(static_cast<int>(message.wParam));
+    return state.accepted;
 }
 
 } // namespace
 
-std::optional<FavoritePhraseInput> PromptFavoritePhrase(HWND owner, HINSTANCE instance) {
-    WNDCLASSW wc{};
-    wc.lpfnWndProc = PhrasePromptProc;
-    wc.hInstance = instance;
-    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.lpszClassName = kPhrasePromptClass;
-    RegisterClassW(&wc);
-
-    PhrasePromptState state;
+std::optional<FavoritePhraseInput> PromptFavoritePhrase(HWND owner, HINSTANCE instance, int theme_mode) {
+    PromptState state;
+    state.owner = owner;
     state.instance = instance;
-
-    RECT owner_rect{};
-    GetWindowRect(owner, &owner_rect);
-    const int width = 320;
-    const int height = 300;
-    const int x = owner_rect.left + (owner_rect.right - owner_rect.left - width) / 2;
-    const int y = owner_rect.top + 92;
-    HWND hwnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, kPhrasePromptClass, L"ClipSoul",
-                                WS_POPUP, x, y, width, height, owner, nullptr, instance,
-                                &state);
-    if (!hwnd) {
-        return std::nullopt;
-    }
-
-    EnableWindow(owner, FALSE);
-    ShowChildWindowWithEntrance(hwnd);
-    UpdateWindow(hwnd);
-    MSG message{};
-    while (IsWindow(hwnd) && GetMessageW(&message, nullptr, 0, 0) > 0) {
-        DispatchPromptMessage(hwnd, state.edit, state.note_edit, message);
-    }
-    EnableWindow(owner, TRUE);
-    SetForegroundWindow(owner);
-    SetFocus(owner);
-    if (state.accepted) {
-        return FavoritePhraseInput{state.text, state.note};
-    }
+    state.theme_mode = theme_mode;
+    state.phrase = true;
+    state.title = L"添加常用语";
+    state.subtitle = L"保存后会出现在收藏中";
+    if (RunPrompt(state)) return FavoritePhraseInput{state.text, state.note};
     return std::nullopt;
 }
 
 std::optional<std::wstring> PromptText(HWND owner, HINSTANCE instance, std::wstring title,
-                                       std::wstring subtitle, std::wstring initial_text) {
-    WNDCLASSW wc{};
-    wc.lpfnWndProc = TextPromptProc;
-    wc.hInstance = instance;
-    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.lpszClassName = kTextPromptClass;
-    RegisterClassW(&wc);
-
-    TextPromptState state;
+                                       std::wstring subtitle, std::wstring initial_text, int theme_mode) {
+    PromptState state;
+    state.owner = owner;
     state.instance = instance;
+    state.theme_mode = theme_mode;
+    state.group = title == L"新建收藏夹";
     state.title = std::move(title);
-    state.subtitle = std::move(subtitle);
+    state.subtitle = state.title == L"编辑备注" ? L"备注会显示在内容下方，也可以被搜索到" : std::move(subtitle);
     state.initial_text = std::move(initial_text);
-
-    RECT owner_rect{};
-    GetWindowRect(owner, &owner_rect);
-    const int width = 320;
-    const int height = 220;
-    const int x = owner_rect.left + (owner_rect.right - owner_rect.left - width) / 2;
-    const int y = owner_rect.top + 110;
-    HWND hwnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, kTextPromptClass, L"ClipSoul",
-                                WS_POPUP, x, y, width, height, owner, nullptr, instance, &state);
-    if (!hwnd) {
-        return std::nullopt;
-    }
-
-    EnableWindow(owner, FALSE);
-    ShowChildWindowWithEntrance(hwnd);
-    UpdateWindow(hwnd);
-    MSG message{};
-    while (IsWindow(hwnd) && GetMessageW(&message, nullptr, 0, 0) > 0) {
-        DispatchPromptMessage(hwnd, state.edit, nullptr, message);
-    }
-    EnableWindow(owner, TRUE);
-    SetForegroundWindow(owner);
-    SetFocus(owner);
-    if (state.accepted) {
-        return state.text;
-    }
+    if (RunPrompt(state)) return state.text;
     return std::nullopt;
 }
 

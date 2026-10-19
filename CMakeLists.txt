@@ -1,9 +1,14 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(ClipSoul VERSION 1.5.1 LANGUAGES CXX)
+project(ClipSoul VERSION 2.0.0 LANGUAGES CXX)
 
 if(MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    # ClipSoul is marketed as a lightweight tray tool, so optimise the release binary for size:
+    # whole-program opt + COMDAT folding + function/data section GC + no incremental link.
+    add_compile_options($<$<CONFIG:Release>:/Gy>)
+    add_link_options($<$<CONFIG:Release>:/OPT:REF> $<$<CONFIG:Release>:/OPT:ICF>)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
 endif()
 
 set(CMAKE_CXX_STANDARD 20)
