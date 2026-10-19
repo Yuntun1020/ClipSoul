@@ -47,15 +47,22 @@ bool HotkeyShouldBufferBareAlt(unsigned popup_modifiers, unsigned continuous_mod
 
 bool HotkeyShouldBufferAltDown(unsigned popup_modifiers, unsigned continuous_modifiers, bool ctrl_down,
                                bool shift_down, bool win_down) {
-    if (ctrl_down || shift_down || win_down) {
-        return false;
-    }
-    const auto matches_current_modifiers = [&](unsigned hotkey_modifiers) {
-        constexpr unsigned kModifierMask = MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_WIN;
-        unsigned actual = MOD_ALT;
-        return (hotkey_modifiers & kModifierMask) == actual;
-    };
-    return matches_current_modifiers(popup_modifiers) || matches_current_modifiers(continuous_modifiers);
+    // 一律不缓冲 Alt 的「按下」。
+    //
+    // 这里原本只判断「热键配置里是不是只有 Alt」，于是任何一次独立按 Alt 都会被钩子吞掉、
+    // 记进 buffered_alt_down_，等着下一个键来判断是不是 Alt+C。热键匹配不上时（游戏里
+    // 按 Alt 开技能、Alt+其它快捷键）那次按下已经被吞了，目标程序再也收不到 ——
+    // 表现为「游戏中 Alt 完全失效、只有 Alt+C 还能用」。
+    //
+    // 现在系统热键（RegisterHotKey）始终注册着，Alt+C 由系统层直接匹配，钩子只是补充路径，
+    // 不再需要「先把 Alt 按住缓冲起来」。所以 Alt 的按下直接放行给目标程序，
+    // 真正匹配到热键时再连 Alt+C 一起吞（见 HandleKeyboardHook 里的 matched_hotkey 分支）。
+    (void)popup_modifiers;
+    (void)continuous_modifiers;
+    (void)ctrl_down;
+    (void)shift_down;
+    (void)win_down;
+    return false;
 }
 
 bool HotkeyShouldKeepBufferedAltForModifier(unsigned popup_modifiers, unsigned continuous_modifiers, bool ctrl_down,

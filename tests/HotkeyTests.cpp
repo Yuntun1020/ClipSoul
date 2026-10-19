@@ -65,7 +65,10 @@ TEST_CASE(HotkeyClassifiesBareAltChords) {
     REQUIRE(!ClipSoul::HotkeyShouldBufferBareAlt(MOD_ALT, MOD_CONTROL | MOD_ALT, false, true, false));
     REQUIRE(!ClipSoul::HotkeyShouldBufferBareAlt(MOD_ALT, MOD_CONTROL | MOD_ALT, false, false, true));
 
-    REQUIRE(ClipSoul::HotkeyShouldBufferAltDown(MOD_ALT, MOD_CONTROL | MOD_ALT, false, false, false));
+    // 任何情况下都不再吞掉独立的 Alt 按下。
+    // 曾经为了 +「Alt 先到、C 后到」而缓冲 Alt 按下，结果游戏里单独按 Alt（技能/快捷键）
+    // 会被吞掉且永不补发，表现为「只有 Alt+C 能用，其它 Alt 组合全失效」。
+    REQUIRE(!ClipSoul::HotkeyShouldBufferAltDown(MOD_ALT, MOD_CONTROL | MOD_ALT, false, false, false));
     REQUIRE(!ClipSoul::HotkeyShouldBufferAltDown(MOD_CONTROL | MOD_ALT, MOD_CONTROL | MOD_ALT, false,
                                                  false, false));
     REQUIRE(!ClipSoul::HotkeyShouldBufferAltDown(MOD_CONTROL | MOD_ALT, MOD_ALT, true, false, false));
@@ -181,4 +184,23 @@ TEST_CASE(HotkeyClassifiesBareAltChords) {
     const auto fallback = reinterpret_cast<HWND>(0x5678);
     REQUIRE_EQ(ClipSoul::HotkeyMessageTarget(captured, fallback), captured);
     REQUIRE_EQ(ClipSoul::HotkeyMessageTarget(nullptr, fallback), fallback);
+}
+
+TEST_CASE(BareAltIsNeverSwallowedWhenAltIsAConfiguredModifier) {
+    // 用户在游戏里发现「只有 Alt+C 能用，其它 Alt 快捷键全失效」。
+    // 原因：钩子把任何独立的 Alt 按下都吞掉并缓冲，等着下一个键来判断是不是 Alt+C；
+    // 匹配不上时那次按下已经被吞了，目标程序再也收不到。
+    // Alt 现在一律放行，热键匹配交给系统层的 RegisterHotKey。
+    const unsigned kAltOnly = MOD_ALT;
+    const unsigned kCtrlAlt = MOD_CONTROL | MOD_ALT;
+
+    const unsigned kCombos[] = {kAltOnly, kCtrlAlt, MOD_CONTROL | MOD_SHIFT};
+    for (const unsigned popup : kCombos) {
+        for (const unsigned continuous : kCombos) {
+            // 无论热键怎么配，独立 Alt 都不能被吞。
+            REQUIRE(!ClipSoul::HotkeyShouldBufferAltDown(popup, continuous, false, false, false));
+            REQUIRE(!ClipSoul::HotkeyShouldBufferAltDown(popup, continuous, true, false, false));
+            REQUIRE(!ClipSoul::HotkeyShouldBufferAltDown(popup, continuous, false, true, false));
+        }
+    }
 }
