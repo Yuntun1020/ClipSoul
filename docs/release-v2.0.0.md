@@ -36,6 +36,17 @@
 | :---: | :---: | :---: |
 | ![弹窗](https://raw.githubusercontent.com/Yuntun1020/ClipSoul/main/docs/screenshots/popup-dark.png) | ![设置浅色](https://raw.githubusercontent.com/Yuntun1020/ClipSoul/main/docs/screenshots/settings-light.png) | ![设置深色](https://raw.githubusercontent.com/Yuntun1020/ClipSoul/main/docs/screenshots/settings-dark.png) |
 
+## 在游戏里使用
+
+全屏游戏常以管理员权限运行。Windows 的权限隔离（UIPI）会阻止普通权限程序向这类窗口发送按键，表现为呼出后 `Alt` 卡住、或粘贴不生效。
+
+解决办法是以管理员身份运行 ClipSoul：
+
+- 右键托盘图标 → **以管理员身份重启**
+- 或直接右键 `ClipSoul.exe` → 以管理员身份运行
+
+此时「开机自启」会自动改用计划任务实现，登录后直接以管理员权限启动，不会每次弹 UAC 提示。
+
 ## 下载文件
 
 - `ClipSoul.exe`
@@ -59,4 +70,4 @@ Get-FileHash -Algorithm SHA256 .\ClipSoul.exe
 - 修改「存储位置」后需要重启程序生效。
 - 「窗口缩放」默认关闭，开启后允许拖动边缘调整弹窗大小。
 - 全屏游戏（以及以管理员身份运行的游戏）在前台时，弹窗不会抢占焦点：需要按 `Esc` 关闭，点击外部不会自动收起。
-- 如果游戏本身以管理员身份运行，Windows 会阻止普通权限程序向它发送按键，因此游戏内无法自动粘贴（剪贴板内容仍会正确写入，可手动 `Ctrl+V`）。如需自动粘贴，需要让 ClipSoul 也以管理员身份运行。
+- 如果游戏本身以管理员身份运行，需要让 ClipSoul 也以管理员身份运行，才能正常粘贴（见上一节）。
