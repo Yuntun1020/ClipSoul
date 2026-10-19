@@ -59,7 +59,9 @@ TEST_CASE(PasteTargetActivationSkipsAlreadyForegroundWindow) {
 }
 
 TEST_CASE(PasteShortcutReleasesAltLikeModifiersBeforeCtrlV) {
-    REQUIRE(ClipSoul::ShouldReleaseModifierForPaste(VK_MENU, true));
+    // Alt 的按下从没送到目标程序（钩子吞掉了），所以既不该「临时松开」也不该「还原」，
+    // 否则目标程序会收到没有配对按下的 KEYUP / 没有配对抬起的 KEYDOWN。
+    REQUIRE(!ClipSoul::ShouldReleaseModifierForPaste(VK_MENU, true));
     REQUIRE(ClipSoul::ShouldReleaseModifierForPaste(VK_SHIFT, true));
     REQUIRE(ClipSoul::ShouldReleaseModifierForPaste(VK_LWIN, true));
     REQUIRE(!ClipSoul::ShouldReleaseModifierForPaste(VK_CONTROL, true));
@@ -74,14 +76,19 @@ TEST_CASE(PasteShortcutRestoresHeldModifiersAfterCtrlV) {
     REQUIRE(!ClipSoul::ShouldRestoreModifierAfterPaste(VK_MENU, false));
 }
 
-TEST_CASE(ContinuousPasteShortcutDoesNotRestoreAltToAvoidStuckSystemState) {
+TEST_CASE(PasteNeverLeavesAltHeldToAvoidStuckModifierState) {
+    // 永劫无间里呼出剪贴板后 Alt 卡长按：钩子吞掉了 Alt 的按下，目标程序从没收到过，
+    // 而 SendPaste() 事后却注入一个 Alt 按下表示「用户还按着」，于是对方认为 Alt 卡住了。
+    // 现在 Alt 一律不还原、也不临时松开；Ctrl / Shift 等保持原样。
     ClipSoul::PasteShortcutOptions normal;
     ClipSoul::PasteShortcutOptions continuous;
     continuous.restore_alt_after_paste = false;
 
-    REQUIRE(ClipSoul::ShouldRestoreModifierForPaste(VK_MENU, true, normal));
+    REQUIRE(!ClipSoul::ShouldRestoreModifierForPaste(VK_MENU, true, normal));
     REQUIRE(!ClipSoul::ShouldRestoreModifierForPaste(VK_MENU, true, continuous));
-    REQUIRE(ClipSoul::ShouldRestoreModifierForPaste(VK_CONTROL, true, continuous));
+    REQUIRE(ClipSoul::ShouldRestoreModifierForPaste(VK_CONTROL, true, normal));
+    REQUIRE(ClipSoul::ShouldRestoreModifierForPaste(VK_SHIFT, true, normal));
+    REQUIRE(!ClipSoul::ShouldRestoreModifierForPaste('V', true, normal));
 }
 
 TEST_CASE(MultiPastePayloadKeepsFilesAlongsideCombinedText) {

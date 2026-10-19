@@ -2653,7 +2653,8 @@ TEST_CASE(PopupSearchUnderlineFocusProgressStartsAtZeroOnShow) {
     // 起点必须严格为 0，终点为 1，中间按三次方缓出推进。
     REQUIRE_EQ(ClipSoul::PopupMotionProgress(0.0f), 0.0f);
     REQUIRE_EQ(ClipSoul::PopupMotionProgress(1.0f), 1.0f);
-    REQUIRE(!ClipSoul::PopupSearchFocusProgress(false, false, 0.0f) > 0.0f);
+    // 未聚焦且未悬停时不该有任何进度（原来写成 !x > 0，实际等价于 1 > 0，等于没断言）。
+    REQUIRE_EQ(ClipSoul::PopupSearchFocusProgress(false, false, 0.0f), 0.0f);
     REQUIRE(ClipSoul::PopupSearchFocusProgress(true, false, 0.0f) == 1.0f);
 }
 
