@@ -675,7 +675,19 @@ void PopupWindow::Show(HWND target) {
     work = WorkAreaForMonitor(target_monitor, work);
     const UINT dpi = DpiForMonitorHandle(target_monitor, CurrentDpi());
     const SIZE size = PhysicalPopupSize(dpi, static_cast<int>(items_.size()));
-    const bool activate_on_show = PopupShowShouldActivate(keyboard_invocation_, shell_topmost_raise_);
+    // 全屏游戏 / 游戏进程：绝不抢焦点。抢焦点会让游戏重建输入状态、把 Alt 粘成常按，
+    // 而且全屏前台本来就抢不过来（SetForegroundWindow 返回 TRUE 但前台没变）。
+    RECT target_rect{};
+    const bool has_target_rect =
+        target && IsWindow(target) && GetWindowRect(target, &target_rect) && target_rect.right > target_rect.left;
+    const bool target_is_fullscreen =
+        has_target_rect && target_rect.left <= monitor_rect.left && target_rect.top <= monitor_rect.top &&
+        target_rect.right >= monitor_rect.right && target_rect.bottom >= monitor_rect.bottom;
+    const bool target_is_game = PopupTargetLooksLikeGame(target_class, target_process);
+    const bool allow_activation =
+        PopupShouldActivateForGameTarget(target_is_game, target_is_fullscreen);
+    const bool activate_on_show =
+        allow_activation && PopupShowShouldActivate(keyboard_invocation_, shell_topmost_raise_);
     const bool use_no_activate = PopupWindowShouldUseNoActivateStyle(activate_on_show);
     const LONG_PTR current_ex_style = GetWindowLongPtrW(hwnd_, GWL_EXSTYLE);
     const bool has_no_activate = (current_ex_style & WS_EX_NOACTIVATE) != 0;

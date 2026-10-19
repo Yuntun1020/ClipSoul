@@ -542,6 +542,13 @@ LRESULT App::HandleKeyboardHook(int code, WPARAM wparam, LPARAM lparam) {
                      reinterpret_cast<LPARAM>(HotkeyMessageTarget(foreground, CurrentInputTarget())));
         return 1;
     case OpenPopupHotkeyAction::ForwardKey:
+        // 转发给弹窗的同时必须记下这个键，让它的 KEYUP 也被吞掉（见下面的抬起分支）。
+        // 只吞 DOWN 不吞 UP 会让目标程序收到没有配对按下的抬起 —— 那正是修饰键卡住的
+        // 同一类问题，不能在这里重演。
+        if (HotkeyShouldTrackHandledKeyUp(true, vk)) {
+            hook_hotkey_down_ = true;
+            hook_hotkey_vk_ = vk;
+        }
         PostMessageW(popup_->hwnd(), WM_KEYDOWN, static_cast<WPARAM>(vk), lparam);
         return 1;
     case OpenPopupHotkeyAction::None:

@@ -146,7 +146,8 @@ TEST_CASE(HotkeyClassifiesBareAltChords) {
     REQUIRE(!ClipSoul::HotkeyHookShouldSuppressRegisteredHotkeyEcho(false));
 
     REQUIRE(ClipSoul::HotkeyOpenPopupShouldHandleKey(VK_ESCAPE));
-    REQUIRE(!ClipSoul::HotkeyOpenPopupShouldHandleKey(VK_RETURN));
+    // 弹窗在游戏前台里不抢焦点，回车必须由钩子转发，否则游戏里无法粘贴。
+    REQUIRE(ClipSoul::HotkeyOpenPopupShouldHandleKey(VK_RETURN));
     REQUIRE(ClipSoul::HotkeyOpenPopupShouldHandleKey(VK_UP));
     REQUIRE(ClipSoul::HotkeyOpenPopupShouldHandleKey(VK_DOWN));
     REQUIRE(!ClipSoul::HotkeyOpenPopupShouldHandleKey('A'));

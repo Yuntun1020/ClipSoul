@@ -499,6 +499,11 @@ bool PopupPaintShouldUpdateLayout();
 bool PopupShouldAnimateHoverWhileResizing(bool resizing_window);
 bool PopupShouldActivateWhenShown(bool keyboard_invocation);
 bool PopupShouldActivateForShellSurface(bool shell_surface);
+// Heuristic: does this target look like a game (Unity/Unreal/game process names)?
+bool PopupTargetLooksLikeGame(std::wstring_view class_name, std::wstring_view process_name);
+// Fullscreen games must never be robbed of the foreground: doing so makes them rebuild input
+// state with modifiers still considered held (Alt gets stuck, every key becomes Alt+key).
+bool PopupShouldActivateForGameTarget(bool target_is_game, bool target_is_fullscreen);
 bool PopupShowShouldActivate(bool keyboard_invocation, bool shell_surface);
 bool PopupSetWindowPosShouldUseNoActivate(bool activate_window);
 LRESULT PopupMouseActivateResult();

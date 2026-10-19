@@ -172,7 +172,9 @@ bool HotkeyMatchesState(unsigned configured_modifiers, unsigned configured_vk, b
 }
 
 bool HotkeyOpenPopupShouldHandleKey(unsigned vk) {
-    return vk == VK_ESCAPE || vk == VK_UP || vk == VK_DOWN;
+    // 弹窗在游戏前台里是 WS_EX_NOACTIVATE（为了不破坏游戏输入），拿不到键盘焦点，
+    // 所以这些操作键必须由键盘钩子转发进弹窗，否则弹窗在游戏里只能看不能用。
+    return vk == VK_ESCAPE || vk == VK_UP || vk == VK_DOWN || vk == VK_RETURN;
 }
 
 bool HotkeyOpenPopupShouldToggle(bool popup_visible, bool matched_popup_hotkey) {

@@ -2810,3 +2810,22 @@ TEST_CASE(PopupFallsBackToScreenBottomRight) {
     // 弹窗底边贴住输入框顶部上方。
     REQUIRE(with_caret.y + size.cy <= input.bottom);
 }
+
+TEST_CASE(PopupNeverStealsForegroundFromFullscreenGames) {
+    // 永劫无间里 Alt 被粘成常按、任何键都变成 Alt+键：抢焦点让全屏游戏以为窗口失活，
+    // 它重新获得焦点时会重建输入状态并把修饰键当成仍然按着。
+    // 因此全屏游戏一律不抢焦点，弹窗只以 TOPMOST 显示。
+    REQUIRE(!ClipSoul::PopupShouldActivateForGameTarget(true, true));
+    REQUIRE(!ClipSoul::PopupShouldActivateForGameTarget(true, false));
+    REQUIRE(!ClipSoul::PopupShouldActivateForGameTarget(false, true));
+    // 普通窗口、非全屏：保持原有行为（能激活，才能「点外部收起」）。
+    REQUIRE(ClipSoul::PopupShouldActivateForGameTarget(false, false));
+
+    // 游戏识别：Unity / Unreal / 常见游戏进程名。
+    REQUIRE(ClipSoul::PopupTargetLooksLikeGame(L"UnityWndClass", L"NarakaBladepoint"));
+    REQUIRE(ClipSoul::PopupTargetLooksLikeGame(L"UnrealWindow", L"Whatever"));
+    REQUIRE(ClipSoul::PopupTargetLooksLikeGame(L"SomeClass", L"NarakaBladepoint"));
+    // 普通程序不能被误判成游戏。
+    REQUIRE(!ClipSoul::PopupTargetLooksLikeGame(L"Qt51514QWindowIcon", L"Weixin"));
+    REQUIRE(!ClipSoul::PopupTargetLooksLikeGame(L"Notepad", L"notepad"));
+}

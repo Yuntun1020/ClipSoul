@@ -993,6 +993,42 @@ bool PopupShouldActivateForShellSurface(bool shell_surface) {
     return shell_surface;
 }
 
+bool PopupTargetLooksLikeGame(std::wstring_view class_name, std::wstring_view process_name) {
+    // 常见的游戏窗口类名 / 进程名特征。
+    // Unity: UnityWndClass；Unreal: UnrealWindow / UE4Game；其它常见的原生渲染窗口。
+    static constexpr std::wstring_view kClassNeedles[] = {
+        L"UnityWndClass", L"UnrealWindow", L"UE4Game", L"UE5", L"SDL_app", L"GLFW",
+    };
+    static constexpr std::wstring_view kProcessNeedles[] = {
+        L"Naraka", L"javaw", L"Game", L"Unity", L"Unreal",
+    };
+    for (const auto needle : kClassNeedles) {
+        if (class_name.find(needle) != std::wstring_view::npos) {
+            return true;
+        }
+    }
+    for (const auto needle : kProcessNeedles) {
+        if (process_name.find(needle) != std::wstring_view::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool PopupShouldActivateForGameTarget(bool target_is_game, bool target_is_fullscreen) {
+    // 全屏游戏一律不抢焦点。
+    //
+    // 全屏独占/无边框全屏的游戏对「丢失前台」极其敏感：抢一次焦点会让它以为窗口失活，
+    // 很多游戏（永劫无间就是）会在重新获得焦点时重建输入状态，把修饰键按「仍然按着」处理，
+    // 表现就是 Alt 被粘成常按、任何键都变成 Alt+键。而全屏前台又抢不过来
+    // （实测 SetForegroundWindow 返回 TRUE 但 GetForegroundWindow 仍是游戏），
+    // 抢的过程本身就在反复触发这套失活/激活循环。
+    //
+    // 代价是弹窗在这种前台里没有键盘焦点：需要 Esc 关闭、也不参与「点外部收起」。
+    // 用 Esc 换游戏输入不被破坏，是值得的。
+    return !target_is_game && !target_is_fullscreen;
+}
+
 bool PopupShowShouldActivate(bool keyboard_invocation, bool shell_surface) {
     return PopupShouldActivateForShellSurface(shell_surface) || PopupShouldActivateWhenShown(keyboard_invocation);
 }
