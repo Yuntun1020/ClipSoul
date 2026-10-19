@@ -121,9 +121,9 @@ AltReleaseAction HotkeyAltReleaseActionFor(bool swallow_alt_release, bool buffer
     if (swallow_alt_release || buffered_alt_down) {
         return AltReleaseAction::SwallowAndClearAll;
     }
-    if (replayed_alt_down) {
-        return AltReleaseAction::ReplayBufferedAltUp;
-    }
+    // replayed_alt_down 不再参与判定：补发的 Alt 已经是「按下+抬起」成对发出的，
+    // 不存在需要等待配对的状态。
+    (void)replayed_alt_down;
     return AltReleaseAction::PassThrough;
 }
 

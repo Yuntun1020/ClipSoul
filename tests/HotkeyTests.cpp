@@ -113,8 +113,10 @@ TEST_CASE(HotkeyClassifiesBareAltChords) {
                ClipSoul::AltReleaseAction::SwallowAndClearAll);
     REQUIRE_EQ(ClipSoul::HotkeyAltReleaseActionFor(false, true, false, VK_MENU),
                ClipSoul::AltReleaseAction::SwallowAndClearAll);
+    // replayed_alt_down 不再影响抬起处理：补发的 Alt 已是成对的按下+抬起，
+    // 没有「等待配对」的挂起状态需要在这里收尾。
     REQUIRE_EQ(ClipSoul::HotkeyAltReleaseActionFor(false, false, true, VK_MENU),
-               ClipSoul::AltReleaseAction::ReplayBufferedAltUp);
+               ClipSoul::AltReleaseAction::PassThrough);
     // 与 Alt 无关的按键不受影响。
     REQUIRE_EQ(ClipSoul::HotkeyAltReleaseActionFor(true, true, false, 'V'),
                ClipSoul::AltReleaseAction::PassThrough);

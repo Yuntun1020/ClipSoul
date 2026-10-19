@@ -416,27 +416,26 @@ bool App::ConsumeSuppressedRegisteredHotkey(WPARAM hotkey_id) {
     return true;
 }
 
-void App::ReplayBufferedAltDown() {
+void App::ReplayBufferedAltTap() {
+    // 把「先前被吞掉的 Alt 按下」补成一次完整的轻按：DOWN 和 UP 在同一个 SendInput 里
+    // 一起发出去，绝不跨事件挂起。
+    //
+    // 带挂起状态的老实现（发给 DOWN 之后等真正的 Alt 抬起事件再补 UP）有两个致命缺口：
+    //   1) 只有 Alt 抬起事件才会补 UP。如果之后的 Alt 抬起被别的逻辑吃掉、或者用户一直
+    //      不松手就转去按别的键，这个注入的 DOWN 就永远没有配对 UP —— 目标程序（游戏）
+    //      于是认为 Alt 一直按着，必须手动再按一次 Alt 才能复位。
+    //   2) Alt 卡住期间它还会吞掉用户的其它按键，用户根本没法自救。
+    // 成对发送之后，任何路径都不可能留下「只按不抬」的 Alt。
     buffered_alt_down_ = false;
-    replayed_alt_down_ = true;
-    INPUT input{};
-    input.type = INPUT_KEYBOARD;
-    input.ki.wVk = VK_MENU;
-    input.ki.dwExtraInfo = kClipSoulInjectedInputExtraInfo;
-    SendInput(1, &input, sizeof(INPUT));
-}
-
-void App::ReplayBufferedAltUp() {
-    if (!replayed_alt_down_) {
-        return;
-    }
     replayed_alt_down_ = false;
-    INPUT input{};
-    input.type = INPUT_KEYBOARD;
-    input.ki.wVk = VK_MENU;
-    input.ki.dwFlags = KEYEVENTF_KEYUP;
-    input.ki.dwExtraInfo = kClipSoulInjectedInputExtraInfo;
-    SendInput(1, &input, sizeof(INPUT));
+    INPUT inputs[2]{};
+    for (int i = 0; i < 2; ++i) {
+        inputs[i].type = INPUT_KEYBOARD;
+        inputs[i].ki.wVk = VK_MENU;
+        inputs[i].ki.dwFlags = i == 1 ? KEYEVENTF_KEYUP : 0;
+        inputs[i].ki.dwExtraInfo = kClipSoulInjectedInputExtraInfo;
+    }
+    SendInput(2, inputs, sizeof(INPUT));
 }
 
 LRESULT App::HandleKeyboardHook(int code, WPARAM wparam, LPARAM lparam) {
@@ -471,9 +470,6 @@ LRESULT App::HandleKeyboardHook(int code, WPARAM wparam, LPARAM lparam) {
             swallow_alt_release_ = false;
             buffered_alt_down_ = false;
             replayed_alt_down_ = false;
-            return 1;
-        case AltReleaseAction::ReplayBufferedAltUp:
-            ReplayBufferedAltUp();
             return 1;
         case AltReleaseAction::PassThrough:
             break;
@@ -562,7 +558,7 @@ LRESULT App::HandleKeyboardHook(int code, WPARAM wparam, LPARAM lparam) {
                                                    ctrl_down, shift_down, win_down, vk)) {
             return CallNextHookEx(keyboard_hook_, code, wparam, lparam);
         }
-        ReplayBufferedAltDown();
+        ReplayBufferedAltTap();
     }
     if (!matched_hotkey) {
         return CallNextHookEx(keyboard_hook_, code, wparam, lparam);

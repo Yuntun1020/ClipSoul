@@ -60,8 +60,9 @@ private:
     void OnCommand(WPARAM wparam);
     HWND CurrentInputTarget() const;
     bool ConsumeSuppressedRegisteredHotkey(WPARAM hotkey_id);
-    void ReplayBufferedAltDown();
-    void ReplayBufferedAltUp();
+    // Sends the buffered Alt as a complete tap (DOWN+UP in one SendInput call) so no
+    // unpaired Alt event can be left behind in the target process.
+    void ReplayBufferedAltTap();
     LRESULT HandleKeyboardHook(int code, WPARAM wparam, LPARAM lparam);
     LRESULT HandleMessage(UINT message, WPARAM wparam, LPARAM lparam);
     static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam);
