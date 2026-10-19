@@ -1924,21 +1924,15 @@ POINT PopupWindow::ResolvePopupPosition(HWND target, SIZE size, RECT monitor, RE
         // UIA tree dump is expensive; only do it when logging.
         DebugLog(L"popup position: automation unavailable " + AutomationFocusedElementDebugInfo());
     }
-    // 所有插入符路径都失败时的兜底。以前这里直接把弹窗丢到屏幕右下角（Win+V 的位置），
-    // 在微信这种自绘输入框的程序里就会离光标非常远。现在优先贴着目标窗口走：
-    // 弹窗放在目标窗口内靠下、但整块落在窗口里的位置 —— 至少「在同一个窗口里」，
-    // 而不是跑到屏幕另一头的角落。
-    POINT fallback{};
-    if (keyboard_invocation_ && has_target_window) {
-        fallback = PopupTargetWindowFallback(target_window, size, work, dpi);
-    } else if (keyboard_invocation_) {
-        fallback = PopupKeyboardInvocationPosition(false, RECT{}, size, monitor, work, dpi);
-    } else {
-        fallback = PopupBottomRightFallback(size, work, dpi);
-    }
-    std::wstring fallback_log =
-        keyboard_invocation_ ? L"popup position: windows clipboard dock fallback pos=("
-                             : L"popup position: bottom right fallback pos=(";
+    // 所有插入符路径都失败时的兜底：屏幕右下角（Windows 自己的剪贴板面板也在那儿）。
+    //
+    // 实测：永劫无间这类 Unity + 自绘 UI 的游戏，游戏窗口的 UIA 子树里只有一个
+    // UnityWndClass 节点，不暴露任何输入框，连全局焦点元素也只是那个顶层窗口本身，
+    // 所以「跟随插入符」在这些程序里无从谈起 —— 落点必须稳定且可预期。
+    // 不跟随鼠标：鼠标停在哪和「用户正在哪儿输入」没有必然关系，在游戏里还会盖住
+    // 准星或技能栏。
+    const POINT fallback = PopupKeyboardInvocationPosition(false, RECT{}, size, monitor, work, dpi);
+    std::wstring fallback_log = L"popup position: bottom right fallback pos=(";
     fallback_log += std::to_wstring(fallback.x);
     fallback_log += L",";
     fallback_log += std::to_wstring(fallback.y);

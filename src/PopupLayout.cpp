@@ -1919,17 +1919,6 @@ POINT PopupWindowRectFallback(RECT target, SIZE size, RECT work, unsigned dpi) {
     return ClampPopupToWorkArea(anchor, size, work, dpi);
 }
 
-POINT PopupTargetWindowFallback(RECT target, SIZE size, RECT work, unsigned dpi) {
-    const int gap = ScalePopupMetricForDpi(12, dpi);
-    // 目标窗口如果比弹窗还小（或几乎一样大），就没法「放在窗口里」：
-    // 这时退回窗口右下角外侧一点，至少紧挨着它。
-    const int x_right = target.right - size.cx - gap;
-    const int y_bottom = target.bottom - size.cy - gap;
-    const int x = ClampToRange(x_right, work.left + gap, work.right - size.cx - gap);
-    const int y = ClampToRange(y_bottom, work.top + gap, work.bottom - size.cy - gap);
-    return POINT{x, y};
-}
-
 POINT PopupTargetCenterFallback(RECT target, SIZE size, RECT work, unsigned dpi) {
     const POINT anchor{
         target.left + (target.right - target.left) / 2,

@@ -2702,31 +2702,6 @@ TEST_CASE(PopupTextInputRectAcceptsMultilineChatInput) {
     REQUIRE(anchor.y < 853);
 }
 
-TEST_CASE(PopupTargetWindowFallbackStaysInsideTargetWindow) {
-    // 插入符全部定位失败时，弹窗应贴着目标窗口，而不是跑到屏幕另一头的角落。
-    const SIZE size{510, 840};
-    const RECT work{0, 0, 2560, 1528};
-    const RECT target{204, 285, 1741, 1374};
-
-    const auto position = ClipSoul::PopupTargetWindowFallback(target, size, work, 144);
-    // 完全落在目标窗口内部。
-    REQUIRE(position.x >= target.left);
-    REQUIRE(position.y >= target.top);
-    REQUIRE(position.x + size.cx <= target.right);
-    REQUIRE(position.y + size.cy <= target.bottom);
-    // 不再是屏幕右下角。
-    REQUIRE(position.x < work.right - size.cx);
-    REQUIRE(position.y < work.bottom - size.cy);
-
-    // 目标窗口比弹窗还小时不能算出窗口外的坐标，仍要夹在工作区内。
-    const RECT tiny{100, 100, 300, 300};
-    const auto clamped = ClipSoul::PopupTargetWindowFallback(tiny, size, work, 144);
-    REQUIRE(clamped.x >= work.left);
-    REQUIRE(clamped.y >= work.top);
-    REQUIRE(clamped.x + size.cx <= work.right);
-    REQUIRE(clamped.y + size.cy <= work.bottom);
-}
-
 TEST_CASE(PopupTextAvoidRectPositionPrefersAboveForTallInputField) {
     // 聊天输入框（1005x238）上方空间充足时必须贴上方，不能被 clamp 到屏幕中间。
     const SIZE size{510, 840};
@@ -2818,4 +2793,27 @@ TEST_CASE(PopupActivationAvoidsAttachThreadInputWhileModifierHeld) {
     // 因此任何有可能按住修饰键的时机都不允许借输入队列。
     REQUIRE(!ClipSoul::PopupActivationMayAttachThreadInput(true));
     REQUIRE(ClipSoul::PopupActivationMayAttachThreadInput(false));
+}
+
+TEST_CASE(PopupFallsBackToScreenBottomRight) {
+    // 拿不到文字插入符时（Unity 自绘 UI 的游戏不向 UIA 暴露任何输入框），
+    // 落点固定是屏幕右下角，不跟随鼠标、也不贴目标窗口边缘。
+    const SIZE size{510, 840};
+    const RECT monitor{0, 0, 2560, 1600};
+    const RECT work{0, 0, 2560, 1600};
+
+    const auto position = ClipSoul::PopupKeyboardInvocationPosition(false, RECT{}, size, monitor, work, 96);
+    // 靠右、靠下（贴住工作区右下角，留一点边距），且完整落在工作区内。
+    REQUIRE(position.x + size.cx <= work.right);
+    REQUIRE(position.y + size.cy <= work.bottom);
+    REQUIRE(position.x > work.right / 2);
+    // 底边距工作区底部不超过 100px：确实是「右下角」而不是屏幕中部。
+    REQUIRE(work.bottom - (position.y + size.cy) <= 100);
+
+    // 有插入符时必须跟随插入符（放在输入框上方），而不是走右下角。
+    const RECT input{499, 861, 1274, 892};
+    const auto with_caret = ClipSoul::PopupKeyboardInvocationPosition(true, input, size, monitor, work, 96);
+    REQUIRE(with_caret.x < work.right / 2);
+    // 弹窗底边贴住输入框顶部上方。
+    REQUIRE(with_caret.y + size.cy <= input.bottom);
 }
