@@ -499,10 +499,6 @@ bool PopupPaintShouldUpdateLayout();
 bool PopupShouldAnimateHoverWhileResizing(bool resizing_window);
 bool PopupShouldActivateWhenShown(bool keyboard_invocation);
 bool PopupShouldActivateForShellSurface(bool shell_surface);
-// Whether a fallback foreground activation may borrow another thread's input queue
-// (AttachThreadInput). Must be false while a modifier key is physically held: the shared input
-// queue can leave the other process believing Alt is stuck down.
-bool PopupActivationMayAttachThreadInput(bool modifier_held);
 bool PopupShowShouldActivate(bool keyboard_invocation, bool shell_surface);
 bool PopupSetWindowPosShouldUseNoActivate(bool activate_window);
 LRESULT PopupMouseActivateResult();

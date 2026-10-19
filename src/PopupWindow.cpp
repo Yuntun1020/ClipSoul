@@ -165,29 +165,17 @@ void ActivatePopupWindow(HWND hwnd) {
     if (activated) {
         return;
     }
-    // 兜底：前台锁（游戏常设）不让抢时，只有修饰键没按着才允许借输入队列，
-    // 避免又回到「Alt 卡长按」那个问题。
-    const bool modifier_held = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0 ||
-                               (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0 ||
-                               (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0 ||
-                               (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0;
-    if (!PopupActivationMayAttachThreadInput(modifier_held)) {
-        SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-        return;
-    }
-    const DWORD current_thread = GetCurrentThreadId();
-    const DWORD foreground_thread = GetWindowThreadProcessId(GetForegroundWindow(), nullptr);
-    const bool attach = foreground_thread != 0 && foreground_thread != current_thread;
-    if (attach) {
-        AttachThreadInput(current_thread, foreground_thread, TRUE);
-    }
-    BringWindowToTop(hwnd);
-    SetForegroundWindow(hwnd);
-    SetActiveWindow(hwnd);
-    SetFocus(hwnd);
-    if (attach) {
-        AttachThreadInput(current_thread, foreground_thread, FALSE);
-    }
+    // 抢不到前台也不 AttachThreadInput，绝不做。
+    //
+    // 曾经用「修饰键没按着就允许借输入队列」作为兜底，但那个判断本身就不可靠：
+    // GetAsyncKeyState 在提权窗口 / 全屏独占游戏位于前台时读不到真实按键状态（实测恒为 0），
+    // 于是判断一定会误判成「没按着」，兜底反而成了主路径。一旦 AttachThreadInput 把两个进程
+    // 的输入队列并在一起，对方进程看到的就是「Alt 按下却没抬起」—— 用户报告的正是这个：
+    // 卡住后任何键都变成 Alt+键，只有再按一次 Alt 才解开。
+    //
+    // 目标窗口拒不交还前台时，弹窗仍然以 TOPMOST 显示在它上面（用户已经能正常看到并操作），
+    // 损失的只是「弹窗拿到焦点」这一件事，由 SetWindowPos + 无激活显示兜住。
+    SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
 
 CreateWindowInBandProc ResolveCreateWindowInBand() {
